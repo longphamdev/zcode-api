@@ -1,20 +1,34 @@
 /**
- * Aliyun Captcha V3 headless solver for start-plan tier.
+ * Aliyun Captcha V3 headless solver via jsdom.
  *
- * Captcha config (prefix/sceneId/region) is auto-fetched from
- * https://zcode.z.ai/api/v1/client/configs — no user configuration needed.
+ * Uses the local AliyunCaptcha.js SDK (bundled from _reverse/) in a jsdom
+ * fake DOM. No browser binary needed — the SDK only uses document/window/
+ * XMLHttpRequest, all of which jsdom provides natively.
  *
- * When zcode.z.ai returns a captcha challenge (response header
- * `x-aliyun-captcha-verify-param`), this module solves it headlessly via
- * Playwright + the official AliyunCaptcha.js SDK, then returns the solved token.
+ * Token lifecycle: solved via traceless verification (no UI), cached ~45s,
+ * sent on every start-plan request as x-aliyun-captcha-verify-param +
+ * x-aliyun-captcha-verify-region. On 403 — re-solve and retry.
  *
  * @see _reverse/zcode.cjs `o5r()` / `createZcodePlanCaptchaEmptyStreamBusinessError`
+ * @see _reverse/AliyunCaptcha.js (local SDK, 219KB)
  */
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const CAPTCHA_HEADER = "x-aliyun-captcha-verify-param";
 const REGION_HEADER = "x-aliyun-captcha-verify-region";
-const ALIYUN_CAPTCHA_SDK_URL = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
 const CONFIGS_API = "https://zcode.z.ai/api/v1/client/configs";
+const TOKEN_TTL_MS = 45_000;
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+let sdkCache: string | null = null;
+function loadSdkSource(): string {
+  if (sdkCache) return sdkCache;
+  sdkCache = readFileSync(join(__dirname, "AliyunCaptcha.js"), "utf-8");
+  return sdkCache;
+}
 
 interface FetchedCaptchaConfig {
   enabled: boolean;
@@ -24,6 +38,7 @@ interface FetchedCaptchaConfig {
 }
 
 let cachedConfig: { value: FetchedCaptchaConfig | null; expiresAt: number } = { value: null, expiresAt: 0 };
+let cachedToken: { verifyParam: string; region: string; expiresAt: number } | null = null;
 
 export function detectCaptchaChallenge(resp: Response): string | null {
   const v = resp.headers.get(CAPTCHA_HEADER);
@@ -49,116 +64,95 @@ async function fetchCaptchaConfig(): Promise<FetchedCaptchaConfig | null> {
 }
 
 /**
- * Solve an Aliyun captcha challenge headlessly.
- *
- * Fetches captcha config from ZCode API, launches Chromium, loads
- * AliyunCaptcha.js, and waits for the SDK success callback.
- *
- * @returns Object with verifyParam and region for the retry request headers
- * @throws Error if config unavailable, Playwright missing, or solve times out
+ * Get a valid captcha token, solving if needed. Cached for ~45s per Aliyun spec.
  */
-export async function solveCaptcha(challenge: string): Promise<{ verifyParam: string; region: string }> {
+export async function getCaptchaToken(): Promise<{ verifyParam: string; region: string }> {
+  if (cachedToken && cachedToken.expiresAt > Date.now()) {
+    return { verifyParam: cachedToken.verifyParam, region: cachedToken.region };
+  }
+
   const cfg = await fetchCaptchaConfig();
   if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) {
     throw new Error("Captcha config unavailable from ZCode API");
   }
 
-  const playwright = await loadPlaywright();
-  const browser = await playwright.chromium.launch({ headless: true });
-  try {
-    const page = await browser.newPage();
-    await page.setContent(buildSolverHtml(cfg), { waitUntil: "domcontentloaded" });
-    await page.addScriptTag({ url: ALIYUN_CAPTCHA_SDK_URL });
+  const verifyParam = await solveInJsdom(cfg);
+  cachedToken = { verifyParam, region: cfg.region, expiresAt: Date.now() + TOKEN_TTL_MS };
+  return { verifyParam, region: cfg.region };
+}
 
-    const verifyParam = await page.evaluate(
-      (args: { prefix: string; sceneId: string; region: string }): Promise<string> => {
-        const { prefix, sceneId, region } = args;
-        return new Promise<string>((resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error("captcha solve timeout after 30s")), 30000);
-          const w = window as unknown as {
-            AliyunCaptchaConfig?: { region: string; prefix: string };
-            initAliyunCaptcha?: (opts: Record<string, unknown>) => void;
-          };
-          w.AliyunCaptchaConfig = { region, prefix };
-          if (!w.initAliyunCaptcha) {
-            clearTimeout(timeout);
-            reject(new Error("AliyunCaptcha.js failed to load"));
-            return;
-          }
-          w.initAliyunCaptcha({
-            SceneId: sceneId,
-            prefix,
-            mode: "popup",
-            language: "cn",
-            showErrorTip: false,
-            element: "#captcha-element",
-            button: "#captcha-button",
-            getInstance: () => {},
-            success: (param: string) => {
-              clearTimeout(timeout);
-              resolve(param);
-            },
-            fail: (err: unknown) => {
-              clearTimeout(timeout);
-              reject(new Error(`Aliyun SDK fail: ${JSON.stringify(err)}`));
-            },
-            onError: (err: unknown) => {
-              clearTimeout(timeout);
-              reject(new Error(`Aliyun SDK error: ${JSON.stringify(err)}`));
-            },
-          });
-        });
+async function solveInJsdom(cfg: FetchedCaptchaConfig): Promise<string> {
+  const { JSDOM } = await loadJsdom();
+  const sdkSource = loadSdkSource();
+
+  const dom = new JSDOM(
+    `<!DOCTYPE html><html><head></head><body><div id="captcha-element"></div><button id="captcha-button">verify</button></body></html>`,
+    {
+      url: "https://zcode.z.ai/",
+      runScripts: "outside-only",
+      resources: "usable",
+      pretendToBeVisual: true,
+    },
+  );
+
+  const w = dom.window as unknown as {
+    AliyunCaptchaConfig?: { region: string; prefix: string };
+    initAliyunCaptcha?: (opts: Record<string, unknown>) => Promise<unknown> | unknown;
+    eval?: (code: string) => void;
+  };
+
+  w.AliyunCaptchaConfig = { region: cfg.region, prefix: cfg.prefix };
+
+  const scriptEl = dom.window.document.createElement("script");
+  scriptEl.textContent = sdkSource;
+  dom.window.document.head.appendChild(scriptEl);
+
+  if (typeof w.initAliyunCaptcha !== "function") {
+    throw new Error("AliyunCaptcha.js failed to expose initAliyunCaptcha in jsdom");
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("captcha solve timeout after 30s"));
+    }, 30000);
+
+    w.initAliyunCaptcha!({
+      SceneId: cfg.sceneId,
+      prefix: cfg.prefix,
+      mode: "popup",
+      language: "cn",
+      showErrorTip: false,
+      element: "#captcha-element",
+      button: "#captcha-button",
+      getInstance: () => {},
+      success: (param: string) => {
+        clearTimeout(timeout);
+        resolve(param);
       },
-      { prefix: cfg.prefix, sceneId: cfg.sceneId, region: cfg.region },
-    );
+      fail: (err: unknown) => {
+        clearTimeout(timeout);
+        reject(new Error(`Aliyun SDK fail: ${JSON.stringify(err)}`));
+      },
+      onError: (err: unknown) => {
+        clearTimeout(timeout);
+        reject(new Error(`Aliyun SDK error: ${JSON.stringify(err)}`));
+      },
+    });
+  });
+}
 
-    void challenge;
-    return { verifyParam, region: cfg.region };
-  } finally {
-    await browser.close();
+async function loadJsdom(): Promise<{ JSDOM: typeof import("jsdom").JSDOM }> {
+  try {
+    return await import("jsdom");
+  } catch {
+    throw new Error(
+      "jsdom is not installed. Install with: bun add jsdom",
+    );
   }
 }
 
-function buildSolverHtml(cfg: FetchedCaptchaConfig): string {
-  return `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>captcha-solver</title>
-<script>window.AliyunCaptchaConfig = { region: "${cfg.region}", prefix: "${cfg.prefix}" };</script>
-</head>
-<body>
-<div id="captcha-element"></div>
-<button id="captcha-button">verify</button>
-</body>
-</html>`;
+export function invalidateCaptchaToken(): void {
+  cachedToken = null;
 }
 
 export const RETRY_HEADERS = { PARAM: CAPTCHA_HEADER, REGION: REGION_HEADER };
-
-async function loadPlaywright(): Promise<PlaywrightModule> {
-  const moduleName = "playwright";
-  try {
-    const mod = await import(/* @vite-ignore */ moduleName);
-    return mod as unknown as PlaywrightModule;
-  } catch {
-    throw new Error(
-      "playwright is not installed. Install with: bun add -d playwright && bunx playwright install chromium",
-    );
-  }
-}
-
-interface PlaywrightModule {
-  chromium: {
-    launch(opts: { headless: boolean }): Promise<PlaywrightBrowser>;
-  };
-}
-
-interface PlaywrightBrowser {
-  newPage(): Promise<PlaywrightPage>;
-  close(): Promise<void>;
-}
-
-interface PlaywrightPage {
-  setContent(html: string, opts: { waitUntil: string }): Promise<void>;
-  addScriptTag(opts: { url: string }): Promise<void>;
-  evaluate<T>(fn: (args: { prefix: string; sceneId: string; region: string }) => Promise<T>, args: { prefix: string; sceneId: string; region: string }): Promise<T>;
-}
