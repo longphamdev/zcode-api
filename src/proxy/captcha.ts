@@ -8,7 +8,15 @@
  * callback are propagated rather than silently swallowed (a swallowed error
  * there means `success`/`fail` never fires and we hang until the outer
  * timeout rejects).
+ *
+ * Static `import { JSDOM, VirtualConsole } from "jsdom"` (not dynamic) —
+ * dynamic `await import("jsdom")` returns a namespace `{ default: {...} }`
+ * for the CJS package under `bun build --compile`, leaving the named exports
+ * undefined. Static import lets Bun's bundler fully inline jsdom (including
+ * its internal `xhr-sync-worker.js` via `require.resolve`) into the binary,
+ * so the compiled exe has zero runtime dependency on node_modules.
  */
+import { JSDOM, VirtualConsole } from "jsdom";
 import ALIYUN_SDK_LOCAL from "./AliyunCaptcha.js.txt" with { type: "text" };
 
 const CAPTCHA_HEADER = "x-aliyun-captcha-verify-param";
@@ -69,7 +77,6 @@ async function solveInJsdomWithRetry(cfg: FetchedCaptchaConfig): Promise<string>
 }
 
 async function solveInJsdom(cfg: FetchedCaptchaConfig): Promise<string> {
-  const { JSDOM, VirtualConsole } = await import("jsdom");
   const vc = new VirtualConsole();
   const sdkSafe = ALIYUN_SDK_LOCAL.replace(/<\/script>/gi, "<\\/script>");
   const html = `<!DOCTYPE html><html><head></head><body><div id="captcha-element"></div><button id="captcha-button"></button><script>${sdkSafe}</script></body></html>`;

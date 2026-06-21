@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "build": "bun build --compile --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy.exe"
   },
   "dependencies": {
     "yaml": "^2.5.0",
