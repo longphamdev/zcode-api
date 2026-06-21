@@ -1,15 +1,28 @@
 /**
  * Aliyun Captcha V3 solver — in-process jsdom (single binary).
+ *
+ * The AliyunCaptcha.js SDK is bundled as a text import (no runtime dependency
+ * on the alicdn CDN — the CDN is the #1 source of solve failures in restricted
+ * networks, and a local file path would break under `bun build --compile`).
+ * Solve attempts are retried, and errors from the SDK's `getInstance`
+ * callback are propagated rather than silently swallowed (a swallowed error
+ * there means `success`/`fail` never fires and we hang until the outer
+ * timeout rejects).
  */
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import ALIYUN_SDK_LOCAL from "./AliyunCaptcha.js.txt" with { type: "text" };
 
 const CAPTCHA_HEADER = "x-aliyun-captcha-verify-param";
 const REGION_HEADER = "x-aliyun-captcha-verify-region";
 const CONFIGS_API = "https://zcode.z.ai/api/v1/client/configs";
 const TOKEN_TTL_MS = 45_000;
-const ALIYUN_SDK_CDN = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
 const FAKE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+/** How many times to retry a single captcha solve. Overridable via env. */
+const SOLVE_RETRIES = Number(process.env.ZCODE_CAPTCHA_RETRIES || 3);
+/** Per-attempt solve timeout (ms). Overridable via env. */
+const SOLVE_TIMEOUT_MS = Number(process.env.ZCODE_CAPTCHA_TIMEOUT_MS || 40_000);
+/** Timeout (ms) waiting for the SDK to expose `initAliyunCaptcha`. */
+const SDK_LOAD_TIMEOUT_MS = Number(process.env.ZCODE_CAPTCHA_SDK_LOAD_MS || 20_000);
 
 interface FetchedCaptchaConfig { enabled: boolean; prefix: string; sceneId: string; region: string; }
 let cachedConfig: { value: FetchedCaptchaConfig | null; expiresAt: number } = { value: null, expiresAt: 0 };
@@ -37,33 +50,67 @@ export async function getCaptchaToken(): Promise<{ verifyParam: string; region: 
   if (cachedToken && cachedToken.expiresAt > Date.now()) return { verifyParam: cachedToken.verifyParam, region: cachedToken.region };
   const cfg = await fetchCaptchaConfig();
   if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) throw new Error("Captcha config unavailable");
-  const verifyParam = await solveInJsdom(cfg);
+  const verifyParam = await solveInJsdomWithRetry(cfg);
   cachedToken = { verifyParam, region: cfg.region, expiresAt: Date.now() + TOKEN_TTL_MS };
   return { verifyParam, region: cfg.region };
+}
+
+async function solveInJsdomWithRetry(cfg: FetchedCaptchaConfig): Promise<string> {
+  let lastErr: Error | null = null;
+  for (let attempt = 1; attempt <= SOLVE_RETRIES; attempt++) {
+    try {
+      return await solveInJsdom(cfg);
+    } catch (err) {
+      lastErr = err as Error;
+      console.error(`[captcha] solve attempt ${attempt}/${SOLVE_RETRIES} failed: ${lastErr.message}`);
+    }
+  }
+  throw new Error(`captcha solve failed after ${SOLVE_RETRIES} attempts: ${lastErr?.message ?? "unknown"}`);
 }
 
 async function solveInJsdom(cfg: FetchedCaptchaConfig): Promise<string> {
   const { JSDOM, VirtualConsole } = await import("jsdom");
   const vc = new VirtualConsole();
-  const html = `<!DOCTYPE html><html><head></head><body><div id="captcha-element"></div><button id="captcha-button"></button><script src="${ALIYUN_SDK_CDN}"></script></body></html>`;
+  const sdkSafe = ALIYUN_SDK_LOCAL.replace(/<\/script>/gi, "<\\/script>");
+  const html = `<!DOCTYPE html><html><head></head><body><div id="captcha-element"></div><button id="captcha-button"></button><script>${sdkSafe}</script></body></html>`;
   const dom = new JSDOM(html, {
     url: "https://zcode.z.ai/", runScripts: "dangerously", resources: "usable",
     pretendToBeVisual: true, virtualConsole: vc,
     beforeParse(window: any) { applyPolyfills(window); window.AliyunCaptchaConfig = { region: cfg.region, prefix: cfg.prefix }; },
   });
   const w = dom.window as any;
-  await waitFor(() => typeof w.initAliyunCaptcha === "function", 15000);
-  return new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("captcha solve timeout after 30s")), 30000);
-    w.initAliyunCaptcha({
-      SceneId: cfg.sceneId, mode: "popup", region: cfg.region, prefix: cfg.prefix, language: "en",
-      element: "#captcha-element", button: "#captcha-button", captchaLogoImg: "", showErrorTip: false,
-      getInstance: (inst: any) => { try { (inst.startTracelessVerification || inst.show)?.call(inst); } catch {} },
-      success: (param: string) => { clearTimeout(timeout); resolve(param); },
-      fail: (err: unknown) => { clearTimeout(timeout); reject(new Error(`SDK fail: ${JSON.stringify(err)}`)); },
-      onError: (err: unknown) => { clearTimeout(timeout); reject(new Error(`SDK error: ${JSON.stringify(err)}`)); },
+  try {
+    await waitFor(() => typeof w.initAliyunCaptcha === "function", SDK_LOAD_TIMEOUT_MS);
+    return await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error(`captcha solve timeout after ${SOLVE_TIMEOUT_MS}ms`)),
+        SOLVE_TIMEOUT_MS,
+      );
+      w.initAliyunCaptcha({
+        SceneId: cfg.sceneId, mode: "popup", region: cfg.region, prefix: cfg.prefix, language: "en",
+        element: "#captcha-element", button: "#captcha-button", captchaLogoImg: "", showErrorTip: false,
+        getInstance: (inst: any) => {
+          const fn = inst.startTracelessVerification || inst.show;
+          if (typeof fn !== "function") {
+            clearTimeout(timeout);
+            reject(new Error("Aliyun SDK instance has no startTracelessVerification or show method"));
+            return;
+          }
+          try {
+            fn.call(inst);
+          } catch (err) {
+            clearTimeout(timeout);
+            reject(new Error(`Aliyun SDK startTracelessVerification threw: ${(err as Error).message}`));
+          }
+        },
+        success: (param: string) => { clearTimeout(timeout); resolve(param); },
+        fail: (err: unknown) => { clearTimeout(timeout); reject(new Error(`SDK fail: ${JSON.stringify(err)}`)); },
+        onError: (err: unknown) => { clearTimeout(timeout); reject(new Error(`SDK error: ${JSON.stringify(err)}`)); },
+      });
     });
-  });
+  } finally {
+    try { w.close(); } catch {}
+  }
 }
 
 function waitFor(cond: () => boolean, ms: number): Promise<void> {
