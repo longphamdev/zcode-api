@@ -13,7 +13,6 @@ import { buildIdentityHeaders } from "./identity.js";
 const ANTHROPIC_VERSION = "2023-06-01";
 
 const STARTPLAN_ANTHROPIC_BASE = "https://zcode.z.ai/api/v1/zcode-plan/anthropic";
-const STARTPLAN_OPENAI_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
 
 const STRIP_HEADERS = new Set([
   "host",
@@ -33,10 +32,7 @@ const STRIP_HEADERS = new Set([
 
 export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "coding-plan" | "start-plan" = "coding-plan"): string {
   if (plan === "start-plan") {
-    if (format === "anthropic") {
-      return `${STARTPLAN_ANTHROPIC_BASE}/v1/messages`;
-    }
-    return `${STARTPLAN_OPENAI_BASE}/chat/completions`;
+    return `${STARTPLAN_ANTHROPIC_BASE}/v1/messages`;
   }
   if (format === "anthropic") {
     return `${provider.anthropicBaseURL}/v1/messages`;
@@ -55,7 +51,11 @@ export function buildAuthHeaders(format: Format, cred: Credential, identity: Pro
   };
 
   if (format === "anthropic") {
-    base["x-api-key"] = credStr;
+    if (plan === "start-plan" && cred.jwt) {
+      base["authorization"] = `Bearer ${cred.jwt}`;
+    } else {
+      base["x-api-key"] = credStr;
+    }
     base["anthropic-version"] = ANTHROPIC_VERSION;
   } else {
     base["authorization"] = `Bearer ${credStr}`;
@@ -84,6 +84,7 @@ export function buildUpstreamRequest(
   body: string | undefined,
   identity: ProxyIdentity,
   plan: "coding-plan" | "start-plan" = "coding-plan",
+  extraHeaders?: Record<string, string>,
 ): Request {
   const url = buildUpstreamURL(format, provider, plan);
   const authHeaders = buildAuthHeaders(format, cred, identity, plan);
@@ -94,6 +95,7 @@ export function buildUpstreamRequest(
     "accept-encoding": "gzip",
     ...passthrough,
     ...authHeaders,
+    ...extraHeaders,
   };
 
   const init: RequestInit = {

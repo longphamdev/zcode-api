@@ -18,11 +18,14 @@
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
+import { buildStartPlanSystem } from "./system-prompt.js";
 
 export interface TransformContext {
   format: Format;
   /** When set (OAuth mode), the Anthropic-format body gets `metadata.user_id` injected. */
   userId?: string;
+  /** When true (start-plan), prepend ZCode gateway system blocks. */
+  startPlan?: boolean;
 }
 
 /**
@@ -47,6 +50,9 @@ export function transformRequestBody(body: string | undefined, ctx: TransformCon
   }
   if (ctx.format === "anthropic") {
     const obj = parsed as Record<string, unknown>;
+    if (ctx.startPlan) {
+      modified = applyStartPlanSystem(obj) || modified;
+    }
     modified = applyAnthropicCacheControl(obj) || modified;
     if (ctx.userId) {
       modified = applyAnthropicUserId(obj, ctx.userId) || modified;
@@ -116,5 +122,14 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
     ...(isPlainObject(existing) ? existing : {}),
     user_id: userId,
   };
+  return true;
+}
+
+/**
+ * start-plan: prepend ZCode gateway system blocks. The gateway rejects
+ * requests without these identity blocks with 3012 "method not allowed".
+ */
+function applyStartPlanSystem(body: Record<string, unknown>): boolean {
+  body.system = buildStartPlanSystem(body.system);
   return true;
 }
