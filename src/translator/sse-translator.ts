@@ -95,6 +95,7 @@ export function anthropicSseToOpenaiSse(
   return new ReadableStream({
     async start(controller) {
       const reader = upstream.getReader();
+      let errored = false;
 
       try {
         while (true) {
@@ -128,9 +129,13 @@ export function anthropicSseToOpenaiSse(
         // Emit [DONE]
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       } catch (err) {
-        controller.error(err);
+        errored = true;
+        // error()/close() 互斥:errored 流上再 close() 会抛 TypeError,进而触发 Bun 引擎空指针崩溃。
+        try { controller.error(err); } catch {}
       } finally {
-        controller.close();
+        if (!errored) {
+          try { controller.close(); } catch {}
+        }
         reader.releaseLock();
       }
     },
@@ -232,6 +237,7 @@ export function openaiSseToAnthropicSse(
   return new ReadableStream({
     async start(controller) {
       const reader = upstream.getReader();
+      let errored = false;
 
       try {
         while (true) {
@@ -306,9 +312,13 @@ export function openaiSseToAnthropicSse(
           }
         }
       } catch (err) {
-        controller.error(err);
+        errored = true;
+        // error()/close() 互斥:errored 流上再 close() 会抛 TypeError,进而触发 Bun 引擎空指针崩溃。
+        try { controller.error(err); } catch {}
       } finally {
-        controller.close();
+        if (!errored) {
+          try { controller.close(); } catch {}
+        }
         reader.releaseLock();
       }
     },
