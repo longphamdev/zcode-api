@@ -58,9 +58,12 @@ export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "c
 /**
  * Build auth + identity + trace headers for the upstream request.
  *
- * The `format` parameter is the *upstream* format — selects auth scheme
- * (`x-api-key` + `anthropic-version` for Anthropic upstream, `Authorization:
- * Bearer` for OpenAI upstream). See module header for translation semantics.
+ * The `format` parameter is the *upstream* format — selects auth scheme:
+ * - Anthropic upstream, coding-plan → `x-api-key: {cred}` + `anthropic-version`
+ * - Anthropic upstream, start-plan  → `Authorization: Bearer {jwt}` + `anthropic-version`
+ * - OpenAI upstream (coding-plan)   → `Authorization: Bearer {cred}`
+ *
+ * See module header for translation semantics.
  */
 export function buildAuthHeaders(format: Format, cred: Credential, identity: ProxyIdentity, plan: "coding-plan" | "start-plan" = "coding-plan"): Record<string, string> {
   const credStr = plan === "start-plan" && cred.jwt ? cred.jwt : credentialString(cred);

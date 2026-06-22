@@ -3,8 +3,8 @@ server:
   host: "0.0.0.0"
 
 auth:
-  # "apikey" = use a pre-obtained API key directly
-  # "oauth"  = use OAuth login flow (run `bun run src/cli/login.ts` first)
+  # "apikey"  = use a pre-obtained API key directly
+  # "oauth"   = use OAuth login flow (run `bun run src/index.ts auth login` first)
   mode: apikey
 
   # For apikey mode:

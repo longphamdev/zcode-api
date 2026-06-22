@@ -7,7 +7,7 @@ import { createApiKeyCredential } from "./apikey.js";
 import type { ProviderId } from "../provider/types.js";
 
 /** Options for constructing an `AuthManager`. */
-export interface AuthManagerOptions {
+interface AuthManagerOptions {
   mode: AuthMode;
   provider: ProviderId;
   /** Raw credential string for apikey mode (`{apiKey}` or `{apiKey}.{secret}`). */

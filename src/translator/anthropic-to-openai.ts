@@ -10,7 +10,6 @@ import type {
   AnthropicMessagesResponse,
   AnthropicMessage,
   AnthropicContentBlock,
-  OpenAIChoice,
 } from "./types.js";
 
 /** Translate an Anthropic messages request into an OpenAI chat request. */

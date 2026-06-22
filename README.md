@@ -129,9 +129,14 @@ curl http://localhost:8080/v1/models \
 | `auth.apiKey` | `ZCODE_API_KEY` | — | Upstream API key |
 | `auth.proxyApiKey` | `ZCODE_PROXY_API_KEY` | — | Client auth key |
 | `provider` | `ZCODE_PROVIDER` | `zai` | Upstream provider |
+| `plan` | — | `coding-plan` | Plan tier: `coding-plan` (direct upstream) or `start-plan` (zcode.z.ai gateway + JWT + captcha) |
+| `providers.<p>.credential` | — | — | Per-provider credential override (else uses `auth.apiKey`) |
 | `identity.appVersion` | `ZCODE_APP_VERSION` | `3.1.1` | `User-Agent: ZCode/{version}` |
 | `identity.sourceTitle` | `ZCODE_SOURCE_TITLE` | `cli` | `X-Title: Z Code@{title}` |
 | `identity.refererOrigin` | `ZCODE_REFERER_ORIGIN` | `https://zcode.z.ai` | `HTTP-Referer` URL |
+| config file path | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file to load on `serve` |
+
+Start-plan captcha tunables (env only): `ZCODE_CAPTCHA_RETRIES`, `ZCODE_CAPTCHA_TIMEOUT_MS`, `ZCODE_CAPTCHA_SDK_LOAD_MS`.
 
 ## Architecture
 
@@ -190,6 +195,9 @@ bun x tsc --noEmit
 
 # Run in dev mode
 bun run src/index.ts config.yaml
+
+# Compile a single-file binary (→ zcode-proxy.exe, gitignored)
+bun run build
 ```
 
 ## Available Models

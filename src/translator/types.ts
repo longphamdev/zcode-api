@@ -12,29 +12,12 @@
 /** API format identifier. */
 export type Format = "openai" | "anthropic";
 
-/** Token usage statistics. */
-export interface Usage {
-  promptTokens?: number;
-  completionTokens?: number;
-  totalTokens?: number;
-  /** Anthropic-native names. */
-  inputTokens?: number;
-  outputTokens?: number;
-}
-
-/** Function/tool definition (shared shape). */
-export interface ToolDefinition {
-  name: string;
-  description?: string;
-  parameters?: Record<string, unknown>; // JSON Schema
-}
-
 // ─────────────────────────────────────────────
 // OpenAI types
 // ─────────────────────────────────────────────
 
 /** OpenAI message role. */
-export type OpenAIRole = "system" | "user" | "assistant" | "tool";
+type OpenAIRole = "system" | "user" | "assistant" | "tool";
 
 /** OpenAI message in a chat completion request. */
 export interface OpenAIMessage {
@@ -46,14 +29,14 @@ export interface OpenAIMessage {
 }
 
 /** Multi-modal content part (OpenAI format). */
-export interface OpenAIContentPart {
+interface OpenAIContentPart {
   type: "text" | "image_url";
   text?: string;
   image_url?: { url: string; detail?: string };
 }
 
 /** Tool call in an assistant message. */
-export interface OpenAIToolCall {
+interface OpenAIToolCall {
   id: string;
   type: "function";
   function: { name: string; arguments: string };
@@ -104,7 +87,7 @@ export interface OpenAIChatResponse {
 }
 
 /** Choice in a non-streaming response. */
-export interface OpenAIChoice {
+interface OpenAIChoice {
   index: number;
   message: {
     role: "assistant";
@@ -124,7 +107,7 @@ export interface OpenAIStreamChunk {
 }
 
 /** Choice in a streaming chunk. */
-export interface OpenAIStreamChoice {
+interface OpenAIStreamChoice {
   index: number;
   delta: {
     role?: "assistant";
@@ -135,7 +118,7 @@ export interface OpenAIStreamChoice {
 }
 
 /** /v1/models list entry. */
-export interface OpenAIModel {
+interface OpenAIModel {
   id: string;
   object: "model";
   created?: number;

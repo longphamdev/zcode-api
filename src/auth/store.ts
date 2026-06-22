@@ -6,7 +6,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { Credential } from "./types.js";
-import type { ProviderId } from "../provider/types.js";
 
 const STORE_DIR = join(homedir(), ".zcode-proxy");
 const STORE_FILE = join(STORE_DIR, "credentials.json");

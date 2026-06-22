@@ -31,9 +31,13 @@ export interface ProxyHandlerOptions {
 /**
  * Forward a client request to the upstream provider with injected auth.
  *
- * Uses `decompress: false` on the upstream fetch so compressed response bodies
- * (gzip/deflate/br) pass through untouched — the raw bytes and Content-Encoding
- * header are forwarded as-is, letting the client handle decompression.
+ * Upstream fetch options differ by mode:
+ * - **Passthrough** (Anthropic client): `{ decompress: false }` — compressed
+ *   response bodies (gzip/deflate/br) pass through untouched; raw bytes and the
+ *   Content-Encoding header are forwarded as-is, letting the client decompress.
+ * - **Translation** (OpenAI client): no options — Bun decompresses so the proxy
+ *   can read the body and translate Anthropic→OpenAI (then re-gzip if the client
+ *   accepts).
  *
  * No upstream timeout is applied — matches ZCode desktop client behaviour
  * (the bundle has no automatic timer on LLM calls, only user-initiated abort).
@@ -87,7 +91,7 @@ export async function proxyRequest(
   let captchaHeaders: Record<string, string> | undefined;
   if (config.plan === "start-plan") {
     try {
-      const token = await getCaptchaToken();
+      const token = await getCaptchaToken(config.identity.appVersion);
       captchaHeaders = { [RETRY_HEADERS.PARAM]: token.verifyParam, [RETRY_HEADERS.REGION]: token.region };
     } catch {
       // Will solve on 403 fallback below
@@ -116,7 +120,7 @@ export async function proxyRequest(
     console.log(`${reqId} captcha challenge, re-solving...`);
     invalidateCaptchaToken();
     try {
-      const fresh = await getCaptchaToken();
+      const fresh = await getCaptchaToken(config.identity.appVersion);
       console.log(`${reqId} captcha re-solved (token ${fresh.verifyParam.length} chars), retrying...`);
       upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, {
         [RETRY_HEADERS.PARAM]: fresh.verifyParam,

@@ -7,12 +7,15 @@
  * Transformations applied:
  *   1. OpenAI + `stream: true` → inject `stream_options.include_usage: true`
  *      (matches `@ai-sdk/openai-compatible` default in `_reverse/zcode.cjs`).
- *   2. Anthropic format → add `cache_control: { type: "ephemeral" }` to the
+ *   2. Anthropic + `ctx.startPlan` → prepend ZCode gateway system blocks
+ *      (`buildStartPlanSystem`). The zcode.z.ai gateway rejects without them
+ *      (3012 "method not allowed"). See `system-prompt.ts` + `zcode_system.json`.
+ *   3. Anthropic format → add `cache_control: { type: "ephemeral" }` to the
  *      last non-system message (mirrors `HLr` ("finalizeLatestNonSystemCacheControl")
  *      at offset ~636888 in the bundle). Anthropic's API silently ignores
  *      `cache_control` below the per-model token floor, so unconditional add
  *      is safe and matches ZCode's `applyCacheControl: true` default.
- *   3. Anthropic format + `ctx.userId` set → inject `metadata: { user_id }`.
+ *   4. Anthropic format + `ctx.userId` set → inject `metadata: { user_id }`.
  *      Mirrors `user_id: B.metadata.userId` at bundle offset ~4760586.
  *
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
@@ -20,7 +23,7 @@
 import type { Format } from "../translator/types.js";
 import { buildStartPlanSystem } from "./system-prompt.js";
 
-export interface TransformContext {
+interface TransformContext {
   format: Format;
   /** When set (OAuth mode), the Anthropic-format body gets `metadata.user_id` injected. */
   userId?: string;

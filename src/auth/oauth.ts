@@ -29,7 +29,7 @@ export interface OAuthInitResponse {
   pollIntervalSec: number;
 }
 
-export interface OAuthResult {
+interface OAuthResult {
   accessToken: string;
   provider: ProviderId;
   /** Upstream user identifier, when the OAuth response included one. Passed through to `metadata.user_id` on Anthropic-format requests. */

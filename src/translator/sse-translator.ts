@@ -5,9 +5,6 @@
  */
 import type { AnthropicStreamEvent, OpenAIStreamChunk } from "./types.js";
 
-const ANTHROPIC_SSE_PREFIX = "event: ";
-const SSE_DATA_PREFIX = "data: ";
-
 /** Parse a raw SSE chunk string into event type + JSON data. */
 interface ParsedSSE {
   event: string;

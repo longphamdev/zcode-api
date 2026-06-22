@@ -19,7 +19,7 @@ interface SystemBlock {
   cache_control?: { type: "ephemeral" };
 }
 
-export const ZCODE_SYSTEM_BLOCKS = blocks as SystemBlock[];
+const ZCODE_SYSTEM_BLOCKS = blocks as SystemBlock[];
 
 /**
  * Prepend official ZCode gateway blocks to the request's `system` field.

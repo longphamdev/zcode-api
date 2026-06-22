@@ -7,13 +7,13 @@
  * bundle: we read resolved values from `ProxyIdentity` (env/YAML already merged
  * by the config loader) instead of `e[art]`/`t.appVersion`, and we always emit
  * `X-ZCode-App-Version` rather than gating on truthiness — the loader guarantees
- * a printable-ASCII value or the literal `"unknown"`.
+ * a printable-ASCII value or the default (`3.1.1`, the current ZCode release).
  *
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { ProxyIdentity } from "../config/types.js";
 
-export interface IdentityHeaders {
+interface IdentityHeaders {
   "User-Agent": string;
   "X-ZCode-App-Version": string;
   "X-Title": string;

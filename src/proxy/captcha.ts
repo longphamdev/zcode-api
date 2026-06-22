@@ -43,10 +43,10 @@ export function detectCaptchaChallenge(resp: Response): string | null {
 
 export function invalidateCaptchaToken(): void { cachedToken = null; }
 
-async function fetchCaptchaConfig(): Promise<FetchedCaptchaConfig | null> {
+async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaConfig | null> {
   if (cachedConfig.value && cachedConfig.expiresAt > Date.now()) return cachedConfig.value;
   try {
-    const resp = await fetch(`${CONFIGS_API}?app_version=3.1.1&platform=win32-x64`);
+    const resp = await fetch(`${CONFIGS_API}?app_version=${encodeURIComponent(appVersion)}&platform=win32-x64`);
     const json = (await resp.json()) as { data?: { configs?: { captcha?: FetchedCaptchaConfig } } };
     const cfg = json?.data?.configs?.captcha ?? null;
     cachedConfig = { value: cfg, expiresAt: Date.now() + 60000 };
@@ -54,9 +54,9 @@ async function fetchCaptchaConfig(): Promise<FetchedCaptchaConfig | null> {
   } catch { return null; }
 }
 
-export async function getCaptchaToken(): Promise<{ verifyParam: string; region: string }> {
+export async function getCaptchaToken(appVersion: string): Promise<{ verifyParam: string; region: string }> {
   if (cachedToken && cachedToken.expiresAt > Date.now()) return { verifyParam: cachedToken.verifyParam, region: cachedToken.region };
-  const cfg = await fetchCaptchaConfig();
+  const cfg = await fetchCaptchaConfig(appVersion);
   if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) throw new Error("Captcha config unavailable");
   const verifyParam = await solveInJsdomWithRetry(cfg);
   cachedToken = { verifyParam, region: cfg.region, expiresAt: Date.now() + TOKEN_TTL_MS };

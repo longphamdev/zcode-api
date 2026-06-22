@@ -8,7 +8,7 @@ import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
 import { errorResponse } from "../proxy/handler.js";
 
-export interface ServerOptions {
+interface ServerOptions {
   config: ProxyConfig;
   auth: AuthManager;
   /** Override fetch for testing. */

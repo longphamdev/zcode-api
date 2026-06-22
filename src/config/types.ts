@@ -14,7 +14,7 @@ export interface ProviderEndpoints {
 }
 
 /** Auth section of the proxy configuration. */
-export interface AuthConfig {
+interface AuthConfig {
   /**
    * Key that clients must provide to use the proxy (via `Authorization: Bearer {proxyApiKey}`).
    * If unset, the proxy does not require client auth.
