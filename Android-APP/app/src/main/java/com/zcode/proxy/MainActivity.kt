@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -50,6 +51,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -141,6 +143,38 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
     val minuteBuckets = remember { mutableStateListOf<Pair<Long, Int>>() }
     var toast by remember { mutableStateOf<String?>(null) }
     var tab by rememberSaveable { mutableStateOf(0) }
+
+    // 更新检查（GitHub Releases）：每次启动自动查一次，设置页可手动触发
+    val currentVersion = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()
+    }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var updateChecking by remember { mutableStateOf(false) }
+    var updateCheckFailed by remember { mutableStateOf(false) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
+    var skippedTag by remember { mutableStateOf(UpdatePrefs.loadSkipped(context)) }
+    var autoCheckUpdate by remember { mutableStateOf(UpdatePrefs.loadAutoCheck(context)) }
+
+    fun checkForUpdate(manual: Boolean) {
+        scope.launch {
+            updateChecking = true
+            val info = UpdateChecker.fetchLatest()
+            updateChecking = false
+            if (info == null) {
+                updateCheckFailed = true
+                if (manual) toast = "检查更新失败，GitHub 暂不可达"
+                return@launch
+            }
+            updateCheckFailed = false
+            updateInfo = info
+            val hasUpdate = UpdateChecker.isNewer(currentVersion, info.tag)
+            if (manual) toast = if (hasUpdate) "发现新版本 ${info.tag}" else "已是最新版本"
+            if (hasUpdate && (manual || info.tag != skippedTag)) showUpdateDialog = true
+        }
+    }
+
+    // 每次启动自动检查一次（可在设置页关闭；手动检查不受开关影响）
+    LaunchedEffect(Unit) { if (autoCheckUpdate) checkForUpdate(manual = false) }
 
     // 运行时长：false→true 记起点；每秒刷新一次仅用于英雄卡 uptime
     var runningSince by remember { mutableStateOf<Long?>(null) }
@@ -249,20 +283,7 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
         scope.launch {
             val r = MainActivity.controlClient?.startOAuth(provider)
             if (r != null && r.optBoolean("ok", false)) {
-                val url = r.optString("authorizeUrl")
-                val customTabsIntent = androidx.browser.customtabs.CustomTabsIntent.Builder()
-                    .setShowTitle(true)
-                    .build()
-                try {
-                    customTabsIntent.launchUrl(context, android.net.Uri.parse(url))
-                } catch (e: Exception) {
-                    val fallback = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
-                    fallback.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                    try {
-                        context.startActivity(fallback)
-                    } catch (_: Exception) {
-                    }
-                }
+                openInBrowser(context, r.optString("authorizeUrl"))
             } else {
                 toast = "登录失败: ${r?.optString("error") ?: "Node 未响应"}"
             }
@@ -374,6 +395,16 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
                     proxyRunning = proxyRunning,
                     reachable = reachable,
                     loggedIn = loggedIn,
+                    currentVersion = currentVersion,
+                    updateInfo = updateInfo,
+                    updateChecking = updateChecking,
+                    updateCheckFailed = updateCheckFailed,
+                    onCheckUpdate = { checkForUpdate(manual = true) },
+                    autoCheckUpdate = autoCheckUpdate,
+                    onAutoCheckUpdateChange = { enabled ->
+                        autoCheckUpdate = enabled
+                        UpdatePrefs.saveAutoCheck(context, enabled)
+                    },
                 )
             }
         }
@@ -407,6 +438,53 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
             ) {
                 Text(msg, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp))
             }
+        }
+    }
+
+    // 新版本弹窗（启动自动检查 / 设置页手动检查共用）
+    if (showUpdateDialog) {
+        updateInfo?.let { info ->
+            AlertDialog(
+                onDismissRequest = { showUpdateDialog = false },
+                title = { Text("发现新版本", fontWeight = FontWeight.SemiBold) },
+                text = {
+                    Column {
+                        Text(
+                            "最新 ${info.tag} · 当前 ${currentVersion ?: "未知"}",
+                            fontFamily = Mono,
+                            fontSize = 13.sp,
+                            color = cs.onSurfaceVariant,
+                        )
+                        info.notes?.let { notes ->
+                            Spacer(Modifier.height(10.dp))
+                            Text(
+                                notes.trim(),
+                                fontSize = 12.sp,
+                                lineHeight = 18.sp,
+                                color = cs.onSurfaceVariant,
+                                maxLines = 10,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showUpdateDialog = false
+                        openInBrowser(context, info.apkUrl ?: info.htmlUrl)
+                    }) { Text("前往下载", fontWeight = FontWeight.Medium) }
+                },
+                dismissButton = {
+                    Row {
+                        TextButton(onClick = {
+                            skippedTag = info.tag
+                            UpdatePrefs.saveSkipped(context, info.tag)
+                            showUpdateDialog = false
+                        }) { Text("忽略此版本") }
+                        TextButton(onClick = { showUpdateDialog = false }) { Text("以后再说") }
+                    }
+                },
+            )
         }
     }
 }
@@ -878,12 +956,15 @@ private fun SettingsScreen(
     proxyRunning: Boolean,
     reachable: Boolean,
     loggedIn: Boolean,
+    currentVersion: String?,
+    updateInfo: UpdateInfo?,
+    updateChecking: Boolean,
+    updateCheckFailed: Boolean,
+    onCheckUpdate: () -> Unit,
+    autoCheckUpdate: Boolean,
+    onAutoCheckUpdateChange: (Boolean) -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
-    val context = LocalContext.current
-    val versionName = remember {
-        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "—"
-    }
     Column(
         Modifier
             .fillMaxSize()
@@ -924,9 +1005,37 @@ private fun SettingsScreen(
         Spacer(Modifier.height(12.dp))
         CardBlock(title = "关于") {
             SettingRow("应用", "ZCode Proxy")
-            SettingRow("版本", versionName)
+            SettingRow("版本", currentVersion ?: "—")
             SettingRow("控制协议", "Node · 127.0.0.1 本地监听")
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    Text("自动检查更新", fontSize = 14.sp, color = cs.onSurfaceVariant)
+                    Text("启动时查询 GitHub Releases", fontSize = 12.sp, color = dimColor())
+                }
+                Switch(checked = autoCheckUpdate, onCheckedChange = onAutoCheckUpdateChange)
+            }
+            val (updateText, updateColor) = when {
+                updateChecking -> "检查中…" to dimColor()
+                updateInfo != null ->
+                    if (UpdateChecker.isNewer(currentVersion, updateInfo.tag)) {
+                        "${updateInfo.tag} 可更新" to cs.primary
+                    } else {
+                        "已是最新（${updateInfo.tag}）" to successColor()
+                    }
+                updateCheckFailed -> "检查失败 · GitHub 不可达" to cs.error
+                else -> "未检查" to dimColor()
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Text("更新", fontSize = 14.sp, color = cs.onSurfaceVariant)
+                Spacer(Modifier.width(12.dp))
+                Text(updateText, fontSize = 13.sp, color = updateColor, modifier = Modifier.weight(1f))
+                TextButton(onClick = onCheckUpdate, enabled = !updateChecking) {
+                    Text(if (updateChecking) "检查中…" else "检查更新", fontSize = 13.sp)
+                }
+            }
             Spacer(Modifier.height(4.dp))
+            Text("更新来自 GitHub Releases · TriDefender/zcode-api", fontSize = 12.sp, color = dimColor())
             Text("上游：Z.AI / 智谱开放平台（OAuth 登录）", fontSize = 12.sp, color = dimColor())
         }
     }
@@ -1106,6 +1215,23 @@ private fun CopyGlyph(color: Color) {
                 .clip(RoundedCornerShape(2.dp))
                 .background(color),
         )
+    }
+}
+
+/** Custom Tabs 打开 URL，无支持浏览器时回退系统 ACTION_VIEW；再失败静默（登录/更新下载共用）。 */
+private fun openInBrowser(context: android.content.Context, url: String) {
+    val customTabsIntent = androidx.browser.customtabs.CustomTabsIntent.Builder()
+        .setShowTitle(true)
+        .build()
+    try {
+        customTabsIntent.launchUrl(context, android.net.Uri.parse(url))
+    } catch (e: Exception) {
+        val fallback = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+        fallback.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(fallback)
+        } catch (_: Exception) {
+        }
     }
 }
 
