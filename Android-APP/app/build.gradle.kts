@@ -4,6 +4,31 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// Version/signing properties accept BOTH spellings: dotted for local
+// -PandroidApp.versionName (see README), underscored for CI's
+// ORG_GRADLE_PROJECT_androidApp_versionName — Gradle maps that env prefix to
+// the property name VERBATIM (env vars can't carry dots). The two forms must
+// both be accepted or CI APKs silently fall back to versionCode=1 /
+// versionName="3.0.0-android" and UpdateChecker flags every fresh install as
+// outdated.
+fun prop(name: String) =
+    providers.gradleProperty(name)
+        .orElse(providers.gradleProperty(name.replace('.', '_')))
+
+// Fail loud when CI forgets the version props — a silent fallback ships an
+// APK that permanently prompts for updates (UpdateChecker.isNewer).
+if (System.getenv("CI") == "true") {
+    val missing = listOf("androidApp.versionCode", "androidApp.versionName")
+        .filter { prop(it).orNull == null }
+    if (missing.isNotEmpty()) {
+        throw GradleException(
+            "CI build is missing gradle properties: $missing — set " +
+                "ORG_GRADLE_PROJECT_androidApp_versionCode / ORG_GRADLE_PROJECT_androidApp_versionName " +
+                "(see release.yml build-android job)"
+        )
+    }
+}
+
 android {
     namespace = "com.zcode.proxy"
     compileSdk = 35
@@ -12,8 +37,15 @@ android {
         applicationId = "com.zcode.proxy"
         minSdk = 24
         targetSdk = 35
-        versionCode = providers.gradleProperty("androidApp.versionCode").orNull?.toIntOrNull() ?: 1
-        versionName = providers.gradleProperty("androidApp.versionName").orNull ?: "3.0.0-android"
+        versionCode = prop("androidApp.versionCode").orNull?.toIntOrNull() ?: 1
+        // CI injects the release tag via androidApp.versionName; local/dev
+        // builds derive "<repo package.json version>-android" so they only
+        // prompt for an update when a genuinely newer release exists.
+        val repoVersion = runCatching {
+            Regex("\"version\"\\s*:\\s*\"([^\"]+)\"")
+                .find(rootProject.file("../package.json").readText())?.groupValues?.get(1)
+        }.getOrNull()
+        versionName = prop("androidApp.versionName").orNull ?: "${repoVersion ?: "0.0.0"}-android"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -21,12 +53,12 @@ android {
 
     signingConfigs {
         create("release") {
-            val storeFilePath = providers.gradleProperty("androidSigning.keystoreFile").orNull
+            val storeFilePath = prop("androidSigning.keystoreFile").orNull
             if (storeFilePath != null) {
                 storeFile = file(storeFilePath)
-                storePassword = providers.gradleProperty("androidSigning.storePassword").get()
-                keyAlias = providers.gradleProperty("androidSigning.keyAlias").get()
-                keyPassword = providers.gradleProperty("androidSigning.keyPassword").get()
+                storePassword = prop("androidSigning.storePassword").get()
+                keyAlias = prop("androidSigning.keyAlias").get()
+                keyPassword = prop("androidSigning.keyPassword").get()
             }
         }
     }

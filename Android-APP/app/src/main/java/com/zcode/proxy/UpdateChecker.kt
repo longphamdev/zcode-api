@@ -77,9 +77,10 @@ object UpdateChecker {
 
     /**
      * 提取前三个数字段逐位比较。current 取自 APK versionName：release CI 直接写入
-     * 完整 tag（如 "v4.5.2"），本地/开发构建是 "3.0.0-android" —— 后者永远落后于
-     * 任何正式 release，提示更新是预期行为。/releases/latest 不返回 prerelease，
-     * 故无需处理 alpha/beta/rc 后缀。
+     * 完整 tag（如 "v5.0.0"），本地/开发构建是 "<package.json 版本>-android"
+     * （build.gradle.kts 从仓库 package.json 派生，release CI 会自动 bump 并提交），
+     * 因此只有当正式 release 比仓库版本更新时才提示。/releases/latest 不返回
+     * prerelease，故无需处理 alpha/beta/rc 后缀。
      */
     fun isNewer(current: String?, latestTag: String): Boolean {
         if (current.isNullOrBlank()) return true
