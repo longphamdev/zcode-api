@@ -8,7 +8,7 @@
 
 一个跑在自己电脑上的小工具：智谱 Z.AI / Bigmodel 的编码套餐（个人套餐 / 体验套餐）
 本来只能在官方客户端里用，ZCode Proxy 在本机把它变成标准的 OpenAI / Anthropic 接口，
-于是 Claude Code、Codex、Cherry Studio、Kilo Code……都能直接用上你的套餐额度。
+于是 Claude Code、Codex、Silly Tavern ……都能直接用上你的套餐额度。
 
 [快速上手](#-五分钟上手) · [接入编码工具](#-把编码工具接上来) · [手机版](#-手机版-android) · [常见问题](#-常见问题)
 
