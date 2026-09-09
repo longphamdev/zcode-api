@@ -25,49 +25,11 @@
 - 🌙 **闲时通道 & 套餐秒抢**（可选）—— 错峰时段的免费额度通道、限量体验套餐自动领取，都是内置功能。
 - 🪟 **全平台** —— Windows / macOS / Linux 一份代码直接跑，也能编译成单文件程序或 Docker 部署。
 
-## 🚀 五分钟上手
+## 🚀 一分钟上手
 
-### 第 1 步：安装 Bun
+### 第 1 步：从[GitHub Releases](https://github.com/TriDefender/zcode-api/releases)下载最新版本的exe
 
-ZCode Proxy 依赖 [Bun](https://bun.sh) 运行（一个更快的 Node.js 替代品，装一次就行）：
-
-```bash
-# Windows (PowerShell)
-powershell -c "irm bun.sh/install.ps1 | iex"
-
-# macOS / Linux
-curl -fsSL https://bun.sh/install | bash
-```
-
-### 第 2 步：下载并安装
-
-```bash
-git clone https://github.com/TriDefender/zcode-api.git
-cd zcode-api
-bun install
-```
-
-### 第 3 步：登录账号
-
-用你买过套餐的账号登录一次（浏览器授权，之后长期有效）：
-
-```bash
-bun run src/index.ts auth login zai        # Z.AI 账号
-bun run src/index.ts auth login bigmodel   # 或 智谱 Bigmodel 账号
-```
-
-会自动打开浏览器完成授权，然后自动拿到 API Key，加密保存在 `~/.zcode-proxy/credentials.json`。
-
-> 💡 **已经在用 ZCode 桌面版？** 可以跳过浏览器授权，直接导入：
-> `bun run src/index.ts auth login bigmodel --import`
->
-> 💡 **服务器 / Docker 没有浏览器？** 用粘贴模式登录，见[常见问题](#-常见问题)。
-
-### 第 4 步：启动
-
-```bash
-bun run src/index.ts
-```
+没错，这就完了，就是这么简单
 
 启动后进入终端控制面板（这就是主界面）：
 
@@ -75,7 +37,7 @@ bun run src/index.ts
 
 面板分三块：**登录与设置**（服务商 / 套餐 / 登录）、**代理服务**（启动停止 / 当前配置）、**日志**（每个请求一行，实时滚动）。按 <kbd>s</kbd> 启动代理，看到 `Status: running` 就绪了。
 
-> 用不惯键盘快捷键？面板上的按钮支持**鼠标点击**。想让它在后台静默运行？`bun run src/index.ts --cli serve`。
+> 用不惯键盘快捷键？面板上的按钮支持**鼠标点击**。想让它在后台静默运行？`bun run zcode-proxy --cli serve`。
 
 ### 面板快捷键
 
@@ -154,7 +116,7 @@ Anthropic 格式的工具（如某些 Claude 客户端）地址填 `http://127.0
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d '{
-  "model": "glm-4.7",
+  "model": "glm-5.3-flash",
   "messages": [{"role": "user", "content": "你好！"}]
 }'
 ```
@@ -169,23 +131,6 @@ App 与电脑版功能对应：一键启动代理、扫码级简单配置、实�
 | <img src="docs/images/android/home-light.png" width="210" alt="主页" /> | <img src="docs/images/android/logs.png" width="210" alt="日志" /> | <img src="docs/images/android/settings.png" width="210" alt="设置" /> | <img src="docs/images/android/home-dark.png" width="210" alt="暗色主题" /> |
 
 手机和电脑跑的是同一套核心：App 内置了完整的代理引擎，**手机本身就是一个独立的代理服务器**，局域网内的电脑也可以连手机上的代理地址一起用。
-
-> 想自己构建 APK？见 [`Android-APP/AGENTS.md`](Android-APP/AGENTS.md)。
-
-## 📦 换个方式运行
-
-<details>
-<summary><b>编译成单文件程序</b>（不需要安装 Bun 也能跑）</summary>
-
-```bash
-bun run build               # Windows → zcode-proxy.exe
-bun run build:linux-x64     # Linux x64
-bun run build:darwin-arm64  # macOS Apple Silicon
-```
-
-编译产物在项目根目录，双击或命令行运行即可，五平台交叉编译命令见 `package.json`。
-
-</details>
 
 <details>
 <summary><b>Docker 部署</b></summary>
