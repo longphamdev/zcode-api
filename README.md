@@ -1,433 +1,293 @@
-# zcode-proxy
+<div align="center">
 
-A reverse proxy for Z.AI / Bigmodel.cn coding-plan APIs that exposes both OpenAI-compatible and Anthropic-format endpoints.
+<img src="Android-APP/design/assets/zcode-app-icon.png" width="88" alt="ZCode Proxy 图标" />
 
-## Quick Start
+# ZCode Proxy
+
+**把你的 GLM 编码套餐，接进所有 AI 编程工具。**
+
+一个跑在自己电脑上的小工具：智谱 Z.AI / Bigmodel 的编码套餐（个人套餐 / 体验套餐）
+本来只能在官方客户端里用，ZCode Proxy 在本机把它变成标准的 OpenAI / Anthropic 接口，
+于是 Claude Code、Codex、Cherry Studio、Kilo Code……都能直接用上你的套餐额度。
+
+[快速上手](#-五分钟上手) · [接入编码工具](#-把编码工具接上来) · [手机版](#-手机版-android) · [常见问题](#-常见问题)
+
+</div>
+
+---
+
+## 它能帮你做什么
+
+- 🧩 **一个地址，三种格式** —— OpenAI、Anthropic、Responses（Codex 专用）接口都在本机 `127.0.0.1:8080` 上，工具认哪种就给它哪种。
+- 🖥️ **带图形面板** —— 终端启动就是一块可视化面板（也可纯后台运行），启动、登录、看日志点点就行，还能用手机管理。
+- 📱 **安卓 App** —— 手机上启动/停止代理、看实时日志、切换服务商，出门在外也好用。
+- 💬 **自带网页聊天** —— 打开 `/webui` 就是一个本地 ChatGPT 风格聊天页，随手测试模型。
+- 🌙 **闲时通道 & 套餐秒抢**（可选）—— 错峰时段的免费额度通道、限量体验套餐自动领取，都是内置功能。
+- 🪟 **全平台** —— Windows / macOS / Linux 一份代码直接跑，也能编译成单文件程序或 Docker 部署。
+
+## 🚀 五分钟上手
+
+### 第 1 步：安装 Bun
+
+ZCode Proxy 依赖 [Bun](https://bun.sh) 运行（一个更快的 Node.js 替代品，装一次就行）：
 
 ```bash
-# Install dependencies
+# Windows (PowerShell)
+powershell -c "irm bun.sh/install.ps1 | iex"
+
+# macOS / Linux
+curl -fsSL https://bun.sh/install | bash
+```
+
+### 第 2 步：下载并安装
+
+```bash
+git clone https://github.com/TriDefender/zcode-api.git
+cd zcode-api
 bun install
+```
 
-# Copy and edit config
-cp config.example.yaml config.yaml
-# Log in (OAuth, browser-based)
-bun run src/index.ts auth login zai        # or: bigmodel
+### 第 3 步：登录账号
 
-# Start the proxy
+用你买过套餐的账号登录一次（浏览器授权，之后长期有效）：
+
+```bash
+bun run src/index.ts auth login zai        # Z.AI 账号
+bun run src/index.ts auth login bigmodel   # 或 智谱 Bigmodel 账号
+```
+
+会自动打开浏览器完成授权，然后自动拿到 API Key，加密保存在 `~/.zcode-proxy/credentials.json`。
+
+> 💡 **已经在用 ZCode 桌面版？** 可以跳过浏览器授权，直接导入：
+> `bun run src/index.ts auth login bigmodel --import`
+>
+> 💡 **服务器 / Docker 没有浏览器？** 用粘贴模式登录，见[常见问题](#-常见问题)。
+
+### 第 4 步：启动
+
+```bash
 bun run src/index.ts
-
-# Or specify a config path
-bun run src/index.ts /path/to/config.yaml
 ```
 
-## Authentication
+启动后进入终端控制面板（这就是主界面）：
 
-Upstream credentials come exclusively from the OAuth login flow — run
-`auth login` before starting the proxy. There is no apikey mode anymore.
+<img src="docs/images/tui-annotated.png" alt="ZCode Proxy 终端控制面板" width="980" />
 
-### OAuth Login (browser-based, both providers)
+面板分三块：**登录与设置**（服务商 / 套餐 / 登录）、**代理服务**（启动停止 / 当前配置）、**日志**（每个请求一行，实时滚动）。按 <kbd>s</kbd> 启动代理，看到 `Status: running` 就绪了。
+
+> 用不惯键盘快捷键？面板上的按钮支持**鼠标点击**。想让它在后台静默运行？`bun run src/index.ts --cli serve`。
+
+### 面板快捷键
+
+| 按键 | 作用 |
+|------|------|
+| <kbd>s</kbd> | 启动 / 停止代理 |
+| <kbd>l</kbd> | 登录当前服务商（打开浏览器授权） |
+| <kbd>L</kbd> | 无头服务器专用：把登录切换成"粘贴链接"模式 |
+| <kbd>o</kbd> | 退出登录 |
+| <kbd>p</kbd> / <kbd>t</kbd> | 切换服务商（Z.AI ↔ 智谱）/ 套餐（coding-plan ↔ start-plan） |
+| <kbd>↑</kbd><kbd>↓</kbd> / <kbd>PgUp</kbd> / <kbd>g</kbd> | 滚动日志 / 回到底部 |
+| <kbd>c</kbd> | 清屏日志 |
+| <kbd>q</kbd> | 退出面板 |
+
+## 🔌 把编码工具接上来
+
+代理启动后，本机地址就是 **`http://127.0.0.1:8080`**。你的工具只需要改两样东西：**接口地址**和**模型名**。
+
+关于「API Key」：如果你在配置里设置过 `auth.proxyApiKey`（或环境变量 `ZCODE_PROXY_API_KEY`），工具里就填同一个值；没设置的话随便填（如 `sk-1234`），本机自用不校验。
+
+<details>
+<summary><b>Claude Code</b>（点开看配置）</summary>
 
 ```bash
-# Z.AI server-mediated CLI login (3.10 parity: init/poll at zcode.z.ai, no local callback)
-bun run src/index.ts auth login zai
-
-# Bigmodel auth-code flow (bigmodel.cn authorize → localhost callback → zcode.z.ai token exchange)
-bun run src/index.ts auth login bigmodel
-
-# This will:
-# 1. Print an authorize URL and open your browser
-# 2. Z.AI: poll the server until authorization completes;
-#    Bigmodel: receive the browser callback and exchange the auth code
-# 3. Resolve your coding-plan API key automatically
-# 4. Save encrypted credentials to ~/.zcode-proxy/credentials.json
+# macOS / Linux
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+export ANTHROPIC_AUTH_TOKEN=sk-1234
+export ANTHROPIC_MODEL=glm-4.7
+claude
 ```
 
-The encrypted credential store is keyed to the machine
-(`homedir-platform-arch` seed, or set `ZCODE_PROXY_CREDENTIAL_SECRET` for a
-portable seed). Then set `provider` in `config.yaml` and start the proxy.
+```powershell
+# Windows PowerShell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
+$env:ANTHROPIC_AUTH_TOKEN = "sk-1234"
+$env:ANTHROPIC_MODEL = "glm-4.7"
+claude
+```
 
-### Import from ZCode Config (skip OAuth)
+</details>
 
-If you already use the ZCode desktop app, import the API key directly:
+<details>
+<summary><b>Codex CLI</b>（走 Responses 接口）</summary>
+
+编辑 `~/.codex/config.toml`：
+
+```toml
+model_provider = "zcode"
+model = "glm-5.3"
+
+[model_providers.zcode]
+name = "ZCode Proxy"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+env_key = "ZCODE_API_KEY"   # 任意非空值即可，除非你设置了代理密钥
+```
+
+</details>
+
+<details>
+<summary><b>其他 OpenAI 兼容工具</b>（Cherry Studio、Kilo Code、Cline、LobeChat…）</summary>
+
+在工具的"自定义提供商 / Custom Provider"里填：
+
+| 设置项 | 值 |
+|--------|-----|
+| API 地址 (Base URL) | `http://127.0.0.1:8080/v1` |
+| API Key | 你的代理密钥（没设就随便填） |
+| 模型 | `glm-4.7`、`glm-5.3`、`glm-4.6v` 等，见下方模型表 |
+
+Anthropic 格式的工具（如某些 Claude 客户端）地址填 `http://127.0.0.1:8080`，路径 `/v1/messages` 代理会自动接。
+
+</details>
+
+想先手动试一下？打开 **http://127.0.0.1:8080/webui** 就有自带聊天页；或者用 curl：
 
 ```bash
-bun run src/index.ts auth login bigmodel --import
+curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d '{
+  "model": "glm-4.7",
+  "messages": [{"role": "user", "content": "你好！"}]
+}'
 ```
 
-### Headless / Docker Login (paste mode, bigmodel)
+## 📱 手机版 (Android)
 
-On a headless machine (Docker container, VPS) the browser cannot reach the
-localhost callback server inside the container.
+从 [GitHub Releases](https://github.com/TriDefender/zcode-api/releases) 下载最新的 `apk` 安装即可。
+App 与电脑版功能对应：一键启动代理、扫码级简单配置、实时日志、切换服务商与套餐、亮暗双主题。
+
+| 主页 | 日志 | 设置 | 暗色主题 |
+|:-:|:-:|:-:|:-:|
+| <img src="docs/images/android/home-light.png" width="210" alt="主页" /> | <img src="docs/images/android/logs.png" width="210" alt="日志" /> | <img src="docs/images/android/settings.png" width="210" alt="设置" /> | <img src="docs/images/android/home-dark.png" width="210" alt="暗色主题" /> |
+
+手机和电脑跑的是同一套核心：App 内置了完整的代理引擎，**手机本身就是一个独立的代理服务器**，局域网内的电脑也可以连手机上的代理地址一起用。
+
+> 想自己构建 APK？见 [`Android-APP/AGENTS.md`](Android-APP/AGENTS.md)。
+
+## 📦 换个方式运行
+
+<details>
+<summary><b>编译成单文件程序</b>（不需要安装 Bun 也能跑）</summary>
 
 ```bash
-bun run src/index.ts auth login bigmodel --paste
-```
-or via env (handy in docker):
-```bash
-ZCODE_OAUTH_PASTE=1 bun run src/index.ts auth login bigmodel
+bun run build               # Windows → zcode-proxy.exe
+bun run build:linux-x64     # Linux x64
+bun run build:darwin-arm64  # macOS Apple Silicon
 ```
 
-1. The CLI prints the bigmodel authorize URL — open it in a browser **on any
-   machine** (your laptop is fine).
-2. After authorizing, the browser redirects to
-   `http://127.0.0.1:<port>/oauth/callback/bigmodel?...` and the page will
-   not load (connection refused).
-3. Copy the full redirected URL from the address bar, paste it back into
-   the CLI, and press Enter. The CLI exchanges it for credentials.
+编译产物在项目根目录，双击或命令行运行即可，五平台交叉编译命令见 `package.json`。
 
-Tips:
+</details>
 
-- The TUI supports the same flow: press `l` (or click `OAuth Login`); if the callback can't reach the machine
-  (headless), press `L` and the panel temporarily suspends while you paste the
-  redirected URL, then resumes.
-
-## Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming + non-streaming) |
-| `POST` | `/v1/messages` | Anthropic-format messages (streaming + non-streaming) |
-| `POST` | `/v1/responses` | OpenAI Responses API (Codex CLI / Agents SDK; translates Responses → Chat → Anthropic upstream) |
-| `POST` | `/async/v1/messages` | **Async (off-peak)** Anthropic-format — routes to free idle-compute pool |
-| `POST` | `/async/v1/chat/completions` | **Async (off-peak)** OpenAI-format — same backend, translates request/response |
-| `GET`  | `/async/v1/health` | Probe off-peak queue availability |
-| `GET` | `/v1/models` | List available models |
-| `GET` | `/webui` | Built-in chat web UI (served without the proxy key; see below) |
-| `GET` | `/health` | Health check |
-
-### Async (Off-Peak / Idle Plan)
-
-`/async/*` routes are gated by `async.enabled: true` in config (default `false`)
-and are a **coding-plan feature**: when `plan: start-plan`, the routes return
-400 `async_plan_unsupported` even when enabled.
-They require a logged-in credential that carries a JWT (the off-peak backend
-needs both the JWT from login and the coding-plan API key — a JWT-less
-credential, e.g. from `auth login --import`, returns 400
-`async_credentials_unavailable`).
-
-When enabled, requests are routed through ZCode's off-peak ticket-queue backend:
-the proxy takes a ticket, holds the connection open with SSE keepalive comments
-while waiting for a free slot, then streams the upstream response through. If
-the ticket expires mid-run (server reclaims the slot), the proxy automatically
-takes a new ticket and resends the original request (up to `async.maxRetries`,
-default 3). Client disconnect triggers a fire-and-forget `/ticket/{id}/settle`
-call as the universal close-out signal.
-
-Streaming (`stream: true`) is the expected mode for coding harnesses; non-stream
-is supported as a fallback (the proxy internally still consumes upstream as a
-stream, then emits one aggregated JSON body).
-
-**Off-peak is one-shot, not conversational.** Each `/async/*` request is an
-independent task with its own ticket; the proxy does NOT preserve conversation
-history across requests. To do multi-turn, send the full conversation in each
-request (typical for stateless chat completions clients), or use the synchronous
-`/v1/*` endpoints which can leverage server-side session affinity.
-
-**Phase 1 limitations** (planned for Phase 2):
-- No native async task API (`POST /async/v1/tasks` with persistent store) — bridge mode only
-- No concurrency cap on `/async/*` routes — body size is capped at 4 MiB but unlimited simultaneous connections are allowed
-- No persistent state across proxy restarts
+<details>
+<summary><b>Docker 部署</b></summary>
 
 ```bash
-curl http://localhost:8080/async/v1/messages \
-  -H "Authorization: Bearer your-proxy-secret" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "glm-4.6",
-    "max_tokens": 1024,
-    "stream": true,
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
-### Weekend-Plan Auto-Claim (manualClaimPlan)
-
-ZCode 3.10 exposes limited-quota trial plans (e.g. weekend packages) that are
-claimed first-come-first-served and activate at a future time. The proxy can
-grab them for you automatically — it polls the preview endpoint every 5 minutes
-and claims the highest-priority plan the moment the campaign endpoint goes live
-(a 404 before launch is the expected pre-campaign state). Requires a logged-in
-credential and `identity.appVersion >= 3.11.2`.
-
-```yaml
-claim:
-  enabled: true   # start the auto-claim scheduler while serving
-  # auto: true    # set false to only use the CLI command
-  # planId: ""    # claim a specific plan; empty = highest priority
-```
-
-One-shot usage:
-
-```bash
-zcode-proxy claim list   # show currently claimable plans
-zcode-proxy claim        # claim now (highest priority, or claim.planId)
-```
-
-Backoff: `already_claimed`/`quota_exhausted` wait for the server-provided next
-window; other failures use `claim.cooldownMs` (default 10 min).
-
-## Usage Examples
-
-### OpenAI Format
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer your-proxy-secret" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "glm-4.6",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": false
-  }'
-```
-
-### Anthropic Format
-
-```bash
-curl http://localhost:8080/v1/messages \
-  -H "x-api-key: your-proxy-secret" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "glm-4.6",
-    "max_tokens": 1024,
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
-### Streaming
-
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer your-proxy-secret" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "glm-4.6",
-    "messages": [{"role": "user", "content": "Write a poem"}],
-    "stream": true
-  }'
-```
-
-### List Models
-
-```bash
-curl http://localhost:8080/v1/models \
-  -H "Authorization: Bearer your-proxy-secret"
-```
-
-### Web UI
-
-Open `http://localhost:8080/webui` in a browser for a built-in, ChatGPT-style
-chat client. The page is served **without** the proxy API key (so it can load
-and present the key input); it then sends the key on its own `/v1/*` calls.
-
-Features: streaming responses (SSE), model picker (auto-populated from
-`/v1/models`), editable system prompt, temperature / top-p / max-tokens /
-`do_sample`, deep-thinking toggle with `reasoning_effort` (GLM-5.2+), image
-upload (auto-enabled for models whose id contains `v`), MCP HTTP servers,
-markdown + code-highlight rendering, light/dark theme, and per-browser
-multi-session autosave (localStorage). Open Settings (⚙) to configure.
-
-### Terminal UI (TUI)
-
-The TUI is the **default** mode — launching without arguments opens it:
-
-```bash
-bun run src/index.ts                # interactive panel (default)
-bun run src/index.ts debug          # with per-request debug diagnostics
-bun run src/index.ts serve          # classic CLI mode: headless server
-```
-
-`zcode-proxy --cli` opts out of the TUI entirely and restores the classic CLI
-dispatch (bare `--cli` = `serve`).
-
-A PC terminal control panel mirroring the Android app's layout — three cards
-(Settings & Login / Proxy Server / Logs) rendered in the alternate screen with
-zero extra dependencies. The proxy auto-starts on launch when credentials are
-available; the log card shows live per-request rows (console output is
-captured in-process) with scrollback and tail-following.
-
-| Key | Action |
-|-----|--------|
-| `s` | Start / stop the proxy server |
-| `l` | OAuth login for the current provider (opens the browser) |
-| `L` | Headless paste login (`bigmodel`): while a login is waiting, switch it to paste-the-redirected-URL mode |
-| `o` | Logout (cancels an in-flight login and releases its callback port) |
-| `p` / `t` | Switch provider (`zai` ↔ `bigmodel`) / plan (`coding-plan` ↔ `start-plan`) — requires the proxy stopped, persisted to `config.yaml` |
-| `↑↓` / `PgUp`/`PgDn` / `Home`/`End` | Scroll the log pane |
-| `g` | Jump back to the tail (re-enable following) |
-| `c` | Clear the log pane |
-| `q` / `Ctrl+C` | Quit |
-
-Set `ZCODE_TUI_LOGFILE=/path/to/file.log` to also tee every captured line to a
-file (best-effort; never affects handling). Requires a TTY with at least
-40x14 cells; Windows Terminal, mintty and common Unix terminals are supported.
-
-## Configuration
-
-| Field | Env Var | Default | Description |
-|-------|---------|---------|-------------|
-| `server.port` | `ZCODE_PROXY_PORT` | `8080` | Listen port |
-| `auth.proxyApiKey` | `ZCODE_PROXY_API_KEY` | — | Client auth key |
-| `auth.oauthCredentialsPath` | — | — | Parsed but currently not honored — the credential store path is fixed at `~/.zcode-proxy/credentials.json` |
-| `provider` | `ZCODE_PROVIDER` | `zai` | Upstream provider |
-| `plan` | — | `coding-plan` | Plan tier: `coding-plan` (direct upstream) or `start-plan` (zcode.z.ai gateway + JWT + captcha) |
-| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.11.2` | `User-Agent: ZCode/{version}` |
-| `identity.deviceMid` | `ZCODE_IDENTITY_DEVICE_MID` | auto-generated | Device identity (`X-Device-Mid`); UUIDv4 generated once at first `auth login` / config creation and reused forever |
-| `identity.sourceTitle` | `ZCODE_SOURCE_TITLE` | `cli` | `X-Title: Z Code@{title}` |
-| `identity.refererOrigin` | `ZCODE_REFERER_ORIGIN` | `https://zcode.z.ai` | `HTTP-Referer` URL |
-| `endpointRouting.enabled` | `ZCODE_ENDPOINT_ROUTING` | `true` | Server-controlled upstream URL remapping via `zcode.z.ai/api/v1/agent/configs` (mirrors ZCode's `ProviderEndpointRoutingService`; fail-open) |
-| `clientSigning.enabled` | `ZCODE_CLIENT_SIGNING` | `true` | Client request signing V4 (Ed25519 + proof-of-work, gate-driven; only activates when the server sets `codingPlanSignature.enable=true`; fail-open) |
-| `claim.enabled` | `ZCODE_CLAIM_ENABLED` | `true` | Weekend-plan auto-claim: poll `zcode.z.ai/api/v1/zcode-plan/billing/preview` and claim trial packages (see below) |
-| `async.enabled` / `origin` / `maxRetries` / `maxWaitMs` | `ZCODE_ASYNC_ENABLED` / `ZCODE_ASYNC_ORIGIN` / `ZCODE_ASYNC_MAX_RETRIES` / `ZCODE_ASYNC_MAX_WAIT_MS` | `false` / `https://zcode.z.ai` / `3` / `0` | Async off-peak bridge gating + tuning (see Async section) |
-| config file path | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file to load on `serve` |
-
-Start-plan captcha tunables (env only): `ZCODE_CAPTCHA_RETRIES` (per-token solve retries), `CAPTCHA_POOL_MIN` / `CAPTCHA_POOL_MAX` (pre-solved token pool sizing).
-
-## Architecture
-
-```
-Client Request
-      │
-      ▼
-Proxy API Key Auth (shared secret)
-      │
-      ▼
-Route Detection + Plan-aware Routing (both plans post Anthropic upstream, v4.5.0+)
-  /v1/chat/completions (OpenAI client format)
-    ├─ coding-plan → TRANSLATE OpenAI→Anthropic → provider's anthropic endpoint
-    │                (remapped to zcode.z.ai ultra endpoints via server-controlled mapping)
-    └─ start-plan  → TRANSLATE OpenAI→Anthropic → zcode.z.ai
-                     /api/v1/zcode-plan/anthropic/v1/messages (JWT + captcha)
-  /v1/messages     (Anthropic client format)
-    ├─ coding-plan → NATIVE PASSTHROUGH to the provider's anthropic endpoint (same format)
-    └─ start-plan  → NATIVE PASSTHROUGH → zcode.z.ai
-                     /api/v1/zcode-plan/anthropic/v1/messages (JWT + captcha)
-  /v1/responses    (Responses client format)
-    ├─ both plans  → TRANSLATE Responses→Chat→Anthropic → plan's anthropic endpoint
-      │
-      ▼
-Body Transformation (ZCode-equivalent mutations)
-  Anthropic upstream      → cache_control on last message + metadata.user_id
-  start-plan              → prepend ZCode system messages
-      │
-      ▼
-Auth + Identity Header Injection
-  Anthropic upstream:      x-api-key: {credential} + anthropic-version
-  start-plan:              Authorization: Bearer {jwt}
-  Both:                    User-Agent: ZCode/{version} + X-ZCode-* + trace headers
-      │
-      ▼
-Endpoint Routing (server-controlled, fail-open)
-  GET zcode.z.ai/api/v1/agent/configs → proxyEndpoint.mapping rewrites the upstream URL
-      │
-      ▼
-Client Signing V4 (gate-driven, fail-open)
-  gate says codingPlanSignature.enable → handshake + Ed25519 + PoW headers per request
-      │
-      ▼
-Upstream Forward (fetch, or ordered raw-TCP transport for session affinity)
-  Translation mode:   decompress enabled (proxy reads + translates body)
-  Passthrough:        decompress disabled (raw gzip bytes stream through)
-      │
-      ▼
-Response Handling
-  Passthrough:              raw bytes → client (content-encoding preserved)
-  Translation batch:        Anthropic JSON ↔ OpenAI JSON (gzip if client accepts)
-  Translation SSE stream:   translated chunk-for-chunk in the client's format
-```
-## Development
-
-```bash
-# Run tests
-bun test
-
-# Type check
-bun x tsc --noEmit
-
-# Run in dev mode (opens the interactive TUI; add `--cli serve` for headless)
-bun run src/index.ts config.yaml
-
-# Compile a single-file binary (→ zcode-proxy.exe, gitignored)
-bun run build
-```
-
-## Docker
-
-Pull the multi-arch image from GitHub Packages (ghcr.io):
-
-```bash
-docker pull ghcr.io/tridefender/zcode-proxy:latest
-```
-
-Upstream credentials come only from `auth login`, so the container needs the
-encrypted credential store. Log in on the host with a fixed encryption seed
-(the container cannot derive the default machine seed), then mount the store
-— or log in **inside** the container with bigmodel paste mode (see
-[Headless / Docker Login](#headless--docker-login-paste-mode-bigmodel)):
-
-```bash
-# 1. Log in on the host with a portable seed
-ZCODE_PROXY_CREDENTIAL_SECRET="a-long-random-secret" \
+# 在宿主机上用固定加密种子登录（容器内无法弹浏览器时，加 --paste 粘贴登录）
+ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的口令" \
   bun run src/index.ts auth login zai
 
-# 2. Mount the store at the path the proxy reads. The image runs as user `bun`
-#    (home /home/bun) and the store path is fixed, not configurable:
-docker run --rm -p 8080:8080 \
+docker run -d --name zcode-proxy -p 8080:8080 \
   -v "$(pwd)/config.yaml:/data/config.yaml:ro" \
   -v "$(HOME)/.zcode-proxy/credentials.json:/home/bun/.zcode-proxy/credentials.json:ro" \
-  -e ZCODE_PROXY_CREDENTIAL_SECRET="a-long-random-secret" \
+  -e ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的口令" \
   ghcr.io/tridefender/zcode-proxy:latest
 ```
 
-> Note: `/health` and all routes sit behind the proxy-API-key check, so health probes must send `x-api-key: <ZCODE_PROXY_API_KEY>`.
-
-Common environment variables (see the Configuration table above for the full list):
-
-| Env Var | Description |
-|---------|-------------|
-| `ZCODE_PROVIDER` | `zai` or `bigmodel` |
-| `ZCODE_PROXY_API_KEY` | Client auth shared secret |
-| `ZCODE_PROXY_CREDENTIAL_SECRET` | Encryption seed for the credential store (must match the seed used at `auth login`) |
-| `ZCODE_PROXY_PORT` | Listen port (default `8080`) |
-| `ZCODE_OAUTH_PASTE` | Set `1` for bigmodel paste-mode login inside the container (see [Headless / Docker Login](#headless--docker-login-paste-mode-bigmodel)) |
-
-docker-compose:
+镜像多架构（amd64 / arm64），以 `bun` 用户运行。compose 写法：
 
 ```yaml
 services:
   zcode-proxy:
     image: ghcr.io/tridefender/zcode-proxy:latest
-    ports:
-      - "8080:8080"
+    ports: ["8080:8080"]
     volumes:
       - ./config.yaml:/data/config.yaml:ro
       - ./credentials.json:/home/bun/.zcode-proxy/credentials.json:ro
     environment:
-      ZCODE_PROVIDER: zai
-      ZCODE_PROXY_API_KEY: "your-proxy-secret"
-      ZCODE_PROXY_CREDENTIAL_SECRET: "a-long-random-secret"
+      ZCODE_PROXY_CREDENTIAL_SECRET: "一串只有你知道的口令"
     restart: unless-stopped
 ```
 
-## Available Models
+</details>
 
-The proxy lists these models on `GET /v1/models` (pinned to the GLM coding-plan tier):
+<details>
+<summary><b>可调的配置与环境变量</b>（改不改都能跑）</summary>
 
-| Model | Context | Max Output |
-|-------|---------|------------|
+配置文件是项目根目录的 `config.yaml`（首次启动自动生成，完整注释见 [`config.example.yaml`](config.example.yaml)），环境变量优先级更高。常用的：
+
+| 环境变量 | 默认 | 说明 |
+|----------|------|------|
+| `ZCODE_PROXY_PORT` | `8080` | 监听端口 |
+| `ZCODE_PROXY_API_KEY` | 无 | 客户端访问代理用的密钥（不设=不校验） |
+| `ZCODE_PROVIDER` | `zai` | 服务商 `zai` / `bigmodel` |
+| `ZCODE_PROXY_CONFIG` | `config.yaml` | 配置文件路径 |
+| `ZCODE_PROXY_CREDENTIAL_SECRET` | 机器相关 | 登录凭据的加密种子（跨机器迁移/Docker 时需要固定它） |
+| `ZCODE_LOG_FORMAT` | 桌面表格 | 设为 `compact` 可得到单行日志（适合窄屏） |
+
+套餐类型（`plan`: `coding-plan` 个人套餐 / `start-plan` 体验套餐）在面板里按 <kbd>t</kbd> 切换，会写回 config.yaml。
+
+</details>
+
+<details>
+<summary><b>进阶功能：闲时通道 & 套餐自动领取</b></summary>
+
+**闲时通道 (`/async/*`)** —— 凌晨等错峰时段官方释放的免费算力通道。请求先排队领票，轮到了自动发给模型（适合不着急的批量任务）。`config.yaml` 里 `async.enabled: true` 打开；注意它一次性、不带会话记忆，多轮对话要把历史放进请求里。
+
+**周末/体验套餐自动领取 (claim)** —— 默认开启。代理每 5 分钟探测一次官方的限量套餐活动页，上新瞬间自动帮你抢（`claim.enabled: false` 可关闭）。手动抢：`bun run src/index.ts claim`。
+
+</details>
+
+## 🧮 可用模型
+
+代理会把下面这些模型挂在 `/v1/models` 上（模型列表只是展示，其他模型名也会照常转发）：
+
+| 模型 | 上下文 | 最大输出 |
+|------|--------|----------|
 | `glm-4.5-air` | 200K | 128K |
-| `glm-4.6` | 200K | 128K |
-| `glm-4.6v` | 200K | 128K |
+| `glm-4.6` / `glm-4.6v`（视觉） | 200K | 128K |
 | `glm-4.7` | 200K | 128K |
-| `glm-5` | 200K | 128K |
-| `glm-5-turbo` | 200K | 128K |
-| `glm-5v-turbo` | 200K | 128K |
-| `glm-5.1` | 200K | 128K |
-| `glm-5.2` | 1M | 128K |
-| `glm-5.3` | 1M | 128K |
-| `glm-5.3-flash` | 1M | 128K |
+| `glm-5` / `glm-5-turbo` / `glm-5v-turbo`（视觉） | 200K | 128K |
+| `glm-5.1` / `glm-5.2` | 200K / 1M | 128K |
+| `glm-5.3` / `glm-5.3-flash` | 1M | 128K |
 
-Requests for models not in this list are still forwarded upstream — the listing is informational, not a gate.
+## ❓ 常见问题
+
+**启动就退出，提示 Not logged in？**
+先登录：`bun run src/index.ts auth login zai`（或 bigmodel）。登录一次即可，凭据加密保存。
+
+**端口 8080 被占了？**
+环境变量换一个：`ZCODE_PROXY_PORT=8081 bun run src/index.ts`，或改 `config.yaml` 的 `server.port`。
+
+**工具一直连不上 / 401？**
+如果你设置过 `ZCODE_PROXY_API_KEY`，工具里必须填同一个值；不设置则免密。注意密钥开启后**所有路由**（包括 `/health`）都要带密钥。
+
+**换电脑 / 重装系统后要重新登录吗？**
+要。凭据加密时绑定了本机信息。跨机器迁移可以两边都设 `ZCODE_PROXY_CREDENTIAL_SECRET` 为同一个值再登录/拷贝 `~/.zcode-proxy/credentials.json`。
+
+**服务器上没有浏览器怎么登录？**
+用粘贴模式：`bun run src/index.ts auth login bigmodel --paste`，把打印出来的链接在任何设备的浏览器打开，再把跳转后的完整网址粘回来即可。
+
+**它在后台到底做了什么？**
+它就是一个"翻译官 + 传话员"：把你的工具发出的标准请求翻译成官方客户端的同款请求转发上去，再把回复原样翻译回来。所有流量都只在你本机和官方服务器之间，不经过任何第三方。
+
+## 🛠️ 参与开发
+
+```bash
+bun test            # 跑测试
+bun x tsc --noEmit  # 类型检查
+bun run dev         # 开发模式启动面板
+```
+
+架构与实现细节见 [`AGENTS.md`](AGENTS.md) 与各子目录的知识库文档。
 
 ## License
 
