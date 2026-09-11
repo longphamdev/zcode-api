@@ -4,6 +4,20 @@
 
 ZCode 的 system prompt 由多个模块化 section 组合注入，按 `injectionTarget` 分为 `system` 和 `meta_user` 两类，按 `cacheHint` 分为 `stable` 和 `dynamic`。
 
+> **2026-09-11 刷新（对齐 ZCode 3.11.2 CLI bundle）**：本文档已按 `_reverse/zcode.cjs`（3.11.2）
+> 的 `ContextBuilder`（`Hre`）逐符号核对更新。注意两点：
+> 1. **§4 Task Behavior / §5 Risky Actions / §6 Communication Style 是 2026-06-20 提取时的旧版
+>    残留（3.3.x era），现客户端已整体移除** —— 2026-09-11 对本机安装的 3.11.2 全量验证：三个
+>    section 的名称与全部标志句在 `zcode.cjs` 与 307MB `app.asar`（host + renderer + 捆绑库）
+>    中零命中，CLI 的 `addSection`/customSections API 无任何调用方，也无远程下发通道。其主题已被
+>    现行 section 以新词句覆盖（Comm Style → "# Communicating with the user"；Risky → Dynamic
+>    Behavior 尾段；Task → Context Management 行为规则）。代理不复制它们。
+> 2. 最终 wire 形状由 `assembleSystemMessages` 决定：**恰好 3 个 system 块**（每块
+>    `cache_control: ephemeral`）——(1) CLI Prefix 单独一块；(2) 其余 stable sections `\n\n` join；
+>    (3) 全部 dynamic sections `\n\n` join 后整体加 `\n\n` 前缀。section 内部行用 `\n` join。
+>    meta_user（currentDate 等）经 `tct` 组装成 context_prefix，以 `<system-reminder>…</system-reminder>`
+>    （`blt`，无内嵌换行）包裹挂为首个 user turn。
+
 ---
 
 ## 1. CLI Prefix（固定开头）
@@ -33,15 +47,53 @@ You respond to the user according to the active Output Style below while using Z
 ```
 - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.
 - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim.
-- `<system-reminder>` tags in messages and tool results are injected by the harness, not the user. Hooks may intercept tool calls; treat hook output as user feedback.
+- The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.
 - Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.
 - Reference code as `file_path:line_number` — it's clickable.
 ```
 
-## 3. Dynamic Behavior（动态行为准则）
+## 2b. ZCode Desktop Context（桌面端注入，stable）
+
+`presentationSurface === "zcode_desktop"` 时注入（`Ylt`，cacheHint **stable**，与 Agent Identity 同处第 2 块）：
 
 ```
+# ZCode Desktop Context
+
+### Files & URLs
+- Return local web URLs as Markdown links (e.g., [label](http://127.0.0.1:8080)).
+- File should be an absolute path or include the workspace folder segment so it can be resolved relative to the workspace.
+- Unless otherwise specified, return local file references as Markdown links (e.g., [name.md](/absolute/path/to/name.md)).
+
+### Inline Code Comments
+- Use the ::code-comment{...} directive when you need to attach feedback directly to specific code lines.
+- Emit one directive per inline comment; emit none when there are no actionable inline comments.
+- Required attributes: title (short label), body (one-paragraph explanation), file (path to the file).
+- Optional attributes: start, end (1-based line numbers), priority (0-3).
+- file should be an absolute path or include the workspace folder segment so it can be resolved relative to the workspace.
+- Keep line ranges tight; end defaults to start.
+- Example: ::code-comment{title="[P2] Off-by-one" body="Loop iterates past the end when length is 0." file="/path/to/foo.ts" start=10 end=11 priority=2}
+```
+
+## 3. Dynamic Behavior（动态行为准则，3.11.2 现行文本）
+
+`wTr`/`Xlt`，cacheHint **dynamic**。3.11.2 起 `Xlt.additional` 带默认内容（"# Communicating with the user" 段落组），组装为
+`beforeDefault + "\n\n" + default + "\n" + afterDefault + "\n\n" + forActions`（注意 default 与 comment 规则之间是**单换行**）：
+
+```
+# Communicating with the user
+
+Your text output is what the user reads; they usually can't see your thinking or the raw tool results. Write it for a teammate who stepped away and is catching up, not for a log file: they don't know the codenames or shorthand you created along the way, and they didn't watch your process unfold. Before your first tool call, say in a sentence what you're about to do; while working, give brief updates when you find something load-bearing or change direction.
+
+Text you write between tool calls may not be shown to the user. Everything the user needs from this turn — answers, summaries, findings, conclusions, deliverables — must be in the final text message of your turn, with no tool calls after it. Keep text between tool calls to brief status notes. If something important appeared only mid-turn or in your thinking, restate it in that final message.
+
+Lead with the outcome. Your first sentence after finishing should answer "what happened" or "what did you find" — the thing the user would ask for if they said "just give me the TLDR." Supporting detail and reasoning come after, for readers who want them.
+
+Being readable and being concise are different things, and readable matters more. If the user has to reread your summary or ask you to explain, any time saved by brevity is gone. The way to keep output short is to be selective about what you include (drop details that don't change what the reader would do next), not to compress the writing into fragments, abbreviations, arrow chains like `A → B → fails`, or jargon. What you do include, write in complete sentences with the technical terms spelled out. Don't make the reader cross-reference labels or numbering you invented earlier; say what you mean in place.
+
+Match the response to the question: a simple question gets a direct answer in prose, not headers and sections. Use tables only for short enumerable facts, with explanations in the surrounding prose rather than the cells. Calibrate to the user — a bit tighter for an expert, more explanatory for someone newer.
+
 Write code that reads like the surrounding code: match its comment density, naming, and idiom.
+Only write a code comment to state a constraint the code itself can't show — never to say where it came from, what the next line does, or why your change is correct; that's you talking to the reviewer, not the next reader, and it's noise the moment the PR merges.
 
 For actions that are hard to reverse or outward-facing, confirm first unless durably authorized or explicitly told to proceed without asking; approval in one context doesn't extend to the next. Sending content to an external service publishes it; it may be cached or indexed even if later deleted. Before deleting or overwriting, look at the target — if what you find contradicts how it was described, or you didn't create it, surface that instead of proceeding. Report outcomes faithfully: if tests fail, say so with the output; if a step was skipped, say that; when something is done and verified, state it plainly without hedging.
 ```
@@ -200,10 +252,23 @@ Final response examples:
 - Bad: `Everything works perfectly.` unless that is directly verified.
 ```
 
-## 7. Context Management（上下文管理）
+## 7. Context Management（上下文管理，3.11.2 现行文本）
+
+`STr`/`xTr`，cacheHint **dynamic**，永远跟在 Environment Info 之后（dynamic 块内）。组装为 `default + "\n\n" + additional`（additional 第一条 "…exhaustive survey" **无句尾句点**，为 bundle 字面量原文）：
 
 ```
+# Context management
 When the conversation grows long, some or all of the current context is summarized; the summary, along with any remaining unsummarized context, is provided in the next context window so work can continue — you don't need to wrap up early or hand off mid-task.
+
+When you have enough information to act, act. Do not re-derive facts already established in the conversation, re-litigate a decision the user has already made, or narrate options you will not pursue. If you are weighing a choice, give a recommendation, not an exhaustive survey
+
+You are operating autonomously. The user is not watching in real time and cannot answer questions mid-task, so asking 'Want me to…?' or 'Shall I…?' will block the work. For reversible actions that follow from the original request, proceed without asking. Stop only for destructive actions or genuine scope changes the user must decide. Offering follow-ups after the task is done is fine; asking permission before doing the work is not.
+
+Exception: when the user is describing a problem, asking a question, or thinking out loud rather than requesting a change, the deliverable is your assessment. Report your findings and stop. Don't apply a fix until they ask for one.
+
+Before ending your turn, check your last paragraph. If it is a plan, an analysis, a question, a list of next steps, or a promise about work you have not done ('I'll…', 'let me know when…'), do that work now with tool calls. That includes retrying after errors and gathering missing information yourself. Do not stop because the context or session is long. End your turn only when the task is complete or you are blocked on input only the user can provide.
+
+Before running a command that changes system state — restarts, deletes, config edits — check that the evidence actually supports that specific action. A signal that pattern-matches to a known failure may have a different cause.
 ```
 
 ## 8. Session Guidance（会话引导）
@@ -264,19 +329,24 @@ This session is being continued from a previous conversation that was compacted.
 Continue from the current task without recapping this summary to the user.
 ```
 
-## 10. 注入顺序
+## 10. 注入顺序（3.11.2 `build()` + `assembleSystemMessages` 代码事实）
 
-ZCode 按以下顺序组装 system prompt（`orderSectionsForInjection`）：
+`build()` 按 push 顺序收集 sections，`assembleSystemMessages` 再按 `injectionTarget` + `cacheHint` 分组成**恰好 3 个 system 块**：
 
-1. **System / Stable**：CLI Prefix → Agent Identity → Dynamic Behavior → Session Guidance → Memory → Environment Info → Output Style → Context Management → Git Context
-2. **System / Dynamic**：Task Behavior → Risky Actions → Communication Style
-3. **Meta User / Stable**：Skills Listing
-4. **Meta User / Dynamic**：User Instructions → Current Date → Custom Sections
+1. **块 1 = cli_prefix 单独一块**（`cache_control: ephemeral`）
+2. **块 2 = 其余 STABLE sections，`\n\n` join**：Agent Identity →（有自定义 system prompt 时替换 Identity）→ ZCode Desktop Context（桌面端，stable）
+3. **块 3 = 全部 DYNAMIC sections，`\n\n` join，块文本整体加 `\n\n` 前缀**：Dynamic Behavior → Session Guidance（条件）→ Memory（条件）→ **Environment Info** → Output Style（条件）→ **Context Management** → Git System Context（条件）
 
-最终消息结构：
+> 注意：Environment Info 与 Git Context 的 `cacheHint` 是 **dynamic**（`Plt`/`Mlt`），与旧文档把它们列入 stable 组的描述不同；§4/§5/§6 三段为 HOST 侧注入，不在 CLI bundle 的 build() 序列里。
+
+meta_user 侧：Skills Listing（stable）与 context_prefix（User Instructions + **Current Date** + Custom Sections，`tct` join）经 `<system-reminder>` 包裹挂为首个 user turn。
+
+最终消息结构（Anthropic wire）：
 ```
-[system] cli_prefix + stable sections
-[system] dynamic sections
-[user]   skills_listing
-[user]   context_prefix (user instructions, current date, etc.)
+[system 块1] cli_prefix                                        (ephemeral)
+[system 块2] identity [+ desktop context 等 stable 段]          (ephemeral)
+[system 块3] "\n\n" + dynamic 段（含 Environment、Context Mgmt）(ephemeral)
+[user]      <system-reminder>skills_listing…</system-reminder>
+[user]      <system-reminder>context_prefix（currentDate 等）…</system-reminder>
+[user]      用户实际输入
 ```

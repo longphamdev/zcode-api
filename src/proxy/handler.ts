@@ -45,6 +45,7 @@ import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse } from "../translator/
 import type { OpenAIChatRequest, OpenAIChatResponse, AnthropicMessagesRequest, AnthropicMessagesResponse } from "../translator/types.js";
 import { dumpPhase, dumpHeaders, dumpBody, dumpEnabled } from "./dump.js";
 import { inflateWithCap } from "./inflate.js";
+import { buildAnthropicMetadataUserId } from "./trace-headers.js";
 
 /** Options for the proxy handler. */
 export interface ProxyHandlerOptions {
@@ -157,7 +158,10 @@ export async function proxyRequest(
     if (debug) debugLine(reqId, `translated Anthropic→OpenAI (bytes=${upstreamBody?.length ?? 0})`);
   }
 
-  const transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, userId: startPlan ? undefined : cred.userId, startPlan });
+  // Bundle `E2e` fires for EVERY anthropic-kind request (both plans) — the
+  // injected user_id is the device/session blob, never the account uuid.
+  const metadataUserId = buildAnthropicMetadataUserId(config.identity.deviceMid, clientSession?.sessionId);
+  const transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, metadataUserId, startPlan });
   if (debug && transformedBody !== upstreamBody) {
     debugLine(reqId, `body transformed (upstreamFormat=${upstreamFormat}, startPlan=${startPlan}, bytes=${transformedBody?.length ?? 0})`);
   }

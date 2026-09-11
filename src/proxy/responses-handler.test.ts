@@ -276,7 +276,7 @@ describe("handleResponses captcha (start-plan)", () => {
     expect(captcha.minted()).toBe(0);
   });
 
-  it("injects metadata.user_id on coding-plan but NOT on start-plan (CL-15, mirrors handler.ts)", async () => {
+  it("injects the device/session metadata.user_id blob on BOTH plans (bundle E2e is plan-agnostic)", async () => {
     const START_PLAN: ProxyConfig = { ...CONFIG, plan: "start-plan", provider: "bigmodel" };
     let codingBody = "";
     let startBody = "";
@@ -296,8 +296,10 @@ describe("handleResponses captcha (start-plan)", () => {
     await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: CONFIG, auth, fetchImpl: codingFetch });
     await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: START_PLAN, auth, fetchImpl: startFetch, captcha: startPlanCaptcha.module });
 
-    expect(JSON.parse(codingBody).metadata?.user_id).toBe("u1");
-    expect(JSON.parse(startBody).metadata?.user_id).toBeUndefined();
+    // The account uuid ("u1") is never transmitted — account_uuid is hardcoded
+    // empty in the bundle (UIo); no session resolution on this path → "".
+    expect(JSON.parse(JSON.parse(codingBody).metadata?.user_id)).toEqual({ account_uuid: "", session_id: "" });
+    expect(JSON.parse(JSON.parse(startBody).metadata?.user_id)).toEqual({ account_uuid: "", session_id: "" });
   });
 });
 

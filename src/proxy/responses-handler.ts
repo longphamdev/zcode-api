@@ -37,6 +37,7 @@ async function loadCaptcha(): Promise<CaptchaModule> {
 }
 import { getDefaultEndpointRouting, type EndpointRoutingService } from "./endpoint-routing.js";
 import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManager } from "./client-signing.js";
+import { buildAnthropicMetadataUserId } from "./trace-headers.js";
 import { credentialString } from "../auth/types.js";
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
 import { anthropicSseToOpenaiSse } from "../translator/sse-translator.js";
@@ -172,13 +173,14 @@ export async function handleResponses(
     } catch (err) {
       return errorResponse(400, "translation_failed", `Chat→Anthropic translation failed: ${(err as Error).message}`);
     }
-    // userId gating mirrors handler.ts: coding-plan injects the OAuth userId,
-    // start-plan omits it (internal consistency; the bundle is presence-gated
-    // with no plan concept — whether start-plan should carry it is not
-    // determinable from _reverse, kept aligned with the sibling path).
+    // userId mirrors handler.ts for BOTH plans: the bundle's `E2e` is
+    // provider-kind gated only (never plan-gated), so start-plan carries the
+    // same device/session blob as coding-plan. The /v1/responses path has no
+    // client-session resolution — session_id falls back to "" (a legal `bnt`
+    // output in the bundle).
     upstreamRequestBody = transformRequestBody(JSON.stringify(anthropicReq), {
       format: "anthropic",
-      userId: startPlan ? undefined : cred.userId,
+      metadataUserId: buildAnthropicMetadataUserId(opts.config.identity.deviceMid, undefined),
       startPlan,
     }) ?? JSON.stringify(anthropicReq);
   }

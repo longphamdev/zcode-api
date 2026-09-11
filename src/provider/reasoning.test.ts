@@ -7,11 +7,9 @@ import {
   isGlm53Model,
   normalizeGlm53Effort,
   buildGlm53Reasoning,
-  fitGlm53Budget,
+  clampGlm53BudgetToModel,
   GLM53_DEFAULT_EFFORT,
   GLM53_THINKING_BUDGETS,
-  GLM53_MIN_THINKING_BUDGET,
-  GLM53_ANSWER_RESERVE,
 } from "./reasoning.js";
 
 describe("isGlm53Model", () => {
@@ -117,47 +115,27 @@ describe("buildGlm53Reasoning", () => {
   });
 });
 
-describe("fitGlm53Budget", () => {
-  it("clamps the budget to max_tokens minus the answer reserve, not max_tokens - 1", () => {
-    // Regression: an earlier version clamped to `maxTokens - 1`, which left
-    // only a single token for the answer whenever max_tokens was small.
-    expect(fitGlm53Budget(32_000, 20_000)).toBe(20_000 - GLM53_ANSWER_RESERVE);
+describe("clampGlm53BudgetToModel (catalog-patch clamp)", () => {
+  it("clamps against the MODEL ceiling minus one, never the per-request max_tokens", () => {
+    // ZCode's catalog patch clamps Math.min(budgetTokens, maxOutputTokens - 1)
+    // against the large fixed model ceiling; the request-level answer room is
+    // provided additively by applyAnthropicThinkingCompat instead.
+    expect(clampGlm53BudgetToModel(200_000, 128_000)).toBe(127_999);
   });
 
-  it("passes the budget through unchanged when it already fits with room to spare", () => {
-    expect(fitGlm53Budget(8_000, 128_000)).toBe(8_000);
+  it("passes budgets that fit the model ceiling through unchanged", () => {
+    expect(clampGlm53BudgetToModel(32_000, 128_000)).toBe(32_000);
+    expect(clampGlm53BudgetToModel(8_000, 64_000)).toBe(8_000);
+    expect(clampGlm53BudgetToModel(GLM53_THINKING_BUDGETS.max, 128_000)).toBe(GLM53_THINKING_BUDGETS.max);
   });
 
-  it("returns undefined when the clamped budget falls below the 1024 floor", () => {
-    expect(fitGlm53Budget(8_000, 1_000)).toBeUndefined();
+  it("passes through unchanged when the model ceiling is unknown (not in catalog)", () => {
+    expect(clampGlm53BudgetToModel(32_000, undefined)).toBe(32_000);
+    expect(clampGlm53BudgetToModel(32_000, Number.NaN)).toBe(32_000);
+    expect(clampGlm53BudgetToModel(32_000, "128000")).toBe(32_000);
   });
 
-  it("returns exactly the floor budget unclamped when max_tokens leaves just enough room for floor + answer reserve", () => {
-    const maxTokens = GLM53_MIN_THINKING_BUDGET + GLM53_ANSWER_RESERVE;
-    expect(fitGlm53Budget(8_000, maxTokens)).toBe(GLM53_MIN_THINKING_BUDGET);
-  });
-
-  it("passes the budget through unchanged when maxTokens is not a finite number", () => {
-    expect(fitGlm53Budget(32_000, undefined)).toBe(32_000);
-    expect(fitGlm53Budget(32_000, Number.NaN)).toBe(32_000);
-    expect(fitGlm53Budget(32_000, "128000")).toBe(32_000);
-  });
-
-  it("regression: a small explicit max_tokens (e.g. the old generic 4096 default) no longer collapses the thinking budget to a single token, leaving GLM53_ANSWER_RESERVE for the answer", () => {
-    // Before this fix, fitGlm53Budget(32_000, 4096) returned 4095 — nearly
-    // the entire response allowance spent on thinking, leaving 1 token for
-    // the answer. It must now leave at least GLM53_ANSWER_RESERVE tokens.
-    const result = fitGlm53Budget(32_000, 4096);
-    expect(result).toBe(4096 - GLM53_ANSWER_RESERVE);
-    expect(4096 - (result ?? 0)).toBeGreaterThanOrEqual(GLM53_ANSWER_RESERVE);
-  });
-
-  it("client omits max_tokens on glm-5.3: given the model's real maxOutputTokens ceiling (128,000, not the generic 4096 fallback), the full effort-level budget survives untouched", () => {
-    // This is the scenario resolveDefaultMaxTokens() in openai-to-anthropic.ts
-    // exists for: when max_tokens is omitted, glm-5.3 now defaults to its
-    // catalog maxOutputTokens (128,000) instead of the generic 4096, so even
-    // the largest effort budget (max: 32,000) has ample room to survive the
-    // clamp in fitGlm53Budget unchanged.
-    expect(fitGlm53Budget(GLM53_THINKING_BUDGETS.max, 128_000)).toBe(GLM53_THINKING_BUDGETS.max);
+  it("floors fractional model ceilings before clamping", () => {
+    expect(clampGlm53BudgetToModel(200_000, 100_000.9)).toBe(99_999);
   });
 });

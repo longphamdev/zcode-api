@@ -39,6 +39,7 @@
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import os from "node:os";
+import { basename } from "node:path";
 import type { ProxyIdentity } from "../config/types.js";
 
 /** Printable-ASCII gate copied from the ZCode bundle's `fio` helper. */
@@ -192,4 +193,40 @@ export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> 
  */
 export function identityCacheKey(identity: ProxyIdentity): string {
   return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
+}
+
+/**
+ * Environment-info values for the start-plan system prompt's Environment
+ * section — mirrors the bundle's `createNodeContextSourceAdapter`
+ * (cwd/platform/shell/osVersion feeding `T9o`).
+ *
+ * platform/arch/release ride the SAME `ZCODE_IDENTITY_*` env chain as the
+ * identity headers, so the prompt's `Platform:`/`OS Version:` lines can never
+ * contradict `X-Platform`/`X-Os-Version` — real traffic is either all-real
+ * (desktop) or all-"unknown" (headless fallback); a mixed combination is a
+ * distinguisher no real client produces. `osVersion` keeps the bundle's
+ * `${platform} ${release} ${arch}` composition.
+ *
+ * `shell` follows the bundle algorithm verbatim (`SHELL` ?? `ComSpec` ?? ""
+ * → basename, else "unknown" — "unknown" is a legal shell value when
+ * detection fails). `cwd` is `ZCODE_IDENTITY_ENV_CWD` if set (Android /
+ * masked-identity deployments), else `process.cwd()` — the real client sends
+ * its actual working directory, and `cwd` is NEVER "unknown" in real traffic.
+ */
+export interface EnvPromptInfo {
+  cwd: string;
+  platform: string;
+  shell: string;
+  osVersion: string;
+}
+
+export function resolveEnvPromptInfo(): EnvPromptInfo {
+  const platform = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform) ?? "unknown";
+  const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? os.release()) ?? "";
+  const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? os.arch()) ?? "";
+  const osVersion = [platform, release, arch].filter((part) => part.length > 0).join(" ");
+  const shellRaw = process.env.SHELL ?? process.env.ComSpec ?? process.env.COMSPEC ?? "";
+  const shell = shellRaw ? basename(shellRaw) : "unknown";
+  const cwd = process.env.ZCODE_IDENTITY_ENV_CWD?.trim() || process.cwd();
+  return { cwd, platform, shell, osVersion };
 }

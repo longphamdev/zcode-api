@@ -52,15 +52,22 @@ describe("models", () => {
       expect(typeof m.id).toBe("string");
       expect(m.id.length).toBeGreaterThan(0);
       expect(m.contextWindow).toBeGreaterThan(0);
-      expect(m.maxOutputTokens).toBe(128_000);
+      expect(m.maxOutputTokens).toBeGreaterThan(0);
     }
   });
 
-  it("all models except glm-5.2/glm-5.3/glm-5.3-flash have 200k context", () => {
-    for (const m of MODELS) {
-      if (m.id === "glm-5.2" || m.id === "glm-5.3" || m.id === "glm-5.3-flash") continue;
-      expect(m.contextWindow).toBe(200_000);
-    }
+  it("contextWindow + maxOutputTokens match the 3.11.2 catalog per model", () => {
+    // Synced against _reverse/models_catalog.json (zai == bigmodel entries).
+    const byId = Object.fromEntries(MODELS.map((m) => [m.id, m]));
+    expect(byId["glm-4.5-air"]).toMatchObject({ contextWindow: 131_072, maxOutputTokens: 98_304 });
+    expect(byId["glm-4.6"]).toMatchObject({ contextWindow: 200_000, maxOutputTokens: 131_072 });
+    expect(byId["glm-4.6v"]).toMatchObject({ contextWindow: 131_072, maxOutputTokens: 32_768 });
+    expect(byId["glm-4.7"]).toMatchObject({ contextWindow: 200_000, maxOutputTokens: 131_072 });
+    expect(byId["glm-5"]).toMatchObject({ contextWindow: 200_000, maxOutputTokens: 64_000 });
+    expect(byId["glm-5-turbo"]).toMatchObject({ contextWindow: 200_000, maxOutputTokens: 64_000 });
+    expect(byId["glm-5v-turbo"]).toMatchObject({ contextWindow: 200_000, maxOutputTokens: 131_072 });
+    expect(byId["glm-5.1"]).toMatchObject({ contextWindow: 200_000, maxOutputTokens: 64_000 });
+    expect(byId["glm-5.3"]).toMatchObject({ contextWindow: 1_000_000, maxOutputTokens: 128_000 });
   });
 
   it("glm-5.2, glm-5.3 and glm-5.3-flash have 1M context", () => {

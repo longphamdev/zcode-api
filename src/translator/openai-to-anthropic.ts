@@ -22,7 +22,8 @@ import {
   isGlm53Model,
   normalizeGlm53Effort,
   buildGlm53Reasoning,
-  fitGlm53Budget,
+  clampGlm53BudgetToModel,
+  GLM53_MIN_THINKING_BUDGET,
 } from "../provider/reasoning.js";
 
 /** Default max_tokens if the OpenAI request doesn't specify one. */
@@ -51,13 +52,14 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   if (req.stream !== undefined) result.stream = req.stream;
   if (req.stop) result.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
   if (isGlm53Model(req.model)) {
-    const { thinking, output_config } = translateGlm53Reasoning(req, result.max_tokens);
+    const { thinking, output_config } = translateGlm53Reasoning(req);
     result.thinking = thinking;
     if (output_config) result.output_config = output_config;
   } else {
     const thinking = translateThinking(req);
     if (thinking) result.thinking = thinking;
   }
+  applyAnthropicThinkingCompat(result);
   if (req.tools?.length && req.tool_choice !== "none") {
     result.tools = req.tools.map(translateToolOpenAIToAnthropic);
   }
@@ -67,6 +69,42 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   }
 
   return result;
+}
+
+/**
+ * Post-pass mirroring the bundle's anthropic request-builder compat rules
+ * (applied AFTER thinking injection, exactly like the SDK does):
+ *   - thinking enabled → `temperature`, `top_k`, `top_p` are VOIDED (the
+ *     upstream rejects sampling params alongside extended thinking; the real
+ *     client never sends the combination);
+ *   - thinking enabled without a budget → default budget 1024;
+ *   - thinking enabled → `max_tokens += budget`, clamped to the model's
+ *     catalog maxOutputTokens (real traffic always carries the additive
+ *     total — the budget is spent on top of the answer allowance);
+ *   - no thinking + `temperature` + `top_p` both set → `top_p` voided
+ *     (SDK: "topP is not supported when temperature is set").
+ */
+function applyAnthropicThinkingCompat(result: AnthropicMessagesRequest): void {
+  const thinking = result.thinking;
+  const enabled = thinking?.type === "enabled" || thinking?.type === "adaptive";
+  if (!enabled || !thinking) {
+    if (result.temperature !== undefined && result.top_p !== undefined) {
+      delete result.top_p;
+    }
+    return;
+  }
+  let budget = thinking.budget_tokens;
+  if (thinking.type === "enabled" && (budget === undefined || !Number.isFinite(budget))) {
+    budget = GLM53_MIN_THINKING_BUDGET;
+    thinking.budget_tokens = budget;
+  }
+  delete result.temperature;
+  delete result.top_k;
+  delete result.top_p;
+  const effective = budget ?? 0;
+  result.max_tokens = result.max_tokens + effective;
+  const modelMax = MODELS.find((m) => m.id === result.model)?.maxOutputTokens;
+  if (modelMax !== undefined && result.max_tokens > modelMax) result.max_tokens = modelMax;
 }
 
 function translateThinking(req: OpenAIChatRequest): AnthropicThinkingConfig | undefined {
@@ -87,7 +125,10 @@ function translateThinking(req: OpenAIChatRequest): AnthropicThinkingConfig | un
     }
   }
   if (req.reasoning_effort === "none") return { type: "disabled" };
-  if (isReasoningModel(req.model)) return { type: "enabled" };
+  // Catalog "enabled" default for reasoning models (glm-5.1/5/4.x): thinking
+  // on with the SDK's default 1024 budget — the bundle's builder forces a
+  // budget whenever thinking is enabled, never a bare {type:"enabled"}.
+  if (isReasoningModel(req.model)) return { type: "enabled", budget_tokens: GLM53_MIN_THINKING_BUDGET };
   return undefined;
 }
 
@@ -98,18 +139,13 @@ function isReasoningModel(model: string): boolean {
 /**
  * Resolve the max_tokens fallback when the OpenAI client omits it.
  *
- * The generic `DEFAULT_MAX_TOKENS` (4096) is too small to coexist with the
- * GLM-5.3 effort-based thinking budgets `translateGlm53Reasoning` attaches
- * below (up to 32,000) — `fitGlm53Budget` would clamp nearly the entire
- * allowance into thinking, leaving almost nothing for the answer. ZCode's own
- * clamp is written against the *model's* maxOutputTokens ceiling (128,000 for
- * glm-5.3), not a generic request-level fallback, so for this family look up
- * that ceiling in the catalog instead. Falls back to the generic default if
- * the model id isn't in the catalog. Every other model's default is
- * untouched — this is deliberately scoped to GLM-5.3 only.
+ * Mirrors the bundle's `Z = maxOutputTokens ?? modelDefault`: the real client
+ * falls back to the model's CATALOG maxOutputTokens ceiling (e.g. 128,000 for
+ * glm-5.3, 131,072 for glm-4.6, 64,000 for glm-5.1) — never a small generic
+ * constant. Falls back to the generic default only for model ids that aren't
+ * in the catalog.
  */
 function resolveDefaultMaxTokens(model: string): number {
-  if (!isGlm53Model(model)) return DEFAULT_MAX_TOKENS;
   const catalogEntry = MODELS.find((m) => m.id === model);
   return catalogEntry?.maxOutputTokens ?? DEFAULT_MAX_TOKENS;
 }
@@ -136,7 +172,6 @@ function resolveDefaultMaxTokens(model: string): number {
  */
 function translateGlm53Reasoning(
   req: OpenAIChatRequest,
-  maxTokens: number,
 ): { thinking: AnthropicThinkingConfig; output_config?: AnthropicOutputConfig } {
   const explicit = req.thinking;
   if (explicit && typeof explicit === "object" && explicit.type === "disabled") {
@@ -151,17 +186,20 @@ function translateGlm53Reasoning(
     const explicitBudget = explicit.budget_tokens ?? explicit.budgetTokens;
     if (typeof explicitBudget === "number" && Number.isFinite(explicitBudget)) {
       // Floor before the positivity test, not after: JSON permits a fractional
-      // budget, and a value like 0.5 passes `> 0` yet floors to 0 — which then
-      // survives `fitGlm53Budget` untouched whenever `max_tokens` is not a
-      // finite number, handing the upstream `budget_tokens: 0`.
+      // budget, and a value like 0.5 passes `> 0` yet floors to 0 — which would
+      // hand the upstream `budget_tokens: 0`.
       const floored = Math.floor(explicitBudget);
       if (floored > 0) budget = floored;
     }
   }
 
-  const fitted = fitGlm53Budget(budget, maxTokens);
+  // Catalog-patch clamp: budget vs the MODEL ceiling (not the request's
+  // max_tokens). The request-level split is handled by the SDK-mirror
+  // applyAnthropicThinkingCompat (max_tokens += budget, capped at model max).
+  const modelMax = MODELS.find((m) => m.id === req.model)?.maxOutputTokens;
+  const fitted = clampGlm53BudgetToModel(budget, modelMax);
   return {
-    thinking: fitted !== undefined ? { type: "enabled", budget_tokens: fitted } : { type: "enabled" },
+    thinking: { type: "enabled", budget_tokens: fitted },
     output_config: base.output_config,
   };
 }

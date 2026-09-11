@@ -15,18 +15,25 @@
  *      `zsi`+`Fsi` pair). Anthropic's API silently ignores `cache_control`
  *      below the per-model token floor, so unconditional marking is safe and
  *      matches ZCode's `applyCacheControl: true` default.
- *   4. Anthropic format + `ctx.userId` set → inject `metadata: { user_id }`.
- *      Mirrors `user_id: B.metadata.userId` at bundle offset ~4760586.
+ *   4. Anthropic format + `ctx.metadataUserId` set → inject
+ *      `metadata: { user_id }` (bundle `E2e`/`UIo` device/session blob —
+ *      value assembled by the caller via buildAnthropicMetadataUserId).
  *
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
-import { buildStartPlanSystem } from "./system-prompt.js";
+import { buildStartPlanSystem, buildContextPrefixMessage } from "./system-prompt.js";
+import { resolveEnvPromptInfo } from "./identity.js";
 
 interface TransformContext {
   format: Format;
-  /** When set (OAuth mode), the Anthropic-format body gets `metadata.user_id` injected. */
-  userId?: string;
+  /**
+   * When set, the Anthropic-format body gets `metadata.user_id` injected.
+   * Callers pass the bundle's device/session blob (see
+   * buildAnthropicMetadataUserId in trace-headers.ts) — real traffic never
+   * carries the account uuid here (account_uuid is hardcoded "" upstream).
+   */
+  metadataUserId?: string;
   /** When true (start-plan), prepend ZCode gateway system blocks. */
   startPlan?: boolean;
 }
@@ -60,8 +67,8 @@ export function transformRequestBody(body: string | undefined, ctx: TransformCon
       modified = applyStartPlanSystem(obj) || modified;
     }
     modified = applyAnthropicCacheControl(obj) || modified;
-    if (ctx.userId) {
-      modified = applyAnthropicUserId(obj, ctx.userId) || modified;
+    if (ctx.metadataUserId) {
+      modified = applyAnthropicUserId(obj, ctx.metadataUserId) || modified;
     }
   }
 
@@ -167,16 +174,29 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
 }
 
 /**
- * start-plan: prepend ZCode gateway system blocks. The gateway rejects
- * requests without these identity blocks with 3012 "method not allowed".
- * Forwards `body.model` so `buildStartPlanSystem` can merge the dynamic
- * "You are powered by the model named ${model}." line into the trailing
- * Environment block (matches bundle 3.11.2 `T9o`/buildEnvInfoSection — the
- * line lives INSIDE the Environment text, not as a separate block).
+ * start-plan: prepend ZCode gateway system blocks (ContextBuilder mirror —
+ * see system-prompt.ts). The gateway rejects requests without these identity
+ * blocks with 3012 "method not allowed". Forwards `body.model` so
+ * `buildStartPlanSystem` can emit the dynamic "You are powered by the model
+ * named ${model}." line inside the Environment section, and attaches the
+ * meta_user context_prefix (currentDate `<system-reminder>` user turn) that
+ * every real client request carries. Client `cache_control` on tools is
+ * stripped: official blocks (3) + last-message marker (1) already fill
+ * Anthropic's 4-breakpoint cache budget.
  */
 function applyStartPlanSystem(body: Record<string, unknown>): boolean {
   const model = typeof body.model === "string" ? body.model : undefined;
-  body.system = buildStartPlanSystem(body.system, model);
+  body.system = buildStartPlanSystem(body.system, model, resolveEnvPromptInfo());
+  if (Array.isArray(body.messages) && body.messages.length > 0) {
+    body.messages = [buildContextPrefixMessage() as unknown, ...body.messages];
+  }
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      if (typeof tool === "object" && tool !== null && "cache_control" in tool) {
+        delete (tool as Record<string, unknown>).cache_control;
+      }
+    }
+  }
   return true;
 }
 
@@ -185,7 +205,7 @@ function applyStartPlanOpenAISystem(body: Record<string, unknown>): boolean {
   if (!Array.isArray(messages)) return false;
 
   const model = typeof body.model === "string" ? body.model : undefined;
-  const official = buildStartPlanSystem(undefined, model).map((block) => ({
+  const official = buildStartPlanSystem(undefined, model, resolveEnvPromptInfo()).map((block) => ({
     role: "system",
     content: typeof block === "object" && block !== null && "text" in block ? String(block.text) : "",
   }));

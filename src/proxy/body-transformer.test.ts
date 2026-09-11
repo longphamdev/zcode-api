@@ -188,15 +188,34 @@ describe("transformRequestBody — combined behavior", () => {
   });
 });
 
+/** Deterministic env for start-plan assertions (resolveEnvPromptInfo reads these). */
+function withEnvPromptVars<T>(fn: () => T): T {
+  const keys = ["ZCODE_IDENTITY_ENV_CWD", "ZCODE_IDENTITY_PLATFORM", "ZCODE_IDENTITY_RELEASE", "ZCODE_IDENTITY_ARCH", "SHELL"] as const;
+  const saved = keys.map((k) => [k, process.env[k]] as const);
+  process.env.ZCODE_IDENTITY_ENV_CWD = "/home/dev/project";
+  process.env.ZCODE_IDENTITY_PLATFORM = "linux";
+  process.env.ZCODE_IDENTITY_RELEASE = "6.8.0-49-generic";
+  process.env.ZCODE_IDENTITY_ARCH = "x64";
+  process.env.SHELL = "/bin/bash";
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
 describe("transformRequestBody — start-plan system (Anthropic)", () => {
-  it("prepends three official blocks with the currentModel line merged into the Environment block (T9o)", () => {
+  it("prepends three official blocks in the ContextBuilder shape with real env values", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       max_tokens: 1024,
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
@@ -207,39 +226,102 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     });
     expect(parsed.system[1].text).toContain("# Harness");
     expect(parsed.system[1].text).toContain("interactive ZCode agent");
+    expect(parsed.system[1].text).toContain("# ZCode Desktop Context");
     expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
+    expect(parsed.system[2].text.startsWith("\n\n# Communicating with the user")).toBe(true);
     expect(parsed.system[2].text).toContain("You have been invoked in the following environment:");
+    expect(parsed.system[2].text).toContain("- Primary working directory: /home/dev/project");
     expect(parsed.system[2].text).toContain("- Is a git repository: no");
     expect(parsed.system[2].text).not.toContain("- Is a git repository: unknown");
-    // The powered-by line lives INSIDE the Environment text as its last line,
-    // not as a separate 4th block (bundle 3.11.2 T9o shape).
-    expect(parsed.system[2].text.endsWith("\n- You are powered by the model named glm-5.2.")).toBe(true);
+    expect(parsed.system[2].text).toContain("- Platform: linux");
+    expect(parsed.system[2].text).toContain("- Shell: bash");
+    expect(parsed.system[2].text).toContain("- OS Version: linux 6.8.0-49-generic x64");
+    // The powered-by line lives INSIDE the Environment section, followed by
+    // Context Management (bundle 3.11.2 assembleSystemMessages shape).
+    expect(parsed.system[2].text).toContain("- You are powered by the model named glm-5.2.\n\n# Context management");
     expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral" });
   });
 
-  it("omits the currentModel block when body.model is missing", () => {
+  it("prepends the currentDate context_prefix user message (tct/Vre/blt mirror)", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages).toHaveLength(2);
+    expect(parsed.messages[0].role).toBe("user");
+    expect(parsed.messages[0].content).toEqual([
+      {
+        type: "text",
+        text: expect.stringMatching(
+          /^<system-reminder>As you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is \d{4}-\d{2}-\d{2}\.\n\n {6}IMPORTANT: this context may or may not be relevant to your tasks\. You should not respond to this context unless it is highly relevant to your task\.<\/system-reminder>$/,
+        ),
+      },
+    ]);
+    // The client's message keeps the last-message cache marker (phase 2)
+    expect(parsed.messages[1]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }],
+    });
+  });
+
+  it("strips client cache_control from tools (4-breakpoint budget)", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        { name: "get_weather", cache_control: { type: "ephemeral" } },
+        { name: "read_file" },
+      ],
+    });
+
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const parsed = JSON.parse(out as string);
+    expect(parsed.tools[0]).toEqual({ name: "get_weather" });
+    expect(parsed.tools[1]).toEqual({ name: "read_file" });
+  });
+
+  it("strips client cache_control from preserved system blocks", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      system: [{ type: "text", text: "User rule", cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const parsed = JSON.parse(out as string);
+    expect(parsed.system).toHaveLength(4);
+    expect(parsed.system[3]).toEqual({ type: "text", text: "User rule" });
+  });
+
+  it("omits the powered-by line when body.model is missing", () => {
     const body = JSON.stringify({
       max_tokens: 1024,
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
     expect(parsed.system[2].text).toContain("You have been invoked in the following environment:");
+    expect(parsed.system[2].text).not.toContain("powered by the model named");
   });
 
-  it("omits the currentModel block when body.model is an empty string", () => {
+  it("omits the powered-by line when body.model is an empty string", () => {
     const body = JSON.stringify({
       model: "",
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
+    expect(parsed.system[2].text).not.toContain("powered by the model named");
   });
 
   it("does not treat non-string body.model as a currentModel", () => {
@@ -248,10 +330,11 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
+    expect(parsed.system[2].text).not.toContain("powered by the model named");
   });
 
   it("preserves client system text after ZCode's official blocks", () => {
@@ -261,7 +344,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(4);
@@ -276,7 +359,7 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = transformRequestBody(body, { format: "openai", startPlan: true });
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.messages[0]).toEqual({
@@ -285,24 +368,27 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
     });
     expect(parsed.messages[1].role).toBe("system");
     expect(parsed.messages[1].content).toContain("# Harness");
+    expect(parsed.messages[1].content).toContain("# ZCode Desktop Context");
     expect(parsed.messages[2].role).toBe("system");
+    expect(parsed.messages[2].content.startsWith("\n\n# Communicating with the user")).toBe(true);
     expect(parsed.messages[2].content).toContain("You have been invoked in the following environment:");
     expect(parsed.messages[2].content).toContain("- Is a git repository: no");
     expect(parsed.messages[2].content).toContain("- You are powered by the model named glm-5.2.");
     expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
   });
 
-  it("omits the currentModel system message when body.model is missing (OpenAI)", () => {
+  it("omits the powered-by system message when body.model is missing (OpenAI)", () => {
     const body = JSON.stringify({
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = transformRequestBody(body, { format: "openai", startPlan: true });
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.messages[0].role).toBe("system");
     expect(parsed.messages[2].role).toBe("system");
     expect(parsed.messages[2].content).toContain("You have been invoked in the following environment:");
+    expect(parsed.messages[2].content).not.toContain("powered by the model named");
     expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
   });
 });
@@ -313,7 +399,7 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
       model: "glm-4.6",
       messages: [{ role: "user", content: "hi" }],
     });
-    const out = transformRequestBody(body, { format: "anthropic", userId: "u_42" });
+    const out = transformRequestBody(body, { format: "anthropic", metadataUserId: "u_42" });
     const parsed = JSON.parse(out as string);
     expect(parsed.metadata).toEqual({ user_id: "u_42" });
   });
@@ -323,7 +409,7 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
       messages: [],
       metadata: { existing_field: "keep" },
     });
-    const out = transformRequestBody(body, { format: "anthropic", userId: "u_99" });
+    const out = transformRequestBody(body, { format: "anthropic", metadataUserId: "u_99" });
     const parsed = JSON.parse(out as string);
     expect(parsed.metadata).toEqual({ existing_field: "keep", user_id: "u_99" });
   });
@@ -333,7 +419,7 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
       messages: [],
       metadata: { user_id: "u_x" },
     });
-    expect(transformRequestBody(body, { format: "anthropic", userId: "u_x" })).toBe(body);
+    expect(transformRequestBody(body, { format: "anthropic", metadataUserId: "u_x" })).toBe(body);
   });
 
   it("overwrites metadata.user_id when value differs from ctx.userId", () => {
@@ -341,7 +427,7 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
       messages: [],
       metadata: { user_id: "client_set" },
     });
-    const out = transformRequestBody(body, { format: "anthropic", userId: "oauth_resolved" });
+    const out = transformRequestBody(body, { format: "anthropic", metadataUserId: "oauth_resolved" });
     const parsed = JSON.parse(out as string);
     expect(parsed.metadata.user_id).toBe("oauth_resolved");
   });
@@ -360,7 +446,7 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
       stream: true,
       messages: [{ role: "user", content: "hi" }],
     });
-    const out = transformRequestBody(body, { format: "openai", userId: "u_42" });
+    const out = transformRequestBody(body, { format: "openai", metadataUserId: "u_42" });
     const parsed = JSON.parse(out as string);
     expect(parsed.metadata).toBeUndefined();
   });

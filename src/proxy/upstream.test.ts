@@ -485,6 +485,15 @@ describe("proxyRequest", () => {
       expect(req.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
       expect(req.headers.get("x-api-key")).toBe("testkey.testsecret");
       expect(req.headers.get("anthropic-version")).toBe("2023-06-01");
+      const reqBody = JSON.parse(await req.text());
+      // metadata.user_id is the device/session blob (bundle UIo) — the account
+      // uuid is never transmitted; testConfig identity carries no deviceMid →
+      // device_id omitted; observe-mode clientIdentity may synthesize a
+      // session, so only the deterministic parts are asserted.
+      const uid = JSON.parse(reqBody.metadata.user_id);
+      expect(uid.account_uuid).toBe("");
+      expect(uid.device_id).toBeUndefined();
+      expect(typeof uid.session_id).toBe("string");
       return new Response(JSON.stringify({
         id: "msg_fwd",
         type: "message",
@@ -1102,8 +1111,19 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         expect(req.headers.get("anthropic-version")).toBe("2023-06-01");
         const reqBody = JSON.parse(await req.text());
         expect(reqBody.system[0].text).toBe("You are ZCode, an interactive coding agent");
-        expect(reqBody.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }]);
-        expect(reqBody.max_tokens).toBe(4096);
+        // start-plan carries the same device/session user_id blob (bundle E2e is plan-agnostic)
+        const uid1 = JSON.parse(reqBody.metadata.user_id);
+        expect(uid1.account_uuid).toBe("");
+        expect(typeof uid1.session_id).toBe("string");
+        expect(reqBody.messages).toHaveLength(2);
+        expect(reqBody.messages[0].role).toBe("user");
+        expect(reqBody.messages[0].content[0].text).toMatch(
+          /^<system-reminder>As you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is \d{4}-\d{2}-\d{2}\.\n\n {6}IMPORTANT: this context may or may not be relevant to your tasks\. You should not respond to this context unless it is highly relevant to your task\.<\/system-reminder>$/,
+        );
+        expect(reqBody.messages[1]).toEqual({ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] });
+        // Catalog default (131,072) + default thinking budget 1,024, clamped
+        // back to the model ceiling (bundle additive rule).
+        expect(reqBody.max_tokens).toBe(131_072);
         return new Response(JSON.stringify({
           id: "msg_sp",
           type: "message",
@@ -1277,7 +1297,15 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         expect(req.headers.get("authorization")).toBe("Bearer jwt-mock");
         const reqBody = JSON.parse(await req.text());
         expect(reqBody.system[0].text).toBe("You are ZCode, an interactive coding agent");
-        expect(reqBody.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }]);
+        const uid2 = JSON.parse(reqBody.metadata.user_id);
+        expect(uid2.account_uuid).toBe("");
+        expect(typeof uid2.session_id).toBe("string");
+        expect(reqBody.messages).toHaveLength(2);
+        expect(reqBody.messages[0].role).toBe("user");
+        expect(reqBody.messages[0].content[0].text).toMatch(
+          /^<system-reminder>As you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is \d{4}-\d{2}-\d{2}\.\n\n {6}IMPORTANT: this context may or may not be relevant to your tasks\. You should not respond to this context unless it is highly relevant to your task\.<\/system-reminder>$/,
+        );
+        expect(reqBody.messages[1]).toEqual({ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] });
         expect(reqBody.max_tokens).toBe(1024);
         return new Response(JSON.stringify({
           id: "msg_sp",

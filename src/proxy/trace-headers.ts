@@ -54,3 +54,28 @@ export function stripHeaderInternalPrefixes(value: string, prefixes: string[]): 
   }
   return out || value;
 }
+
+/**
+ * The `metadata.user_id` value the real client attaches to EVERY
+ * anthropic-kind model request — bundle `E2e` (resolveAnthropicRequestMetadataUserId,
+ * provider-kind gated ONLY, never plan-gated; both dispatch loops call it) →
+ * `UIo` (createAnthropicRequestMetadataUserId):
+ *
+ *   JSON.stringify({ device_id: deviceMid, account_uuid: "", session_id: bnt(sessionId) ?? "" })
+ *
+ * - `device_id` is the telemetry deviceMid (`~/.zcode/v2/telemetry-state.json`,
+ *   same value as the X-Device-Mid control-plane header); when absent the key
+ *   is omitted by JSON.stringify — mirroring `UIo`'s unconditional property.
+ * - `account_uuid` is ALWAYS "" — real traffic NEVER carries the account uuid
+ *   in this field (hardcoded empty in the bundle).
+ * - `session_id` strips the `sess_`/`subagent_agent_` internal prefixes
+ *   (`bnt`/`NIo`/`LIo` — the same prefix set as the trace headers), "" when no
+ *   session is available.
+ */
+export function buildAnthropicMetadataUserId(deviceMid: string | undefined, sessionId: string | undefined): string {
+  return JSON.stringify({
+    device_id: deviceMid,
+    account_uuid: "",
+    session_id: sessionId ? stripHeaderInternalPrefixes(sessionId, SESSION_PREFIXES) : "",
+  });
+}

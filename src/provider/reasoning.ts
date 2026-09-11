@@ -33,24 +33,12 @@ export const GLM53_THINKING_BUDGETS: Readonly<Record<Glm53Effort, number>> = {
 /**
  * Floor below which a thinking budget stops being useful — measured live
  * against the upstream (a budget this small collapses back to near-zero
- * thinking output).
+ * thinking output). Doubles as the SDK's default budget: the bundle's
+ * anthropic request builder forces `budget_tokens: 1024` whenever thinking
+ * is enabled without one ("thinking budget is required when thinking is
+ * enabled. using default budget of 1024 tokens.").
  */
 export const GLM53_MIN_THINKING_BUDGET = 1_024;
-
-/**
- * Tokens reserved for the actual answer once the thinking budget is
- * subtracted from `max_tokens` — see `fitGlm53Budget`. ZCode's own clamp
- * (`Math.min(budgetTokens, maxOutputTokens - 1)`) is written against the
- * *model's* maxOutputTokens ceiling, a large fixed number (128,000 for
- * glm-5.3) where reserving a single token for the answer is harmless.
- * Applying that same "-1" literally against a small per-request
- * `max_tokens` is not — it leaves the response with essentially nothing to
- * work with. 1,024 tokens (matching `GLM53_MIN_THINKING_BUDGET`'s own
- * granularity) is a defensible floor: enough for a short but real answer,
- * without meaningfully eating into a large thinking budget when
- * `max_tokens` is generous.
- */
-export const GLM53_ANSWER_RESERVE = 1_024;
 
 /**
  * Match the GLM-5.3 model family, including `glm-5.3-flash`, case-insensitively
@@ -105,20 +93,17 @@ export function buildGlm53Reasoning(effort: Glm53Effort): {
 }
 
 /**
- * Clamp a thinking budget to fit inside `max_tokens`, reserving
- * `GLM53_ANSWER_RESERVE` tokens for the answer — ZCode's catalog spends the
- * thinking budget out of the same token pool as the response, so a budget
- * that eats the whole of `max_tokens` (or all but one token of it) would
- * leave no meaningful room for output. Returns `undefined` when the clamped
- * budget falls below `GLM53_MIN_THINKING_BUDGET` (the caller should then
- * fall back to `{type:"enabled"}` with no explicit budget). Passes `budget`
- * through unchanged when `maxTokens` isn't a finite number — the upstream
- * doesn't validate this either, so there is nothing useful to clamp against.
+ * Clamp a thinking budget against the MODEL's maxOutputTokens ceiling —
+ * mirrors ZCode's catalog-patch clamp (`Math.min(budgetTokens,
+ * maxOutputTokens - 1)`, applied against the large fixed model ceiling, not
+ * the per-request `max_tokens`). The request-level budget-vs-answer split is
+ * NOT clamped here: the bundle's anthropic builder instead ADDS the budget on
+ * top of `max_tokens` (see applyAnthropicThinkingCompat in
+ * openai-to-anthropic.ts), which is how real traffic keeps answer room.
+ * Passes `budget` through unchanged when `modelMaxTokens` isn't a finite
+ * number (unknown model ids — nothing to clamp against).
  */
-export function fitGlm53Budget(budget: number, maxTokens: unknown): number | undefined {
-  if (typeof maxTokens !== "number" || !Number.isFinite(maxTokens)) return budget;
-  // Floor first: JSON permits a fractional `max_tokens`, and a fractional
-  // `budget_tokens` is not a value the upstream should ever be handed.
-  const clamped = Math.min(budget, Math.floor(maxTokens) - GLM53_ANSWER_RESERVE);
-  return clamped >= GLM53_MIN_THINKING_BUDGET ? clamped : undefined;
+export function clampGlm53BudgetToModel(budget: number, modelMaxTokens: unknown): number {
+  if (typeof modelMaxTokens !== "number" || !Number.isFinite(modelMaxTokens)) return budget;
+  return Math.min(budget, Math.floor(modelMaxTokens) - 1);
 }

@@ -50,23 +50,25 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(result.system).toBe("Rule 1\n\nRule 2");
   });
 
-  it("sets max_tokens default when not provided", () => {
+  it("max_tokens defaults to the model's catalog maxOutputTokens (bundle Z = maxOutputTokens ?? modelDefault)", () => {
     const req: OpenAIChatRequest = {
       model: "glm-4.6",
       messages: [{ role: "user", content: "Hi" }],
     };
     const result = translateRequestOpenAIToAnthropic(req);
-    expect(result.max_tokens).toBe(4096);
+    expect(result.max_tokens).toBe(131_072);
   });
 
-  it("preserves max_tokens when provided", () => {
+  it("adds the default thinking budget on top of the client's max_tokens (SDK additive rule)", () => {
     const req: OpenAIChatRequest = {
       model: "glm-4.6",
       messages: [{ role: "user", content: "Hi" }],
       max_tokens: 2048,
     };
     const result = translateRequestOpenAIToAnthropic(req);
-    expect(result.max_tokens).toBe(2048);
+    // glm-4.6 is a reasoning model → default thinking budget 1024 → 2048+1024.
+    expect(result.max_tokens).toBe(2048 + 1024);
+    expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
   });
 
   it("translates stop to stop_sequences", () => {
@@ -421,7 +423,7 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(result.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
   });
 
-  it("enables Anthropic thinking by default for GLM reasoning models", () => {
+  it("enables Anthropic thinking by default for GLM reasoning models (with the SDK's 1024 default budget)", () => {
     const req: OpenAIChatRequest = {
       model: "glm-5.2",
       messages: [{ role: "user", content: "Hi" }],
@@ -429,7 +431,8 @@ describe("translateRequestOpenAIToAnthropic", () => {
 
     const result = translateRequestOpenAIToAnthropic(req);
 
-    expect(result.thinking).toEqual({ type: "enabled" });
+    // Catalog "enabled" default always carries budgetTokens: 1024 on the wire.
+    expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
   });
 
   it("does not enable Anthropic thinking by default for non-reasoning GLM models", () => {
@@ -589,7 +592,7 @@ describe("translateRequestOpenAIToAnthropic", () => {
       expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 5000 });
     });
 
-    it("glm-5.3: thinking budget is clamped to fit under max_tokens, reserving headroom for the answer", () => {
+    it("glm-5.3: the thinking budget rides ON TOP of max_tokens (SDK additive rule), budget itself clamped only by the model ceiling", () => {
       const req: OpenAIChatRequest = {
         model: "glm-5.3",
         messages: [{ role: "user", content: "Hi" }],
@@ -599,10 +602,10 @@ describe("translateRequestOpenAIToAnthropic", () => {
 
       const result = translateRequestOpenAIToAnthropic(req);
 
-      expect(result.max_tokens).toBe(20_000);
-      // Not 19_999 (max_tokens - 1) — that would leave only 1 token for the
-      // answer. 1_024 tokens (GLM53_ANSWER_RESERVE) are reserved instead.
-      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 18_976 });
+      // Bundle builder: max_tokens = Z + budget (then clamped to the model
+      // max 128,000). 20_000 + 32_000 = 52_000 — the answer keeps its 20_000.
+      expect(result.max_tokens).toBe(52_000);
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 32_000 });
       expect(result.output_config).toEqual({ effort: "max" });
     });
 
@@ -639,9 +642,10 @@ describe("translateRequestOpenAIToAnthropic", () => {
       const result = translateRequestOpenAIToAnthropic(req);
 
       expect(result.output_config).toEqual({ effort: "max" });
-      expect(result.max_tokens).toBe(4096);
-      // max effort's 32_000 budget is clamped under the small fallback.
-      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 4096 - 1024 });
+      // No catalog entry → no model clamp and no max_tokens ceiling: the
+      // generic 4096 fallback still gets the 32_000 budget added on top.
+      expect(result.max_tokens).toBe(4096 + 32_000);
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 32_000 });
     });
 
     it("glm-5.3-flash (pinned since master advertised it) gets the same model-aware default as glm-5.3", () => {
@@ -667,12 +671,12 @@ describe("translateRequestOpenAIToAnthropic", () => {
 
       const result = translateRequestOpenAIToAnthropic(req);
 
-      expect(result.max_tokens).toBe(4096);
-      // low effort's 8_000 budget is clamped down under the small fallback.
-      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 4096 - 1024 });
+      // Generic fallback + additive low-effort budget.
+      expect(result.max_tokens).toBe(4096 + 8_000);
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 8_000 });
     });
 
-    it("non-GLM-5.3 models keep the generic 4096 default max_tokens (scoped change, not global)", () => {
+    it("non-GLM-5.3 catalog models also default to their catalog maxOutputTokens (glm-4.7: 131,072)", () => {
       const req: OpenAIChatRequest = {
         model: "glm-4.7",
         messages: [{ role: "user", content: "Hi" }],
@@ -680,7 +684,8 @@ describe("translateRequestOpenAIToAnthropic", () => {
 
       const result = translateRequestOpenAIToAnthropic(req);
 
-      expect(result.max_tokens).toBe(4096);
+      // 131_072 base + 1024 default budget, clamped back to the 131_072 ceiling.
+      expect(result.max_tokens).toBe(131_072);
     });
 
     it("glm-5.3: explicit thinking:{type:'disabled'} is forwarded as-is, not overridden to an effort level", () => {
@@ -696,7 +701,7 @@ describe("translateRequestOpenAIToAnthropic", () => {
       expect(result.output_config).toBeUndefined();
     });
 
-    it("glm-4.7 (non-GLM-5.3 reasoning model) is unchanged: no output_config, plain {type:'enabled'} thinking", () => {
+    it("glm-4.7 (non-GLM-5.3 reasoning model): no output_config, thinking on with the SDK default budget", () => {
       const req: OpenAIChatRequest = {
         model: "glm-4.7",
         messages: [{ role: "user", content: "Hi" }],
@@ -705,8 +710,106 @@ describe("translateRequestOpenAIToAnthropic", () => {
 
       const result = translateRequestOpenAIToAnthropic(req);
 
-      expect(result.thinking).toEqual({ type: "enabled" });
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
       expect(result.output_config).toBeUndefined();
+    });
+  });
+
+  describe("applyAnthropicThinkingCompat (bundle builder compat rules)", () => {
+    it("voids temperature/top_k/top_p when thinking is enabled", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "high",
+        temperature: 0.7,
+        top_p: 0.9,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.temperature).toBeUndefined();
+      expect(result.top_p).toBeUndefined();
+      expect(result.top_k).toBeUndefined();
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 16_000 });
+    });
+
+    it("voids top_p when temperature is set and thinking is NOT enabled (SDK topP-vs-temperature rule)", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-4.6v",
+        messages: [{ role: "user", content: "Hi" }],
+        temperature: 0.5,
+        top_p: 0.9,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.temperature).toBe(0.5);
+      expect(result.top_p).toBeUndefined();
+    });
+
+    it("keeps temperature and top_p independently when only one is set and thinking is off", () => {
+      const tempOnly = translateRequestOpenAIToAnthropic({
+        model: "glm-4.6v",
+        messages: [{ role: "user", content: "Hi" }],
+        temperature: 0.5,
+      });
+      expect(tempOnly.temperature).toBe(0.5);
+      expect(tempOnly.top_p).toBeUndefined();
+
+      const topPOnly = translateRequestOpenAIToAnthropic({
+        model: "glm-4.6v",
+        messages: [{ role: "user", content: "Hi" }],
+        top_p: 0.9,
+      });
+      expect(topPOnly.temperature).toBeUndefined();
+      expect(topPOnly.top_p).toBe(0.9);
+    });
+
+    it("adaptive thinking voids sampling params but adds no default budget (SDK: budget default only for 'enabled')", () => {
+      const req = {
+        model: "glm-5.2",
+        messages: [{ role: "user", content: "Hi" }],
+        thinking: { type: "adaptive" },
+        temperature: 0.3,
+      } as OpenAIChatRequest;
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.thinking).toEqual({ type: "adaptive" });
+      expect(result.temperature).toBeUndefined();
+      // adaptive carries no budget → max_tokens gains +0 (128_000 base).
+      expect(result.max_tokens).toBe(128_000);
+    });
+
+    it("explicitly disabled thinking keeps temperature but still voids top_p (topP-vs-temperature rule is thinking-independent)", () => {
+      const req = {
+        model: "glm-5.2",
+        messages: [{ role: "user", content: "Hi" }],
+        thinking: { type: "disabled" },
+        temperature: 0.7,
+        top_p: 0.9,
+      } as OpenAIChatRequest;
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.temperature).toBe(0.7);
+      expect(result.top_p).toBeUndefined();
+      expect(result.max_tokens).toBe(128_000);
+    });
+
+    it("max_tokens + budget is clamped to the model's catalog ceiling", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "max",
+        max_tokens: 120_000,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      // 120_000 + 32_000 = 152_000 → clamped to the 128_000 ceiling.
+      expect(result.max_tokens).toBe(128_000);
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 32_000 });
     });
   });
 });

@@ -25,6 +25,7 @@ import type { Credential } from "../auth/types.js";
 import { credentialString } from "../auth/types.js";
 import { errorResponse } from "../proxy/handler.js";
 import { transformRequestBody } from "../proxy/body-transformer.js";
+import { buildAnthropicMetadataUserId } from "../proxy/trace-headers.js";
 import { inflateWithCap } from "../proxy/inflate.js";
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
 import { anthropicSseToOpenaiSseWithKeepalive } from "./openai-stream-adapter.js";
@@ -224,7 +225,7 @@ export async function handleAsyncMessages(req: Request, opts: AsyncHandlerOption
     model: resolveModel({ model: modelStr }, opts.config),
     stream: true,
   } as AnthropicMessagesRequest;
-  const upstreamBodyText = transformRequestBody(JSON.stringify(upstreamBody), { format: "anthropic", userId: cred.cred.userId }) ?? JSON.stringify(upstreamBody);
+  const upstreamBodyText = transformRequestBody(JSON.stringify(upstreamBody), { format: "anthropic", metadataUserId: buildAnthropicMetadataUserId(opts.config.identity.deviceMid, undefined) }) ?? JSON.stringify(upstreamBody);
 
   // Now we're safe to take a ticket
   const client = buildClient(opts, cred.credentials);
@@ -275,7 +276,7 @@ export async function handleAsyncChat(req: Request, opts: AsyncHandlerOptions): 
     return errorResponse(400, "invalid_request_error", `OpenAI→Anthropic translation failed: ${(err as Error).message}`);
   }
   anthropicReq.stream = true;
-  const upstreamBodyText = transformRequestBody(JSON.stringify(anthropicReq), { format: "anthropic", userId: cred.cred.userId }) ?? JSON.stringify(anthropicReq);
+  const upstreamBodyText = transformRequestBody(JSON.stringify(anthropicReq), { format: "anthropic", metadataUserId: buildAnthropicMetadataUserId(opts.config.identity.deviceMid, undefined) }) ?? JSON.stringify(anthropicReq);
 
   const client = buildClient(opts, cred.credentials);
   const taskId = generateTaskId();
