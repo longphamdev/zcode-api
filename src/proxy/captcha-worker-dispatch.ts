@@ -34,9 +34,18 @@ let nextSolveId = 0;
 
 // Lazy-loaded in-process solver — imported only on the fallback path so
 // processes that never solve (coding-plan) never pay the happy-dom startup.
-let happyMod: typeof import("./captcha-happy.js") | null = null;
-async function happy(): Promise<typeof import("./captcha-happy.js")> {
-  if (!happyMod) happyMod = await import("./captcha-happy.js");
+type InProcessSolveFn = (opts: {
+  scene: string;
+  region: string;
+  prefix: string;
+}) => Promise<string>;
+let inProcessOverride: InProcessSolveFn | null = null;
+let happyMod: { solveTraceless: InProcessSolveFn } | null = null;
+async function happy(): Promise<{ solveTraceless: InProcessSolveFn }> {
+  if (inProcessOverride) return { solveTraceless: inProcessOverride };
+  if (!happyMod) {
+    happyMod = (await import("./captcha-happy.js")) as { solveTraceless: InProcessSolveFn };
+  }
   return happyMod;
 }
 
@@ -181,4 +190,15 @@ export function __resetCaptchaWorkerDispatchForTest(): void {
   entryPathCache = undefined;
   happyMod = null;
   lastNotedMode = "";
+}
+
+/**
+ * Test-only: substitute the in-process solver. Tests must use this seam
+ * instead of mock.module("./captcha-happy.js", …) — a module mock is
+ * process-wide in Bun and leaks a PARTIAL export surface into whichever
+ * test file loads captcha-happy afterwards (breaking e.g. __captchaMemStats
+ * importers, order-dependently across platforms).
+ */
+export function __setInProcessSolverForTest(fn: InProcessSolveFn | null): void {
+  inProcessOverride = fn;
 }

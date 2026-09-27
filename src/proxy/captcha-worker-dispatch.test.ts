@@ -4,16 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import {
   __resetCaptchaWorkerDispatchForTest,
+  __setInProcessSolverForTest,
   solveViaWorkerOrInProcess,
 } from "./captcha-worker-dispatch.js";
 
 // The dispatch layer must degrade, not fail, when the worker path is
 // unusable. Worker mode is exercised with a REAL worker_threads round trip
 // against a canned fixture entry (no happy-dom, no network); the fallback
-// cases replace the in-process solver with a mock. Module-level caches are
-// reset between cases via the test hook. (This file deliberately does NOT
-// import captcha-solver.js: captcha-pool.test.ts registers a process-wide
-// mock.module for that specifier, which would shadow the real exports.)
+// cases substitute the in-process solver through the test seam. Neither
+// captcha-solver.js nor captcha-happy.js is module-mocked here: those mocks
+// are process-wide in Bun and leak partial export surfaces into later test
+// files (order-dependent across platforms).
 describe("captcha worker dispatch (worker / in-process)", () => {
   const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "cap-worker-"));
   const fixturePath = path.join(fixtureDir, "fixture-worker.mjs");
@@ -29,6 +30,7 @@ describe("captcha worker dispatch (worker / in-process)", () => {
     "utf8",
   );
   afterAll(() => {
+    __setInProcessSolverForTest(null);
     try { fs.rmSync(fixtureDir, { recursive: true, force: true }); } catch {}
   });
 
@@ -41,9 +43,9 @@ describe("captcha worker dispatch (worker / in-process)", () => {
 
   test("falls back to in-process solving when the entry is unavailable", async () => {
     mock.module("./captcha-worker-asset.js", () => ({ default: null }));
-    mock.module("./captcha-happy.js", () => ({
-      solveTraceless: async (opts: { scene: string }) => `inproc-param:${opts.scene}`,
-    }));
+    __setInProcessSolverForTest(
+      async (opts) => `inproc-param:${opts.scene}`,
+    );
     __resetCaptchaWorkerDispatchForTest();
     const param = await solveViaWorkerOrInProcess({ scene: "sc2", region: "rg2", prefix: "pf2" });
     expect(param).toBe("inproc-param:sc2");
@@ -55,9 +57,9 @@ describe("captcha worker dispatch (worker / in-process)", () => {
     // must fall back, not reject (a runtime crash inside a LOADED worker,
     // by contrast, stays a hard failure handled by the pool's retry ladder).
     mock.module("./captcha-worker-asset.js", () => ({ default: fixtureDir }));
-    mock.module("./captcha-happy.js", () => ({
-      solveTraceless: async (opts: { scene: string }) => `inproc-param:${opts.scene}`,
-    }));
+    __setInProcessSolverForTest(
+      async (opts) => `inproc-param:${opts.scene}`,
+    );
     __resetCaptchaWorkerDispatchForTest();
     const param = await solveViaWorkerOrInProcess({ scene: "sc3", region: "rg3", prefix: "pf3" });
     expect(param).toBe("inproc-param:sc3");
