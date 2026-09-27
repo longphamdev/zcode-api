@@ -242,10 +242,7 @@ bun run dev         # 开发模式启动面板
 
 ## Privacy
 
-This fork adds **no telemetry, no analytics, and no outbound reporting** of
-any kind. Nothing about your usage, device, or configuration leaves your
-machine. (Inherited from upstream: the proxy is fully local; debug/dump logs
-auto-redact API keys, JWTs, and proxy keys.)
+本代理完全本地运行：**无遥测、无分析、无任何形式的外发报告**。你的使用数据、设备信息与配置不会离开本机；debug/dump 日志会自动脱敏 API key、JWT 与 proxy key。
 
 ## License
 

@@ -241,6 +241,13 @@ bun run dev         # start the panel in dev mode
 
 For architecture and implementation details, see the comments inside the source files under [`src/`](src/).
 
+## Privacy
+
+The proxy runs fully locally: **no telemetry, no analytics, and no outbound
+reporting of any kind**. Nothing about your usage, device, or configuration
+leaves your machine; debug/dump logs auto-redact API keys, JWTs, and proxy
+keys.
+
 ## License
 
 MIT

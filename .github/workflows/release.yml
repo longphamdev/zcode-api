@@ -151,6 +151,7 @@ jobs:
           grep -q "\"version\": \"${RELEASE_VERSION}\"" package.json
       - name: Build binary
         run: >-
+          bun run scripts/build-fork-worker.ts &&
           bun build --compile --target=${{ matrix.target }}
           --define "require.resolve=undefined"
           src/index.ts --outfile ${{ matrix.outfile }}
