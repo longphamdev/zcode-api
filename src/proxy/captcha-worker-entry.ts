@@ -1,5 +1,5 @@
 /**
- * Captcha solver worker entry -- fork patch.
+ * Captcha solver worker entry.
  *
  * Runs the happy-dom solver (captcha-happy.ts) inside a worker thread so the
  * proxy's main event loop NEVER blocks on Atomics.wait sync XHRs. One solve
@@ -8,9 +8,9 @@
  * parallel solving.
  *
  * Protocol: {id, scene, region, prefix} in -> {id, ok, param|error} out.
- * Spawned by captcha-solver.ts via a build-time FILE ASSET import
- * (`with { type: "file" }`) -- the only worker mechanism that survives
- * `bun build --compile` single-file binaries (verified on Bun 1.4).
+ * Spawned by captcha-worker-dispatch.ts via the captcha-worker-asset.ts
+ * file asset (`with { type: "file" }`) -- the only worker mechanism that
+ * survives `bun build --compile` single-file binaries (verified on Bun 1.4).
  */
 import { parentPort } from "node:worker_threads";
 import { solveTraceless } from "./captcha-happy.js";

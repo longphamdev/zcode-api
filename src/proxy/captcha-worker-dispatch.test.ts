@@ -52,10 +52,8 @@ describe("captcha worker dispatch (worker / in-process)", () => {
   });
 
   test("an unloadable worker entry degrades to in-process solving", async () => {
-    // A path that cannot be loaded as a worker module (a directory): Bun
-    // reports it via the worker 'error' event as a module-not-found, which
-    // must fall back, not reject (a runtime crash inside a LOADED worker,
-    // by contrast, stays a hard failure handled by the pool's retry ladder).
+    // A path that cannot be loaded as a worker module (a directory) surfaces
+    // as an async module-not-found 'error' — it must fall back, not reject.
     mock.module("./captcha-worker-asset.js", () => ({ default: fixtureDir }));
     __setInProcessSolverForTest(
       async (opts) => `inproc-param:${opts.scene}`,

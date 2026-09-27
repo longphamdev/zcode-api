@@ -1,11 +1,10 @@
 /**
- * Solver backend dispatch — fully in-process, self-contained.
+ * Solver backend dispatch.
  *
  * Backend (ZCODE_CAPTCHA_BACKEND): "happy" (default) — the happy-dom solver
- * in src/proxy/captcha-happy.ts, executed per captcha-worker-dispatch.ts:
- * one worker thread per solve (keeps Atomics.wait sync XHRs off the proxy's
- * event loop — issue #54) with an in-process fallback where the worker asset
- * is unavailable (dev checkouts, Docker TS-source image, Android bundle).
+ * in src/proxy/captcha-happy.ts. Execution (one worker thread per solve,
+ * with an in-process fallback where the asset is unavailable — issue #54)
+ * lives in captcha-worker-dispatch.ts.
  */
 import { solveViaWorkerOrInProcess } from "./captcha-worker-dispatch.js";
 

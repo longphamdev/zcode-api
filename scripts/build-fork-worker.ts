@@ -1,12 +1,13 @@
 /**
- * Build script -- fork patch: bundle the captcha worker entry into a
- * self-contained ESM file so it can be embedded as a `with { type: "file" }`
- * asset in the compiled single-file binary. Raw .ts assets are NOT parsed by
- * Bun at extraction (they'd be evaluated as plain JS and fail on type
- * annotations), so the worker must be pre-bundled to plain JS.
+ * Bundles the captcha worker entry into a self-contained ESM file for
+ * embedding as a `with { type: "file" }` asset in the compiled single-file
+ * binary. Raw .ts assets are NOT parsed by Bun at extraction (they'd be
+ * evaluated as plain JS and fail on type annotations), so the worker must
+ * be pre-bundled to plain JS.
  *
- * Run before `bun build --compile`:  bun run scripts/build-fork-worker.ts
- * Output: src/proxy/captcha-worker-entry.bundle.mjs (gitignored build input)
+ * Run before `bun build --compile` (every build:* script chains it):
+ *   bun run scripts/build-fork-worker.ts
+ * Output: src/proxy/captcha-worker-entry.bundle.js (gitignored build input)
  */
 import { build } from "bun";
 

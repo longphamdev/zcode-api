@@ -110,9 +110,6 @@ export async function solveViaWorkerOrInProcess(req: {
     return await solveInWorker(entryPath, req);
   } catch (err) {
     if (err instanceof WorkerUnavailableError) {
-      // The entry cannot be loaded as a worker at all (sync spawn throw,
-      // module-not-found): this deployment cannot use workers — degrade to
-      // in-process solving rather than failing every solve.
       return (await happy()).solveTraceless(req);
     }
     throw err;

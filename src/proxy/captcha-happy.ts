@@ -32,10 +32,11 @@ import { Worker } from "node:worker_threads";
 // postMessage-based handshake would deadlock: the main thread is blocked).
 const SYNC_FETCH_BUF_BYTES = 8 * 1024 * 1024;
 const SYNC_FETCH_HEADER_BYTES = 64;
-// Fork patch: each sync XHR blocks the HOST main thread (Atomics.wait) -- the
-// whole proxy event loop freezes for the duration. Upstream default was 30s;
-// cap at 12s so a stalled aliyuncs POST can never wedge every connection for
-// half a minute. Override: CAPTCHA_SYNC_FETCH_TIMEOUT_MS.
+// A stalled sync XHR blocks its thread (Atomics.wait) — on the in-process
+// fallback path that thread is the proxy's main event loop, so a stalled
+// aliyuncs POST must not wedge every connection for half a minute (the
+// worker path is additionally bounded by the outer terminate).
+// Override: CAPTCHA_SYNC_FETCH_TIMEOUT_MS.
 const SYNC_FETCH_TIMEOUT_MS = Number(process.env.CAPTCHA_SYNC_FETCH_TIMEOUT_MS || 12_000);
 // SAB layout (Int32 words): [0]=state (0=wait,1=done,2=error), [1]=httpStatus,
 // [2]=statusTextLen, [3]=headersJsonLen, [4]=setCookieJsonLen, [5]=bodyLen,
@@ -2363,9 +2364,9 @@ async function solveTraceless(opts) {
   const scene = opts.scene || "11xygtvd";
   const region = opts.region || "sgp";
   const prefix = opts.prefix || "no8xfe";
-  // Fork patch: overall solve deadline default 30s -> 20s. With in-process
-  // solving on the main thread, a hung solve stalls every proxied connection;
-  // fail faster and let the pool's retry ladder handle it.
+  // Overall solve deadline. On the in-process fallback path a hung solve
+  // stalls the main event loop — fail fast and let the pool's retry ladder
+  // handle it; the worker path terminates on the same env knob.
   // Override: CAPTCHA_SOLVE_TIMEOUT_MS.
   const timeoutMs = opts.timeoutMs ?? Number(process.env.CAPTCHA_SOLVE_TIMEOUT_MS || 20_000);
 

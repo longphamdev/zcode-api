@@ -31,8 +31,8 @@ const CONFIGS_API = "https://zcode.z.ai/api/v1/client/configs";
 
 interface FetchedCaptchaConfig { enabled: boolean; prefix: string; sceneId: string; region: string; }
 let cachedConfig: { value: FetchedCaptchaConfig | null; expiresAt: number } = { value: null, expiresAt: 0 };
-// Fork patch: short negative cache so a network outage doesn't make every
-// request pay the config-fetch timeout before falling back.
+// Short negative cache so a network outage doesn't make every request pay
+// the config-fetch timeout before falling back.
 let cfgNegUntil = 0;
 
 export function detectCaptchaChallenge(resp: Response): string | null {
@@ -45,9 +45,9 @@ async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaCon
   if (cachedConfig.value && cachedConfig.expiresAt > Date.now()) return cachedConfig.value;
   if (Date.now() < cfgNegUntil) return null;
   try {
-    // Fork patch: bounded fetch -- the hot path awaits this (60s cache) and an
-    // unbounded fetch against zcode.z.ai stalls every request while the
-    // network is down. 5s cap + fail-open (returns null on error).
+    // Bounded fetch — the hot path awaits this (60s cache) and an unbounded
+    // fetch against zcode.z.ai stalls every request while the network is
+    // down. 5s cap + fail-open (returns null on error).
     // Override: CAPTCHA_CONFIG_TIMEOUT_MS.
     const cfgTimeoutMs = Number(process.env.CAPTCHA_CONFIG_TIMEOUT_MS || 5_000);
     const controller = new AbortController();

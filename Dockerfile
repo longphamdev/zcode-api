@@ -11,9 +11,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json tsconfig.json config.example.yaml ./
 COPY src ./src
 COPY scripts ./scripts
-# The image runs TS sources, so the worker-thread captcha entry must be
-# bundled at image build time (gitignored build input; without it the solver
-# silently falls back to main-thread solving).
+# The image runs TS sources — bundle the worker entry here (gitignored build
+# input) or the solver silently falls back to main-thread solving.
 RUN bun run scripts/build-fork-worker.ts && rm -rf scripts
 RUN mkdir -p /data && chown bun:bun /data
 ENV ZCODE_PROXY_PORT=8080
