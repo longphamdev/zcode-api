@@ -403,8 +403,8 @@ async function claimCommand(args: string[]): Promise<void> {
 }
 
 /**
- * `quota` subcommand — print the live plan balance snapshot (per-model
- * remaining/total units + expiry) from the billing control plane. Reuses
+ * `quota` subcommand — print the live quota snapshot: per-model credit buckets
+ * (billing plane) and coding-plan usage windows (monitor plane). Reuses
  * collectQuotaSnapshot (same path GET /quota serves).
  */
 async function quotaCommand(): Promise<void> {
@@ -424,6 +424,23 @@ async function quotaCommand(): Promise<void> {
     for (const b of snap.balances) {
       const exp = b.expiresAt ? ` · expires ${fmtQuotaExpiry(b.expiresAt)}` : "";
       console.log(`  ${b.showName || "(unnamed)"}: ${b.remainingUnits.toLocaleString("en-US")} / ${b.totalUnits.toLocaleString("en-US")} units${exp}`);
+    }
+    if (snap.codingPlan) {
+      const { level, limits } = snap.codingPlan;
+      if (limits.length === 0) {
+        console.log("No coding-plan usage windows reported by the monitor endpoint.");
+      }
+      for (const l of limits) {
+        const tier = level ? ` (${level})` : "";
+        // Mirror of the official panel: remaining only — upstream `number` is
+        // not a comparable total (live TIME_LIMIT row: remaining=3894, number=1).
+        const amount =
+          l.remaining !== undefined
+            ? `${l.remaining.toLocaleString("en-US")}${l.unit ? ` ${l.unit}` : ""} remaining`
+            : "no usage numbers reported";
+        const reset = l.nextResetTime !== undefined ? ` · resets ${fmtQuotaExpiry(l.nextResetTime)}` : "";
+        console.log(`  coding-plan${tier}: [${l.type}] ${amount}${reset}`);
+      }
     }
     for (const plan of snap.claimablePlans) {
       const grants = plan.entitlements

@@ -253,6 +253,7 @@ describe("buildFrame", () => {
           { showName: "GLM-5.3", remainingUnits: 2000000, totalUnits: 3000000, expiresAt: 1767225600 },
           { showName: "GLM Coding", remainingUnits: 5, totalUnits: 100 },
         ],
+        coding: null,
         errors: [],
         error: "",
         fetchedAt: new Date("2026-09-29T12:00:00").getTime(),
@@ -267,6 +268,81 @@ describe("buildFrame", () => {
     expect(text).toContain(" Refresh ");
   });
 
+  test("quota card renders coding-plan windows after credit buckets", () => {
+    const endOfDay = new Date().setHours(23, 59, 0, 0); // same calendar day → HH:MM reset form
+    const text = plainLines(baseState({
+      quota: {
+        status: "ok",
+        balances: [{ showName: "GLM-5.3", remainingUnits: 2000000, totalUnits: 3000000 }],
+        coding: {
+          level: "max",
+          rows: [
+            { type: "TIME_LIMIT", remaining: 36, unit: "prompt", nextResetTime: endOfDay },
+            { type: "WEEK_LIMIT", remaining: 500 },
+          ],
+        },
+        errors: [],
+        error: "",
+        fetchedAt: Date.now(),
+      },
+    })).join("\n");
+    expect(text).toContain("Balances");
+    expect(text).toContain("Coding");
+    expect(text).toContain("TIME_LIMIT");
+    // Mirror of the official panel: remaining alone — upstream `number` is not
+    // a comparable total (live TIME_LIMIT row: remaining=3894, number=1).
+    expect(text).toContain("36");
+    expect(text).toContain("reset 23:59");
+    expect(text).toContain("· max");
+    expect(text).toContain("WEEK_LIMIT");
+    expect(text).toContain("500");
+  });
+
+  test("coding rows carry their own group label and render standalone", () => {
+    const text = plainLines(baseState({
+      quota: {
+        status: "ok",
+        balances: [],
+        coding: { level: null, rows: [{ type: "TIME_LIMIT", remaining: 9, nextResetTime: 1767225600 }] },
+        errors: [],
+        error: "",
+        fetchedAt: Date.now(),
+      },
+    })).join("\n");
+    expect(text).toContain("Coding");
+    expect(text).not.toContain("Balances");
+    const codingLine = plainLines(baseState({
+      quota: {
+        status: "ok",
+        balances: [],
+        coding: { level: null, rows: [{ type: "TIME_LIMIT", remaining: 9, nextResetTime: 1767225600 }] },
+        errors: [],
+        error: "",
+        fetchedAt: Date.now(),
+      },
+    })).find((l) => l.includes("TIME_LIMIT")) ?? "";
+    expect(codingLine).toContain("9");
+    expect(codingLine).not.toContain("120");
+    expect(text).toContain("reset 01-01");
+  });
+
+  test("non-token unit types are surfaced, token stays invisible", () => {
+    const balanceLine = (unitType?: string): string =>
+      plainLines(baseState({
+        quota: {
+          status: "ok",
+          balances: [{ showName: "GLM-5.3", remainingUnits: 1, totalUnits: 2, ...(unitType ? { unitType } : {}) }],
+          coding: null,
+          errors: [],
+          error: "",
+          fetchedAt: Date.now(),
+        },
+      })).find((l) => l.includes("GLM-5.3")) ?? "";
+    expect(balanceLine("prompt")).toContain("· prompt");
+    expect(balanceLine("token")).not.toContain("token");
+    expect(balanceLine(undefined)).not.toContain("·");
+  });
+
   test("quota card caps balance rows to keep the Logs card room", () => {
     const balances = Array.from({ length: 8 }, (_, i) => ({
       showName: `Model ${i}`,
@@ -274,10 +350,22 @@ describe("buildFrame", () => {
       totalUnits: 100,
     }));
     const text = plainLines(baseState({
-      quota: { status: "ok", balances, errors: [], error: "", fetchedAt: Date.now() },
+      quota: { status: "ok", balances, coding: null, errors: [], error: "", fetchedAt: Date.now() },
     })).join("\n");
     expect(text).toContain("Model 3");
     expect(text).not.toContain("Model 4");
+  });
+
+  test("row cap spans both planes (balances first, coding after, overflow counted together)", () => {
+    const balances = Array.from({ length: 3 }, (_, i) => ({ showName: `Model ${i}`, remainingUnits: i, totalUnits: 100 }));
+    const codingRows = Array.from({ length: 3 }, (_, i) => ({ type: `LIMIT_${i}`, remaining: i }));
+    const text = plainLines(baseState({
+      quota: { status: "ok", balances, coding: { level: null, rows: codingRows }, errors: [], error: "", fetchedAt: Date.now() },
+    })).join("\n");
+    expect(text).toContain("Model 2");
+    expect(text).toContain("LIMIT_0");
+    expect(text).not.toContain("LIMIT_1");
+    expect(text).toContain("+2 more");
   });
 
   test("quota card shows error state and upstream warnings", () => {
@@ -285,23 +373,31 @@ describe("buildFrame", () => {
       quota: {
         status: "error",
         balances: [],
+        coding: null,
         errors: [],
-        error: "not logged in — no JWT credential",
+        error: "not logged in (run: zcode-proxy auth login)",
         fetchedAt: Date.now(),
       },
     })).join("\n");
     expect(text).toContain("unavailable");
     expect(text).toContain("not logged in");
     const warned = plainLines(baseState({
-      quota: { status: "ok", balances: [], errors: ["balance: 3012 risk"], error: "", fetchedAt: Date.now() },
+      quota: { status: "ok", balances: [], coding: null, errors: ["balance: 3012 risk"], error: "", fetchedAt: Date.now() },
     })).join("\n");
     expect(warned).toContain("⚠");
     expect(warned).toContain("3012");
   });
 
+  test("both planes empty → explicit no-entries row (not the old balance-only copy)", () => {
+    const text = plainLines(baseState({
+      quota: { status: "ok", balances: [], coding: { level: null, rows: [] }, errors: [], error: "", fetchedAt: Date.now() },
+    })).join("\n");
+    expect(text).toContain("no quota entries reported by upstream");
+  });
+
   test("quota Refresh button is clickable and footer advertises [r]", () => {
     const f = buildFrame(baseState({
-      quota: { status: "ok", balances: [], errors: [], error: "", fetchedAt: Date.now() },
+      quota: { status: "ok", balances: [], coding: null, errors: [], error: "", fetchedAt: Date.now() },
     }));
     const actions = f.regions.map((r) => r.action);
     expect(actions).toContainEqual({ kind: "key", key: "r" });
@@ -309,14 +405,14 @@ describe("buildFrame", () => {
     // only on wider terminals.
     const wide = buildFrame(baseState({
       width: 140,
-      quota: { status: "ok", balances: [], errors: [], error: "", fetchedAt: Date.now() },
+      quota: { status: "ok", balances: [], coding: null, errors: [], error: "", fetchedAt: Date.now() },
     }));
     const lines = wide.text.split("\n").map((l) => stripAnsi(l.replace(/\x1b\[K$/, "")));
     expect(lines.join("\n")).toContain("[r] quota refresh");
   });
 
   test("quota card hides on short terminals so the Logs card keeps room", () => {
-    const quota = { status: "ok" as const, balances: [{ showName: "GLM-5.3", remainingUnits: 1, totalUnits: 2 }], errors: [], error: "", fetchedAt: Date.now() };
+    const quota = { status: "ok" as const, balances: [{ showName: "GLM-5.3", remainingUnits: 1, totalUnits: 2 }], coding: null, errors: [], error: "", fetchedAt: Date.now() };
     const text = plainLines(baseState({ height: 21, quota })).join("\n");
     expect(text).not.toContain("Quota");
     const textTall = plainLines(baseState({ height: 22, quota })).join("\n");
@@ -332,6 +428,7 @@ describe("buildFrame", () => {
         quota: {
           status: "ok",
           balances: Array.from({ length: 6 }, (_, i) => ({ showName: `Model ${i}`, remainingUnits: i, totalUnits: 100 })),
+          coding: { level: null, rows: Array.from({ length: 6 }, (_, i) => ({ type: `LIMIT_${i}`, remaining: i })) },
           errors: [],
           error: "",
           fetchedAt: Date.now(),
@@ -346,6 +443,7 @@ describe("buildFrame", () => {
       quota: {
         status: "ok",
         balances: [{ showName: "超长模型名称测试超长模型名称测试超长模型名称", remainingUnits: 1234567890, totalUnits: 9876543210, expiresAt: 1735689600 }],
+        coding: { level: "an-unreasonably-long-tier-name-from-upstream", rows: [{ type: "超长窗口类型名称测试超长窗口类型名称测试", remaining: 1234567, nextResetTime: 1735689600 }] },
         errors: [],
         error: "",
         fetchedAt: Date.now(),

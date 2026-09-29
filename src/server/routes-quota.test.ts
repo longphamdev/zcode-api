@@ -66,19 +66,41 @@ interface BillingCall {
   headers: Record<string, string>;
 }
 
-/** Mock fetch that records billing calls and answers both endpoints. */
-function makeBillingFetch(opts: { code?: number; body?: unknown } = {}): { fetchImpl: typeof fetch; calls: BillingCall[] } {
+/** Mock fetch that records billing/monitor calls and answers all three endpoints. */
+function makeBillingFetch(opts: {
+  code?: number;
+  body?: unknown;
+  /** Monitor-plane (coding) envelope data; defaults to an empty limits list. */
+  codingBody?: unknown;
+  codingCode?: number;
+  /** Simulate monitor-endpoint network/HTTP failure. */
+  codingFail?: boolean;
+} = {}): { fetchImpl: typeof fetch; calls: BillingCall[] } {
   const calls: BillingCall[] = [];
+  const record = (u: string, init?: RequestInit): void => {
+    calls.push({ url: u, headers: { ...((init?.headers as Record<string, string>) ?? {}) } });
+  };
   const fetchImpl = (async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const u = typeof url === "string" ? url : url.toString();
+    if (u.includes("/api/monitor/usage/quota/limit")) {
+      record(u, init);
+      if (opts.codingFail) return new Response("upstream exploded", { status: 500 });
+      const code = opts.codingCode ?? 0;
+      return new Response(JSON.stringify({ code, msg: "ok", data: opts.codingBody ?? { level: "max", limits: [] } }), { status: 200 });
+    }
     if (u.includes("/api/v1/zcode-plan/billing/")) {
-      calls.push({ url: u, headers: { ...((init?.headers as Record<string, string>) ?? {}) } });
+      record(u, init);
       const code = opts.code ?? 0;
       return new Response(JSON.stringify({ code, msg: "ok", data: opts.body ?? { server_time: 1720000000, balances: [], plans: [] } }), { status: 200 });
     }
     return new Response(JSON.stringify({ error: { type: "not_found", message: u } }), { status: 404 });
   }) as typeof fetch;
   return { fetchImpl, calls };
+}
+
+/** Calls to one plane, in request order. */
+function planeCalls(calls: BillingCall[], plane: "billing" | "monitor"): BillingCall[] {
+  return calls.filter((c) => c.url.includes(plane === "billing" ? "/api/v1/zcode-plan/billing/" : "/api/monitor/usage/quota/limit"));
 }
 
 /** Set/restore identity env overrides around a test body. */
@@ -100,29 +122,38 @@ async function withEnv(overrides: Record<string, string | undefined>, fn: () => 
 }
 
 describe("collectQuotaSnapshot fingerprint", () => {
-  it("no overrides → real platform/arch, never undefined-undefined", async () => {
+  it("no overrides → real platform/arch on billing calls, raw key auth on coding call", async () => {
     await withEnv({ ZCODE_IDENTITY_PLATFORM: undefined, ZCODE_IDENTITY_ARCH: undefined }, async () => {
       const { fetchImpl, calls } = makeBillingFetch();
       const snap = await collectQuotaSnapshot(makeConfig(), fetchImpl, loadFake);
-      expect(calls.length).toBe(2);
+      const billing = planeCalls(calls, "billing");
+      const monitor = planeCalls(calls, "monitor");
+      expect(billing.length).toBe(2);
+      expect(monitor.length).toBe(1);
       const expected = `${process.platform}-${os.arch()}`;
       expect(snap.errors).toEqual([]);
-      for (const c of calls) {
+      for (const c of billing) {
         const url = new URL(c.url);
         expect(url.searchParams.get("platform")).toBe(expected);
         expect(url.searchParams.get("app_version")).toBe("test-1.0.0");
         expect(c.headers["X-Platform"]).toBe(expected);
       }
-      expect(calls[0].url).toContain("/billing/balance?");
-      expect(calls[1].url).toContain("/billing/preview?");
+      expect(billing[0].url).toContain("/billing/balance?");
+      expect(billing[1].url).toContain("/billing/preview?");
+      // Coding plane mirror: bundle `wK` origin + `md` single raw-key header.
+      expect(monitor[0].url).toBe("https://api.z.ai/api/monitor/usage/quota/limit");
+      expect(monitor[0].headers["authorization"]).toBe("key-x.secret-y");
+      expect(monitor[0].headers["accept"]).toBe("application/json");
+      expect(monitor[0].headers["X-Platform"]).toBeUndefined();
+      expect(snap.codingPlan).toEqual({ level: "max", limits: [] });
     });
   });
 
-  it("valid overrides → both billing calls use the overridden fingerprint", async () => {
+  it("valid overrides → billing calls use the overridden fingerprint (coding plane unaffected)", async () => {
     await withEnv({ ZCODE_IDENTITY_PLATFORM: "linux", ZCODE_IDENTITY_ARCH: "x64" }, async () => {
       const { fetchImpl, calls } = makeBillingFetch();
       await collectQuotaSnapshot(makeConfig(), fetchImpl, loadFake);
-      for (const c of calls) {
+      for (const c of planeCalls(calls, "billing")) {
         const url = new URL(c.url);
         expect(url.searchParams.get("platform")).toBe("linux-x64");
         expect(c.headers["X-Platform"]).toBe("linux-x64");
@@ -135,7 +166,7 @@ describe("collectQuotaSnapshot fingerprint", () => {
       const { fetchImpl, calls } = makeBillingFetch();
       await collectQuotaSnapshot(makeConfig(), fetchImpl, loadFake);
       const expected = `${process.platform}-${os.arch()}`;
-      for (const c of calls) {
+      for (const c of planeCalls(calls, "billing")) {
         expect(new URL(c.url).searchParams.get("platform")).toBe(expected);
       }
     });
@@ -198,5 +229,93 @@ describe("collectQuotaSnapshot response mapping", () => {
     expect(snap.balances[1].totalUnits).toBe(0); // NaN → undefined → 0, JSON.stringify would emit null
     expect(snap.balances[1].usedUnits).toBe(0);
     expect(snap.balances[1].expiresAt).toBeUndefined();
+  });
+});
+
+describe("collectQuotaSnapshot coding plane", () => {
+  const bigmodelCred: Credential = { apiKey: "bm-key-123", provider: "bigmodel", jwt: makeJwt() };
+  const loadBigmodel = async (): Promise<Credential> => bigmodelCred;
+  const jwtLessCred: Credential = { apiKey: "key-x.secret-y", provider: "zai" };
+  const loadJwtLess = async (): Promise<Credential> => jwtLessCred;
+
+  it("maps level + limits (numeric coercion, snake alias, rows without numbers dropped)", async () => {
+    const { fetchImpl } = makeBillingFetch({
+      codingBody: {
+        level: "max",
+        limits: [
+          { type: "TIME_LIMIT", number: 120, usage: 84, remaining: 36, percentage: 70, next_reset_time: "1720000000", unit: "prompt" },
+          { type: "no-numbers" }, // no numeric fields → display noise, dropped
+          { number: 5 }, // no type → dropped (bundle `E_` keeps typed rows only)
+          { type: "WEEK_LIMIT", remaining: 500 },
+        ],
+      },
+    });
+    const snap = await collectQuotaSnapshot(makeConfig(), fetchImpl, loadFake);
+    expect(snap.codingPlan).toEqual({
+      level: "max",
+      limits: [
+        { type: "TIME_LIMIT", unit: "prompt", total: 120, used: 84, remaining: 36, percentage: 70, nextResetTime: 1720000000 },
+        { type: "WEEK_LIMIT", remaining: 500 },
+      ],
+    });
+  });
+
+  it("code 200 envelope counts as success (bundle `$_` semantics)", async () => {
+    const { fetchImpl } = makeBillingFetch({ codingCode: 200, codingBody: { level: "pro", limits: [] } });
+    const snap = await collectQuotaSnapshot(makeConfig(), fetchImpl, loadFake);
+    expect(snap.errors).toEqual([]);
+    expect(snap.codingPlan).toEqual({ level: "pro", limits: [] });
+  });
+
+  it("bigmodel credential → open.bigmodel.cn monitor origin with the raw key", async () => {
+    const { fetchImpl, calls } = makeBillingFetch();
+    await collectQuotaSnapshot(makeConfig({ provider: "bigmodel" }), fetchImpl, loadBigmodel);
+    const monitor = planeCalls(calls, "monitor");
+    expect(monitor[0].url).toBe("https://open.bigmodel.cn/api/monitor/usage/quota/limit");
+    expect(monitor[0].headers["authorization"]).toBe("bm-key-123");
+  });
+
+  it("monitor endpoint failure degrades to codingPlan null + errors entry, credits data intact", async () => {
+    const { fetchImpl } = makeBillingFetch({
+      body: { server_time: 1, balances: [{ show_name: "Free", total_units: 10, remaining_units: 5 }] },
+      codingFail: true,
+    });
+    const snap = await collectQuotaSnapshot(makeConfig(), fetchImpl, loadFake);
+    expect(snap.codingPlan).toBeNull();
+    expect(snap.errors.length).toBe(1);
+    expect(snap.errors[0]).toContain("coding: 500");
+    expect(snap.balances).toHaveLength(1);
+  });
+
+  it("nonzero monitor envelope code surfaces in errors, snapshot still resolves", async () => {
+    const { fetchImpl } = makeBillingFetch({ codingCode: 3012 });
+    const snap = await collectQuotaSnapshot(makeConfig(), fetchImpl, loadFake);
+    expect(snap.codingPlan).toBeNull();
+    expect(snap.errors.length).toBe(1);
+    expect(snap.errors[0]).toContain("coding: 3012");
+  });
+
+  it("jwt-less credential still serves the coding plane (billing skipped with a note)", async () => {
+    const { fetchImpl, calls } = makeBillingFetch({
+      codingBody: { level: null, limits: [{ type: "TIME_LIMIT", remaining: 36, number: 120 }] },
+    });
+    const snap = await collectQuotaSnapshot(makeConfig(), fetchImpl, loadJwtLess);
+    expect(planeCalls(calls, "billing").length).toBe(0);
+    expect(planeCalls(calls, "monitor").length).toBe(1);
+    expect(snap.jwt).toBeNull();
+    expect(snap.balances).toEqual([]);
+    expect(snap.errors.length).toBe(1);
+    expect(snap.errors[0]).toContain("no plan JWT");
+    expect(snap.codingPlan).toEqual({ level: null, limits: [{ type: "TIME_LIMIT", remaining: 36, total: 120 }] });
+  });
+
+  it("unusable coding origin → coding plane silently skipped (fail-open)", async () => {
+    const cfg = makeConfig();
+    cfg.providers.zai.openaiBase = "not a url";
+    const { fetchImpl, calls } = makeBillingFetch();
+    const snap = await collectQuotaSnapshot(cfg, fetchImpl, loadFake);
+    expect(planeCalls(calls, "monitor").length).toBe(0);
+    expect(snap.codingPlan).toBeNull();
+    expect(snap.errors).toEqual([]);
   });
 });
