@@ -49,17 +49,30 @@ export interface QuotaBalanceRow {
   remainingUnits: number;
   totalUnits: number;
   expiresAt?: number;
+  /** Upstream unit semantics; rendered unless it's the noise-default `"token"`. */
+  unitType?: string;
+}
+
+/** One coding-plan usage window (monitor plane `limits[]` entry). */
+export interface QuotaCodingRow {
+  /** Server-defined window type; `TIME_LIMIT` is the 5h/weekly prompt window. */
+  type: string;
+  remaining?: number;
+  unit?: string;
+  nextResetTime?: number;
 }
 
 /**
  * Quota card view-state; `null` hides the card entirely (logged out / never
  * fetched). `status: "error"` carries `error` (the fetch threw before any
  * snapshot existed); `errors` holds per-endpoint upstream failures that rode
- * along on an otherwise-OK snapshot.
+ * along on an otherwise-OK snapshot. `coding` is the coding-plan monitor plane
+ * (individual-subscription windows) — null when that endpoint failed.
  */
 export interface QuotaState {
   status: "loading" | "ok" | "error";
   balances: QuotaBalanceRow[];
+  coding: { level: string | null; rows: QuotaCodingRow[] } | null;
   errors: string[];
   error: string;
   /** Epoch ms of the last fetch attempt — rendered as the card pill clock. */
@@ -254,6 +267,15 @@ function fmtExpiry(expiresAt: number): string {
   return d.getFullYear() === new Date().getFullYear() ? mmdd : `${d.getFullYear()}-${mmdd}`;
 }
 
+/** Usage-window reset: `HH:MM` today, `MM-DD HH:MM` otherwise; `""` unparseable. */
+function fmtReset(nextResetTime: number): string {
+  const ms = nextResetTime > 1e12 ? nextResetTime : nextResetTime * 1000;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return d.toDateString() === new Date().toDateString() ? hm : `${fmtExpiry(nextResetTime)} ${hm}`;
+}
+
 function fmtClock(ms: number): string {
   const d = new Date(ms);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
@@ -368,23 +390,59 @@ export function buildFrame(s: FrameState): Frame {
       emit((composeRow(w, lines.length, "Balances", [{ t: "refreshing…", c: DIM }])).line);
     } else if (s.quota.status === "error") {
       emit((composeRow(w, lines.length, "Balances", [{ t: truncateToWidth(s.quota.error, w - 22), c: RED }])).line);
-    } else if (s.quota.balances.length === 0) {
-      emit((composeRow(w, lines.length, "Balances", [{ t: "(no balance windows — run 'zcode-proxy quota')", c: DIM }])).line);
     } else {
-      for (const [i, b] of s.quota.balances.slice(0, quotaRows).entries()) {
-        const exp = b.expiresAt ? fmtExpiry(b.expiresAt) : "";
-        const row = composeRow(w, lines.length, i === 0 ? "Balances" : "", [
-          { t: truncateToWidth(b.showName || "(unnamed)", 16), c: CYAN },
-          { t: "  " },
-          { t: `${fmtUnits(b.remainingUnits)} / ${fmtUnits(b.totalUnits)}`, c: GREEN },
-          ...(exp ? [{ t: `  · exp ${exp}` as string, c: DIM }] : []),
-        ]);
+      // Both planes render as one table: credits buckets ("Balances") then
+      // coding-plan windows ("Coding"), each group's first row carries the
+      // label. Rows share the value grammar: name · remaining [/ total] · time.
+      const coding = s.quota.coding?.rows ?? [];
+      type QuotaTableRow = { label: string; segs: Seg[] };
+      const unitNote = (u: string | undefined): Seg[] =>
+        !u || u === "token" ? [] : [{ t: `  · ${u}`, c: DIM }];
+      const rows: QuotaTableRow[] = [
+        ...s.quota.balances.map((b, i): QuotaTableRow => {
+          const exp = b.expiresAt ? fmtExpiry(b.expiresAt) : "";
+          return {
+            label: i === 0 ? "Balances" : "",
+            segs: [
+              { t: truncateToWidth(b.showName || "(unnamed)", 16), c: CYAN },
+              { t: "  " },
+              { t: `${fmtUnits(b.remainingUnits)} / ${fmtUnits(b.totalUnits)}`, c: GREEN },
+              ...(exp ? [{ t: `  · exp ${exp}`, c: DIM }] : []),
+              ...unitNote(b.unitType),
+            ],
+          };
+        }),
+        ...coding.map((c, i): QuotaTableRow => {
+          // Live data (2026-09-29) shows upstream `number` is not a comparable
+          // total (TIME_LIMIT row: remaining=3894, number=1) — the official
+          // panel likewise renders `remaining` alone, never "X / Y".
+          const value = c.remaining !== undefined ? fmtUnits(c.remaining) : "—";
+          const reset = c.nextResetTime !== undefined ? fmtReset(c.nextResetTime) : "";
+          return {
+            label: i === 0 ? "Coding" : "",
+            segs: [
+              { t: truncateToWidth(c.type, 16), c: CYAN },
+              { t: "  " },
+              { t: value, c: GREEN },
+              ...(reset ? [{ t: `  · reset ${reset}`, c: DIM }] : []),
+              ...(i === 0 && s.quota?.coding?.level ? [{ t: `  · ${s.quota.coding.level}`, c: DIM }] : []),
+              ...unitNote(c.unit),
+            ],
+          };
+        }),
+      ];
+      if (rows.length === 0) {
+        emit((composeRow(w, lines.length, "Balances", [{ t: "(no quota entries reported by upstream)", c: DIM }])).line);
+      }
+      for (const r of rows.slice(0, quotaRows)) {
+        const row = composeRow(w, lines.length, r.label, r.segs);
         emit(row.line);
         regions.push(...row.regions);
       }
     }
 
-    const hiddenModels = Math.max(0, s.quota.balances.length - quotaRows);
+    const totalRows = s.quota.balances.length + (s.quota.coding?.rows.length ?? 0);
+    const hiddenModels = Math.max(0, totalRows - quotaRows);
     const refreshRow = composeRow(w, lines.length, "", [
       { t: " Refresh ", c: BTN_GRAY, action: { kind: "key", key: "r" } },
       ...(hiddenModels > 0 ? [{ t: `  +${hiddenModels} more (zcode-proxy quota)` as string, c: DIM }] : []),

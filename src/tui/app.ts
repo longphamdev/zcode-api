@@ -253,7 +253,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
     if (quotaFetchInFlight) return;
     quotaFetchInFlight = true;
     const firstFetch = state.quota == null;
-    state.quota = { status: "loading", balances: [], errors: [], error: "", fetchedAt: Date.now() };
+    state.quota = { status: "loading", balances: [], coding: null, errors: [], error: "", fetchedAt: Date.now() };
     scheduleRender();
     try {
       const snap: QuotaSnapshot = await collectQuotaSnapshot(config);
@@ -264,7 +264,19 @@ export async function runTui(args: ServeArgs): Promise<void> {
           remainingUnits: b.remainingUnits,
           totalUnits: b.totalUnits,
           ...(b.expiresAt !== undefined ? { expiresAt: b.expiresAt } : {}),
+          ...(b.unitType !== undefined ? { unitType: b.unitType } : {}),
         })),
+        coding: snap.codingPlan
+          ? {
+              level: snap.codingPlan.level,
+              rows: snap.codingPlan.limits.map((l) => ({
+                type: l.type,
+                ...(l.remaining !== undefined ? { remaining: l.remaining } : {}),
+                ...(l.unit !== undefined ? { unit: l.unit } : {}),
+                ...(l.nextResetTime !== undefined ? { nextResetTime: l.nextResetTime } : {}),
+              })),
+            }
+          : null,
         errors: snap.errors,
         error: "",
         fetchedAt: Date.now(),
@@ -275,6 +287,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
       state.quota = {
         status: "error",
         balances: [],
+        coding: null,
         errors: [],
         error: (err as Error).message,
         fetchedAt: Date.now(),
