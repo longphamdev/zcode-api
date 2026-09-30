@@ -55,9 +55,15 @@ export interface QuotaBalanceRow {
 
 /** One coding-plan usage window (monitor plane `limits[]` entry). */
 export interface QuotaCodingRow {
-  /** Server-defined window type; `TIME_LIMIT` is the 5h/weekly prompt window. */
+  /** Server-defined window type; `TIME_LIMIT`/`TOKENS_LIMIT` are the count/token windows. */
   type: string;
   remaining?: number;
+  /**
+   * Upstream usage percentage (0–100; live data 2026-09-30: 2/3/60). The one
+   * self-consistent usage signal — `total`/`number` are junk (1/5 on live
+   * rows), so the bar renders remaining share `1 − pct/100` from it.
+   */
+  percentage?: number;
   unit?: string;
   nextResetTime?: number;
 }
@@ -122,6 +128,14 @@ const BTN_RED = "38;2;255;255;255;48;2;218;54;51";
 const BTN_BLUE = "38;2;255;255;255;48;2;31;111;235";
 const BTN_GRAY = "38;2;201;209;217;48;2;48;54;61";
 const BTN_SELECTED = BTN_BLUE;
+
+// GitHub dark-theme fg palette for the quota bars/values (same family as the
+// button SGRs above; 24-bit truecolor, legacy terminals fall back to default fg):
+//   success #3fb950 · warning #d29922 · danger #f85149 · muted track #6e7681
+const BAR_GREEN = "38;2;63;185;80";
+const BAR_AMBER = "38;2;210;153;34";
+const BAR_RED = "38;2;248;81;73";
+const BAR_TRACK = "38;2;110;118;129";
 /** Black on bright yellow — login-hint attention chip, 16-color safe. */
 const HINT_CHIP = "30;103";
 
@@ -267,18 +281,80 @@ function fmtExpiry(expiresAt: number): string {
   return d.getFullYear() === new Date().getFullYear() ? mmdd : `${d.getFullYear()}-${mmdd}`;
 }
 
-/** Usage-window reset: `HH:MM` today, `MM-DD HH:MM` otherwise; `""` unparseable. */
-function fmtReset(nextResetTime: number): string {
-  const ms = nextResetTime > 1e12 ? nextResetTime : nextResetTime * 1000;
-  const d = new Date(ms);
-  if (Number.isNaN(d.getTime())) return "";
-  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  return d.toDateString() === new Date().toDateString() ? hm : `${fmtExpiry(nextResetTime)} ${hm}`;
-}
-
 function fmtClock(ms: number): string {
   const d = new Date(ms);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
+/** Epoch seconds/milliseconds both seen in the wild: >1e12 is milliseconds. */
+function toEpochMs(v: number): number {
+  return v > 1e12 ? v : v * 1000;
+}
+
+/** 1/8-cell partial blocks — the bar edge lands mid-cell for a smooth edge. */
+const BAR_PARTIALS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+const BAR_W = 10;
+
+/**
+ * 括号进度条（htop/wget 同款终端原生样式）：`[████▋░░░░░]`。填充 = 阈值色，
+ * 轨道与括号 = DIM 灰；末格用 1/8 分块字符（▏▎▍▌▋▊▉）做亚格平滑边缘。
+ * frac 缺位时画空轨道（DIM）——占位但不上色。
+ */
+function quotaBar(frac: number | undefined, color: string): Seg[] {
+  const cells = frac === undefined ? 0 : Math.max(0, Math.min(1, frac)) * BAR_W;
+  const full = Math.floor(cells);
+  const part = BAR_PARTIALS[Math.min(7, Math.floor((cells - full) * 8))];
+  const fillLen = full + (part ? 1 : 0);
+  return [
+    { t: "[", c: BAR_TRACK },
+    ...(full > 0 ? [{ t: "█".repeat(full), c: color }] : []),
+    ...(part ? [{ t: part, c: color }] : []),
+    ...(fillLen < BAR_W ? [{ t: "░".repeat(BAR_W - fillLen), c: BAR_TRACK }] : []),
+    { t: "]", c: BAR_TRACK },
+  ];
+}
+
+/** 名称列按显示宽度补空格 —— 两组行的条形起点对齐同一列。 */
+function padName(t: string): string {
+  const NAME_W = 13;
+  const pad = NAME_W - displayWidth(t);
+  return pad > 0 ? t + " ".repeat(pad) : t;
+}
+
+/** 剩余占比阈值色（GitHub dark 色系，与 Android 端同语义）：≤10% danger / ≤30% warning / 其余 success。 */
+function fracColor(frac: number): string {
+  return frac <= 0.1 ? BAR_RED : frac <= 0.3 ? BAR_AMBER : BAR_GREEN;
+}
+
+/** 重置倒计时：`4h 30m后重置` / `3d 06h后重置` / `12m后重置` / 已到点 `即将重置`。 */
+function fmtResetCountdown(nextResetTime: number, nowMs: number): string {
+  const diff = toEpochMs(nextResetTime) - nowMs;
+  if (diff <= 0) return "即将重置";
+  const m = Math.floor(diff / 60000);
+  if (m < 60) return `${m}m后重置`;
+  if (m < 1440) return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m后重置`;
+  return `${Math.floor(m / 1440)}d ${String(Math.floor((m % 1440) / 60)).padStart(2, "0")}h后重置`;
+}
+
+function friendlyWindowType(type: string): string {
+  if (type === "TOKENS_LIMIT") return "Token";
+  if (type === "TIME_LIMIT") return "周期";
+  return type;
+}
+
+/**
+ * 窗口语义名：按重置升序的位次 + horizon 校验（5h → 每周 → 月度）。
+ * 实弹钉死（2026-09-30，max 档）：三窗口重置分别在 4h30m / 3d18h / 14d，
+ * 正好落三个位次 —— 永不裸显 TIME_LIMIT/TOKENS_LIMIT。位次与 horizon 不符
+ * 时诚实降级为周期/类型名，不硬贴语义。
+ */
+function codingWindowLabel(type: string, nextResetTime: number | undefined, pos: number, nowMs: number): string {
+  const horizon = nextResetTime !== undefined ? toEpochMs(nextResetTime) - nowMs : undefined;
+  if (pos === 0 && horizon !== undefined && horizon <= 6 * 3600e3) return "5 小时";
+  if (pos === 1 && horizon !== undefined && horizon <= 8 * 86400e3) return "每周";
+  if (pos === 2 && horizon !== undefined && horizon <= 45 * 86400e3) return "月度";
+  if (horizon === undefined) return friendlyWindowType(type);
+  return horizon >= 0 && horizon <= 45 * 86400e3 ? "月度" : "周期";
 }
 
 /** At most this many per-model balance rows — the card must stay bounded so the Logs card keeps room on short terminals. */
@@ -393,40 +469,60 @@ export function buildFrame(s: FrameState): Frame {
     } else {
       // Both planes render as one table: credits buckets ("Balances") then
       // coding-plan windows ("Coding"), each group's first row carries the
-      // label. Rows share the value grammar: name · remaining [/ total] · time.
+      // label. Rows share the value grammar: name · bar · remaining · reset.
+      // Live data (2026-09-30, max tier): upstream `total`/`number` are junk
+      // (1/5 on real rows) while `percentage` is self-consistent — the bar is
+      // the remaining share derived from it, never an X/Y fabrication.
       const coding = s.quota.coding?.rows ?? [];
       type QuotaTableRow = { label: string; segs: Seg[] };
       const unitNote = (u: string | undefined): Seg[] =>
         !u || u === "token" ? [] : [{ t: `  · ${u}`, c: DIM }];
+      const nowMs = Date.now();
+      const remainingFrac = (pct: number | undefined): number | undefined =>
+        pct !== undefined && pct >= 0 && pct <= 100 ? 1 - pct / 100 : undefined;
+      const sortedCoding = [...coding].sort(
+        (a, b) => (a.nextResetTime ?? Number.POSITIVE_INFINITY) - (b.nextResetTime ?? Number.POSITIVE_INFINITY),
+      );
       const rows: QuotaTableRow[] = [
         ...s.quota.balances.map((b, i): QuotaTableRow => {
           const exp = b.expiresAt ? fmtExpiry(b.expiresAt) : "";
+          const frac = b.totalUnits > 0 ? b.remainingUnits / b.totalUnits : undefined;
           return {
             label: i === 0 ? "Balances" : "",
             segs: [
-              { t: truncateToWidth(b.showName || "(unnamed)", 16), c: CYAN },
+              { t: padName(truncateToWidth(b.showName || "(unnamed)", 13)), c: CYAN },
               { t: "  " },
-              { t: `${fmtUnits(b.remainingUnits)} / ${fmtUnits(b.totalUnits)}`, c: GREEN },
+              ...quotaBar(frac, frac !== undefined ? fracColor(frac) : BAR_GREEN),
+              { t: "  " },
+              {
+                t: `${fmtUnits(b.remainingUnits)} / ${fmtUnits(b.totalUnits)}`,
+                c: frac !== undefined ? fracColor(frac) : BAR_GREEN,
+              },
               ...(exp ? [{ t: `  · exp ${exp}`, c: DIM }] : []),
               ...unitNote(b.unitType),
             ],
           };
         }),
-        ...coding.map((c, i): QuotaTableRow => {
-          // Live data (2026-09-29) shows upstream `number` is not a comparable
-          // total (TIME_LIMIT row: remaining=3894, number=1) — the official
-          // panel likewise renders `remaining` alone, never "X / Y".
-          const value = c.remaining !== undefined ? fmtUnits(c.remaining) : "—";
-          const reset = c.nextResetTime !== undefined ? fmtReset(c.nextResetTime) : "";
+        ...sortedCoding.map((c, i): QuotaTableRow => {
+          const frac = remainingFrac(c.percentage);
+          const barColor = frac !== undefined ? fracColor(frac) : BAR_GREEN;
+          const value =
+            c.remaining !== undefined
+              ? `剩 ${fmtUnits(c.remaining)}${c.unit ? ` ${c.unit}` : " 次"}`
+              : frac !== undefined
+                ? `剩 ${Math.round(frac * 100)}%`
+                : "—";
+          const reset = c.nextResetTime !== undefined ? fmtResetCountdown(c.nextResetTime, nowMs) : "";
           return {
             label: i === 0 ? "Coding" : "",
             segs: [
-              { t: truncateToWidth(c.type, 16), c: CYAN },
+              { t: padName(truncateToWidth(codingWindowLabel(c.type, c.nextResetTime, i, nowMs), 13)), c: CYAN },
               { t: "  " },
-              { t: value, c: GREEN },
-              ...(reset ? [{ t: `  · reset ${reset}`, c: DIM }] : []),
+              ...quotaBar(frac, barColor),
+              { t: "  " },
+              { t: value, c: barColor },
+              ...(reset ? [{ t: `  · ${reset}`, c: DIM }] : []),
               ...(i === 0 && s.quota?.coding?.level ? [{ t: `  · ${s.quota.coding.level}`, c: DIM }] : []),
-              ...unitNote(c.unit),
             ],
           };
         }),

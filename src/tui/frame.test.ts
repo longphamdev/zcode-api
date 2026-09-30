@@ -269,7 +269,7 @@ describe("buildFrame", () => {
   });
 
   test("quota card renders coding-plan windows after credit buckets", () => {
-    const endOfDay = new Date().setHours(23, 59, 0, 0); // same calendar day → HH:MM reset form
+    const twoHoursOut = Date.now() + 2 * 3600e3; // ≤6h → positional "5 小时" label
     const text = plainLines(baseState({
       quota: {
         status: "ok",
@@ -277,7 +277,7 @@ describe("buildFrame", () => {
         coding: {
           level: "max",
           rows: [
-            { type: "TIME_LIMIT", remaining: 36, unit: "prompt", nextResetTime: endOfDay },
+            { type: "TIME_LIMIT", remaining: 36, unit: "prompt", nextResetTime: twoHoursOut },
             { type: "WEEK_LIMIT", remaining: 500 },
           ],
         },
@@ -288,12 +288,15 @@ describe("buildFrame", () => {
     })).join("\n");
     expect(text).toContain("Balances");
     expect(text).toContain("Coding");
-    expect(text).toContain("TIME_LIMIT");
+    // Window names are positional by reset time — raw upstream types never render.
+    expect(text).toContain("5 小时");
+    expect(text).not.toContain("TIME_LIMIT");
     // Mirror of the official panel: remaining alone — upstream `number` is not
     // a comparable total (live TIME_LIMIT row: remaining=3894, number=1).
-    expect(text).toContain("36");
-    expect(text).toContain("reset 23:59");
+    expect(text).toContain("剩 36 prompt");
+    expect(text).toContain("后重置");
     expect(text).toContain("· max");
+    // No reset time → no semantic label either: honest fallback to the raw type.
     expect(text).toContain("WEEK_LIMIT");
     expect(text).toContain("500");
   });
@@ -303,7 +306,7 @@ describe("buildFrame", () => {
       quota: {
         status: "ok",
         balances: [],
-        coding: { level: null, rows: [{ type: "TIME_LIMIT", remaining: 9, nextResetTime: 1767225600 }] },
+        coding: { level: null, rows: [{ type: "TIME_LIMIT", remaining: 9, nextResetTime: Date.now() + 3600e3 }] },
         errors: [],
         error: "",
         fetchedAt: Date.now(),
@@ -315,15 +318,84 @@ describe("buildFrame", () => {
       quota: {
         status: "ok",
         balances: [],
-        coding: { level: null, rows: [{ type: "TIME_LIMIT", remaining: 9, nextResetTime: 1767225600 }] },
+        coding: { level: null, rows: [{ type: "TIME_LIMIT", remaining: 9, nextResetTime: Date.now() + 3600e3 }] },
         errors: [],
         error: "",
         fetchedAt: Date.now(),
       },
-    })).find((l) => l.includes("TIME_LIMIT")) ?? "";
-    expect(codingLine).toContain("9");
-    expect(codingLine).not.toContain("120");
-    expect(text).toContain("reset 01-01");
+    })).find((l) => l.includes("5 小时")) ?? "";
+    expect(codingLine).toContain("剩 9 次");
+    expect(codingLine).not.toContain("/");
+    expect(text).toContain("后重置");
+  });
+
+  test("coding windows get semantic labels, bars and countdowns (live 2026-09-30 shape)", () => {
+    const now = Date.now();
+    const text = plainLines(baseState({
+      quota: {
+        status: "ok",
+        balances: [],
+        coding: {
+          level: "max",
+          rows: [
+            { type: "TIME_LIMIT", remaining: 3891, percentage: 2, nextResetTime: now + 14 * 86400e3 },
+            { type: "TOKENS_LIMIT", percentage: 3, nextResetTime: now + 4.5 * 3600e3 },
+            { type: "TOKENS_LIMIT", percentage: 60, nextResetTime: now + 3.75 * 86400e3 },
+          ],
+        },
+        errors: [],
+        error: "",
+        fetchedAt: now,
+      },
+    })).join("\n");
+    // Positional by reset asc: 4.5h → 5 小时, 3.75d → 每周, 14d → 月度.
+    expect(text).toContain("5 小时");
+    expect(text).toContain("每周");
+    expect(text).toContain("月度");
+    expect(text).not.toContain("TIME_LIMIT");
+    expect(text).not.toContain("TOKENS_LIMIT");
+    expect(text).toContain("剩 3,891 次");
+    expect(text).toContain("剩 40%"); // 1 − 60%
+    const weeklyLine = plainLines(baseState({
+      quota: {
+        status: "ok",
+        balances: [],
+        coding: {
+          level: "max",
+          rows: [
+            { type: "TIME_LIMIT", remaining: 3891, percentage: 2, nextResetTime: now + 14 * 86400e3 },
+            { type: "TOKENS_LIMIT", percentage: 3, nextResetTime: now + 4.5 * 3600e3 },
+            { type: "TOKENS_LIMIT", percentage: 60, nextResetTime: now + 3.75 * 86400e3 },
+          ],
+        },
+        errors: [],
+        error: "",
+        fetchedAt: now,
+      },
+    })).find((l) => l.includes("每周")) ?? "";
+    expect(weeklyLine).toContain("["); // bracketed progress bar renders
+    expect(weeklyLine).toContain("█");
+    expect(weeklyLine).toContain("40%");
+    // 所有条形起点对齐同一列 —— 名称列按显示宽度补空格（"5 小时"6 格 vs "每周"4 格）
+    const barCols = plainLines(baseState({
+      quota: {
+        status: "ok",
+        balances: [],
+        coding: {
+          level: "max",
+          rows: [
+            { type: "TIME_LIMIT", remaining: 3891, percentage: 2, nextResetTime: now + 14 * 86400e3 },
+            { type: "TOKENS_LIMIT", percentage: 3, nextResetTime: now + 4.5 * 3600e3 },
+            { type: "TOKENS_LIMIT", percentage: 60, nextResetTime: now + 3.75 * 86400e3 },
+          ],
+        },
+        errors: [],
+        error: "",
+        fetchedAt: now,
+      },
+    })).filter((l) => l.includes("[") && (l.includes("█") || l.includes("░"))).map((l) => l.indexOf("["));
+    expect(barCols.length).toBe(3);
+    expect(new Set(barCols).size).toBe(1);
   });
 
   test("non-token unit types are surfaced, token stays invisible", () => {

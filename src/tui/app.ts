@@ -272,6 +272,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
               rows: snap.codingPlan.limits.map((l) => ({
                 type: l.type,
                 ...(l.remaining !== undefined ? { remaining: l.remaining } : {}),
+                ...(l.percentage !== undefined ? { percentage: l.percentage } : {}),
                 ...(l.unit !== undefined ? { unit: l.unit } : {}),
                 ...(l.nextResetTime !== undefined ? { nextResetTime: l.nextResetTime } : {}),
               })),
