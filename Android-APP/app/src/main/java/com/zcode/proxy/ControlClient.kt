@@ -96,6 +96,20 @@ class ControlClient(private val controlPort: Int) {
         }
     }
 
+    /**
+     * 套餐用量快照（双平面：credits 积分桶 + coding monitor 窗口）。
+     * 服务端需发起 3 个上游请求，耗时高于 status；仅在用户进主屏/点按刷新时调用，
+     * 勿轮询（billing 网关限频）。
+     */
+    suspend fun quota(): JSONObject? = withContext(Dispatchers.IO) {
+        try {
+            request(JSONObject().put("cmd", "quota"))
+        } catch (t: Throwable) {
+            Log.w(TAG, "quota failed: ${t.message}")
+            null
+        }
+    }
+
     fun close() {
     }
 

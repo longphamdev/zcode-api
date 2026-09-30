@@ -68,12 +68,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -93,9 +90,15 @@ import com.zcode.proxy.ui.theme.ZcodeTheme
 import com.zcode.proxy.ui.theme.dimColor
 import com.zcode.proxy.ui.theme.isDarkTheme
 import com.zcode.proxy.ui.theme.successColor
+import com.zcode.proxy.ui.theme.warningColor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
+import java.text.DecimalFormat
+import java.text.DecimalFormatSymbols
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
@@ -124,7 +127,12 @@ class MainActivity : ComponentActivity() {
 
 private const val POLL_INTERVAL_MS = 1500L
 private const val MAX_LOG_LINES = 500
-private const val SPARKLINE_MINUTES = 60
+
+/** coding 次数制窗口长度（时间进度条分母）；标签与窗口一一对应。 */
+private const val FIVE_HOUR_WINDOW_MS = 5 * 60 * 60 * 1000L
+private const val WEEK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000L
+private const val LABEL_5H = "5 小时"
+private const val LABEL_WEEK = "每周"
 
 @Composable
 private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Unit) {
@@ -140,9 +148,15 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
     var proxyRunning by remember { mutableStateOf(false) }
     var logCursor by remember { mutableStateOf(0) }
     val logs = remember { mutableStateListOf<String>() }
-    val minuteBuckets = remember { mutableStateListOf<Pair<Long, Int>>() }
     var toast by remember { mutableStateOf<String?>(null) }
     var tab by rememberSaveable { mutableStateOf(0) }
+
+    // 套餐用量（替换原「近 60 分钟请求」sparkline）：登录后拉一次 + 点按刷新，
+    // 无轮询 —— billing/monitor 网关限频（与 TUI 手动刷新同策略）。
+    var quotaUi by remember { mutableStateOf<QuotaUi?>(null) }
+    var quotaStatus by remember { mutableStateOf("idle") } // idle | loading | ok | empty | error
+    var quotaErrorMsg by remember { mutableStateOf("") }
+    var quotaInFlight by remember { mutableStateOf(false) }
 
     // 更新检查（GitHub Releases）：每次启动自动查一次，设置页可手动触发
     val currentVersion = remember {
@@ -217,15 +231,6 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
                         for (i in 0 until arr.length()) newLines.add(arr.getString(i))
                         logs.addAll(newLines)
                         while (logs.size > MAX_LOG_LINES) logs.removeAt(0)
-                        // 按分钟桶聚合请求数，供 sparkline 使用
-                        val bucket = System.currentTimeMillis() / 60000L
-                        if (minuteBuckets.isNotEmpty() && minuteBuckets.last().first == bucket) {
-                            minuteBuckets[minuteBuckets.lastIndex] =
-                                bucket to (minuteBuckets.last().second + newLines.size)
-                        } else {
-                            minuteBuckets.add(bucket to newLines.size)
-                            while (minuteBuckets.size > SPARKLINE_MINUTES) minuteBuckets.removeAt(0)
-                        }
                     }
                     logCursor = next
                 }
@@ -243,15 +248,32 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
 
     val errRegex = remember { Regex("\\b(4\\d\\d|5\\d\\d)\\b") }
     val errorCount = logs.count { errRegex.containsMatchIn(it) }
-    val sparkData: List<Int> = remember(minuteBuckets.toList(), nowMs) {
-        if (minuteBuckets.isEmpty()) {
-            emptyList()
-        } else {
-            val firstMinute = minuteBuckets.first().first
-            val currentMinute = nowMs / 60000L
-            (firstMinute..currentMinute)
-                .map { m -> minuteBuckets.firstOrNull { it.first == m }?.second ?: 0 }
-                .takeLast(SPARKLINE_MINUTES)
+
+    fun refreshQuota() {
+        if (quotaInFlight) return
+        quotaInFlight = true
+        // 已有数据时保留旧值原地刷新（loading 占位仅用于首拉）
+        if (quotaUi == null) quotaStatus = "loading"
+        scope.launch {
+            val r = MainActivity.controlClient?.quota()
+            if (r != null && r.optBoolean("ok", false)) {
+                val parsed = parseQuota(r, plan)
+                quotaUi = parsed
+                quotaStatus = if (parsed != null && parsed.rows.isNotEmpty()) "ok" else "empty"
+            } else {
+                quotaErrorMsg = r?.optString("error") ?: ""
+                quotaStatus = "error"
+            }
+            quotaInFlight = false
+        }
+    }
+
+    // 登录态/套餐切换时自动拉一次；登出清空（billing 调用需要凭据）
+    LaunchedEffect(loggedIn, plan) {
+        if (loggedIn) refreshQuota() else {
+            quotaUi = null
+            quotaStatus = "idle"
+            quotaErrorMsg = ""
         }
     }
 
@@ -345,11 +367,14 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
                                 proxyPort = proxyPort,
                                 plan = plan,
                                 uptimeText = runningSince?.let { formatDuration(nowMs - it) },
-                                sparkData = sparkData,
+                                quotaUi = quotaUi,
+                                quotaStatus = quotaStatus,
+                                quotaErrorMsg = quotaErrorMsg,
                                 clipboard = clipboard,
                                 onCopied = { toast = "已复制 127.0.0.1:$proxyPort" },
                                 onStart = ::startProxy,
                                 onStop = ::stopProxy,
+                                onRefreshQuota = ::refreshQuota,
                             )
                         }
                         item {
@@ -551,11 +576,14 @@ private fun HeroCard(
     proxyPort: Int,
     plan: String,
     uptimeText: String?,
-    sparkData: List<Int>,
+    quotaUi: QuotaUi?,
+    quotaStatus: String,
+    quotaErrorMsg: String,
     clipboard: ClipboardManager,
     onCopied: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onRefreshQuota: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
     Column(
@@ -620,23 +648,14 @@ private fun HeroCard(
             }
         }
         Spacer(Modifier.height(14.dp))
-        Row(verticalAlignment = Alignment.Bottom) {
-            Column(Modifier.weight(1f)) {
-                Text("近 60 分钟请求", fontSize = 11.sp, color = cs.onPrimaryContainer.copy(alpha = 0.65f))
-                Sparkline(
-                    data = sparkData,
-                    color = cs.primary,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            Spacer(Modifier.width(12.dp))
-            Text(
-                uptimeText?.let { "UP $it" } ?: "UP —",
-                fontFamily = Mono,
-                fontSize = 12.sp,
-                color = cs.onPrimaryContainer.copy(alpha = 0.65f),
-            )
-        }
+        QuotaBlock(
+            loggedIn = loggedIn,
+            quotaUi = quotaUi,
+            status = quotaStatus,
+            errorMsg = quotaErrorMsg,
+            uptimeText = uptimeText,
+            onRefresh = onRefreshQuota,
+        )
         Spacer(Modifier.height(14.dp))
         Button(
             onClick = if (proxyRunning) onStop else onStart,
@@ -1157,47 +1176,367 @@ private fun StatusDot(color: Color, pulse: Boolean) {
     }
 }
 
+/**
+ * 套餐用量行。`progress == null` 时只画轨道（无占比数据可画）。
+ * `striped = true` 为 coding 次数制窗口条（填充 = 距重置时间进度，斜纹，值只显示 remaining
+ * —— 上游 number 非可比总量，官方面板同款语义，见 docs/design/quota-coding-*.svg）；
+ * `striped = false` 为 credit 余量占比实心条（阈值变色，值文本同色）。
+ */
+private data class QuotaRowUi(
+    val label: String,
+    val value: String,
+    val progress: Float?,
+    val striped: Boolean,
+    /** credit 余量档位：0 充足 / 1 偏低(≤30%) / 2 将尽(≤10%)；coding 恒 0。 */
+    val warnLevel: Int = 0,
+)
+
+private data class QuotaUi(
+    /** coding 档位字符串（data.level，如 "max"）；credit 制无档位 → null。 */
+    val level: String?,
+    val rows: List<QuotaRowUi>,
+    /** 快照 serverTime（epoch ms）—— 时间进度条以服务端时间为“现在”，免设备时钟偏差。 */
+    val nowMs: Long,
+)
+
 @Composable
-private fun Sparkline(data: List<Int>, color: Color, modifier: Modifier = Modifier) {
-    // 签名动效：末点呼吸（与状态灯同一节奏），面积填充取 0.14f 弱化层次
-    val pulseAlpha by rememberInfiniteTransition(label = "sparkPulse").animateFloat(
-        initialValue = 0.12f,
-        targetValue = 0.4f,
-        animationSpec = infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Reverse),
-        label = "sparkPulseAlpha",
-    )
-    Canvas(modifier.height(36.dp)) {
-        if (data.size < 2) {
-            val y = size.height / 2
-            drawLine(
-                color = color.copy(alpha = 0.3f),
-                start = Offset(0f, y),
-                end = Offset(size.width, y),
-                strokeWidth = 4f,
-                cap = StrokeCap.Round,
+private fun QuotaBlock(
+    loggedIn: Boolean,
+    quotaUi: QuotaUi?,
+    status: String,
+    errorMsg: String,
+    uptimeText: String?,
+    onRefresh: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clickable(enabled = loggedIn, onClick = onRefresh),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("套餐用量", fontSize = 11.sp, color = cs.onPrimaryContainer.copy(alpha = 0.65f))
+            quotaUi?.level?.let { level ->
+                Spacer(Modifier.width(8.dp))
+                Surface(shape = RoundedCornerShape(50), color = cs.primary.copy(alpha = 0.14f)) {
+                    Text(
+                        level,
+                        fontFamily = Mono,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = cs.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            Text(
+                uptimeText?.let { "UP $it" } ?: "UP —",
+                fontFamily = Mono,
+                fontSize = 11.sp,
+                color = cs.onPrimaryContainer.copy(alpha = 0.65f),
             )
-        } else {
-            val maxV = (data.maxOrNull() ?: 1).coerceAtLeast(1)
-            val step = size.width / (data.size - 1)
-            val points = data.mapIndexed { i, v ->
-                Offset(i * step, size.height * (1f - (v.toFloat() / maxV)).coerceIn(0.08f, 1f))
+        }
+        Spacer(Modifier.height(12.dp))
+        val ui = quotaUi
+        when {
+            !loggedIn -> QuotaHint("登录后显示套餐用量")
+            status == "loading" && ui == null -> QuotaPlaceholderRows()
+            status == "error" -> Column {
+                QuotaHint(if (errorMsg.isBlank()) "用量获取失败" else "用量获取失败 · $errorMsg")
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "点按重试",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = cs.primary,
+                )
             }
-            val line = Path().apply {
-                moveTo(points.first().x, points.first().y)
-                points.drop(1).forEach { lineTo(it.x, it.y) }
+            else -> {
+                // quotaUi 是委托属性（by remember），不做智能转换 —— 显式取行列表兜底
+                val rows = ui?.rows.orEmpty()
+                if (rows.isEmpty()) {
+                    QuotaHint("暂无用量数据 · 点按刷新")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        rows.forEach { QuotaRow(it) }
+                    }
+                }
             }
-            val area = Path().apply {
-                addPath(line)
-                lineTo(points.last().x, size.height)
-                lineTo(points.first().x, size.height)
-                close()
-            }
-            drawPath(area, color.copy(alpha = 0.14f))
-            drawPath(line, color, style = Stroke(width = 4f, cap = StrokeCap.Round, join = StrokeJoin.Round))
-            drawCircle(color.copy(alpha = pulseAlpha), radius = 11f, center = points.last())
-            drawCircle(color, radius = 5.5f, center = points.last())
         }
     }
+}
+
+@Composable
+private fun QuotaHint(text: String) {
+    Text(
+        text,
+        fontSize = 11.sp,
+        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.5f),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun QuotaPlaceholderRows() {
+    val cs = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        listOf(LABEL_5H, LABEL_WEEK).forEach { label ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    label,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = cs.onPrimaryContainer.copy(alpha = 0.5f),
+                )
+                Spacer(Modifier.width(10.dp))
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(cs.onPrimaryContainer.copy(alpha = 0.08f)),
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "…",
+                    fontFamily = Mono,
+                    fontSize = 12.sp,
+                    color = cs.onPrimaryContainer.copy(alpha = 0.4f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuotaRow(row: QuotaRowUi) {
+    val cs = MaterialTheme.colorScheme
+    val barColor = if (row.striped) {
+        cs.primary
+    } else {
+        when (row.warnLevel) {
+            1 -> warningColor()
+            2 -> cs.error
+            else -> cs.primary
+        }
+    }
+    val valueColor = if (row.striped) cs.onPrimaryContainer else barColor
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            row.label,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = cs.onPrimaryContainer,
+            maxLines = 1,
+        )
+        Spacer(Modifier.width(10.dp))
+        QuotaBar(
+            progress = row.progress,
+            striped = row.striped,
+            color = barColor,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(
+            row.value,
+            fontFamily = Mono,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = valueColor,
+        )
+    }
+}
+
+@Composable
+private fun QuotaBar(progress: Float?, striped: Boolean, color: Color, modifier: Modifier = Modifier) {
+    // 设计稿规格：轨道 primary@12%；coding 条纹 = 8dp 周期 / 4dp 条（45% 叠 15% 底）；
+    // credit 实心条随余量缩短并按阈值变色。圆角 3dp 由 clip 统一处理。
+    Canvas(modifier.height(6.dp).clip(RoundedCornerShape(3.dp))) {
+        drawRect(color.copy(alpha = 0.12f))
+        progress?.let { p ->
+            val w = size.width * p.coerceIn(0f, 1f)
+            if (w <= 0f) return@let
+            if (striped) {
+                drawRect(color.copy(alpha = 0.15f), size = Size(w, size.height))
+                val period = 8.dp.toPx()
+                val stripe = 4.dp.toPx()
+                var x = 0f
+                while (x < w) {
+                    drawRect(
+                        color.copy(alpha = 0.45f),
+                        topLeft = Offset(x, 0f),
+                        size = Size(minOf(stripe, w - x), size.height),
+                    )
+                    x += period
+                }
+            } else {
+                drawRect(color, size = Size(w, size.height))
+            }
+        }
+    }
+}
+
+/** epoch 秒/毫秒并存（上游两种都见过）：>1e12 视为毫秒。 */
+private fun toEpochMs(v: Long): Long = if (v > 1_000_000_000_000L) v else v * 1000L
+
+private fun optStringOrNull(o: JSONObject, key: String): String? {
+    if (!o.has(key) || o.isNull(key)) return null
+    return o.optString(key, "").trim().ifBlank { null }
+}
+
+private fun optNumberOrNull(o: JSONObject, key: String): Double? {
+    if (!o.has(key) || o.isNull(key)) return null
+    return o.optDouble(key).takeUnless { it.isNaN() }
+}
+
+private fun optEpochMsOrNull(o: JSONObject, key: String): Long? =
+    optNumberOrNull(o, key)?.toLong()?.let(::toEpochMs)
+
+/**
+ * 组装用量块视图。平面按主屏套餐切换选择（coding-plan → monitor 窗口 / start-plan →
+ * billing 积分桶），首选平面无行时回退另一平面；level 仅在 coding 行被采用时附带。
+ */
+private fun parseQuota(resp: JSONObject, plan: String): QuotaUi? {
+    if (!resp.optBoolean("ok", false)) return null
+    val quota = resp.optJSONObject("quota") ?: return null
+    val nowMs = optNumberOrNull(quota, "serverTime")?.toLong()
+        ?.let { if (it > 0) toEpochMs(it) else System.currentTimeMillis() }
+        ?: System.currentTimeMillis()
+    val coding = quota.optJSONObject("codingPlan")
+    val balances = quota.optJSONArray("balances")
+    val codingRowsList = codingRows(coding, nowMs)
+    val creditRowsList = creditRows(balances, nowMs)
+    val level = coding?.let { optStringOrNull(it, "level") }
+    return if (plan == "coding-plan") {
+        if (codingRowsList.isNotEmpty()) QuotaUi(level, codingRowsList, nowMs)
+        else QuotaUi(null, creditRowsList, nowMs)
+    } else {
+        if (creditRowsList.isNotEmpty()) QuotaUi(null, creditRowsList, nowMs)
+        else QuotaUi(level, codingRowsList, nowMs)
+    }
+}
+
+/** monitor 平面 limits[] 归一后的最小行集（只留渲染要用的字段）。 */
+private data class CodingLimitRow(
+    val type: String,
+    val unit: String?,
+    val remaining: Double?,
+    val resetMs: Long?,
+)
+
+/** billing 平面 balances[] 归一后的最小行集。 */
+private data class CreditBucket(
+    val showName: String,
+    val remaining: Double,
+    val total: Double,
+    val expiresMs: Long?,
+)
+
+/**
+ * coding 次数制窗口行。镜像官方 `Xj` 选择：先 TIME_LIMIT；5 小时/每周按重置时间升序对号
+ * （近 = 5 小时，远 = 每周），单行时按距重置时长判定。条形填充 = 距重置的时间进度
+ * （满格即重置回零），值 = remaining（上游无可比总量，不渲染 X/Y）。
+ */
+private fun codingRows(coding: JSONObject?, nowMs: Long): List<QuotaRowUi> {
+    val limits = coding?.optJSONArray("limits") ?: return emptyList()
+    val parsed = buildList {
+        for (i in 0 until limits.length()) {
+            val o = limits.optJSONObject(i) ?: continue
+            val type = optStringOrNull(o, "type") ?: continue
+            add(
+                CodingLimitRow(
+                    type,
+                    optStringOrNull(o, "unit"),
+                    optNumberOrNull(o, "remaining"),
+                    optEpochMsOrNull(o, "nextResetTime"),
+                ),
+            )
+        }
+    }
+    val windowed = parsed.filter { it.type == "TIME_LIMIT" }
+        .sortedWith(compareBy { it.resetMs ?: Long.MAX_VALUE })
+    val chosen = (windowed.ifEmpty { parsed.filter { l -> l.remaining != null } }).take(2)
+    if (chosen.isEmpty()) return emptyList()
+    val hasWindows = windowed.isNotEmpty()
+    return chosen.mapIndexed { i, l ->
+        val label = when {
+            chosen.size >= 2 -> if (i == 0) LABEL_5H else LABEL_WEEK
+            hasWindows && l.resetMs != null && l.resetMs <= nowMs + 6 * 60 * 60 * 1000L -> LABEL_5H
+            hasWindows -> LABEL_WEEK
+            else -> l.type.take(10)
+        }
+        val windowMs = if (label == LABEL_5H) FIVE_HOUR_WINDOW_MS else WEEK_WINDOW_MS
+        val progress = l.resetMs?.let { reset -> (1f - (reset - nowMs).toFloat() / windowMs).coerceIn(0f, 1f) }
+        val value = if (l.remaining != null) "${fmtCount(l.remaining.toLong())} ${l.unit ?: "次"}" else "—"
+        QuotaRowUi(label, value, progress, striped = true)
+    }
+}
+
+/**
+ * credit 积分桶行。目标结构（用户/官方面板钉死）：5 小时 + 每周双窗口、单一总量池。
+ * 桶 → 窗口判别用过期时间升序：最近一桶 8h 内到期才按窗口标签展示，否则（体验套餐
+ * 长期桶）回退 showName 标签 —— 桶数不足 2 或形状不符时诚实降级，不硬套窗口语义。
+ */
+private fun creditRows(balances: JSONArray?, nowMs: Long): List<QuotaRowUi> {
+    val arr = balances ?: return emptyList()
+    val list = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            add(
+                CreditBucket(
+                    optStringOrNull(o, "showName") ?: "",
+                    optNumberOrNull(o, "remainingUnits") ?: 0.0,
+                    optNumberOrNull(o, "totalUnits") ?: 0.0,
+                    optEpochMsOrNull(o, "expiresAt"),
+                ),
+            )
+        }
+    }.sortedWith(compareBy { it.expiresMs ?: Long.MAX_VALUE })
+    if (list.isEmpty()) return emptyList()
+    val nearestExpiry = list[0].expiresMs
+    val windowed = list.size >= 2 &&
+        nearestExpiry != null &&
+        nearestExpiry <= nowMs + 8 * 60 * 60 * 1000L
+    return list.take(2).mapIndexed { i, b ->
+        val label = when {
+            windowed -> if (i == 0) LABEL_5H else LABEL_WEEK
+            list.size == 1 -> b.showName.ifBlank { "总额度" }.take(10)
+            else -> b.showName.ifBlank { "额度" }.take(10)
+        }
+        val progress = if (b.total > 0) (b.remaining / b.total).toFloat().coerceIn(0f, 1f) else null
+        val frac = if (b.total > 0) b.remaining / b.total else 1.0
+        val warnLevel = when {
+            b.total <= 0.0 -> 0
+            frac <= 0.10 -> 2
+            frac <= 0.30 -> 1
+            else -> 0
+        }
+        QuotaRowUi(
+            label,
+            "${fmtCredit(b.remaining.toLong())} / ${fmtCredit(b.total.toLong())}",
+            progress,
+            striped = false,
+            warnLevel = warnLevel,
+        )
+    }
+}
+
+/** `3,894` — 全精度千分位（次数制值的契约，与 TUI fmtUnits 同语义）。 */
+private fun fmtCount(n: Long): String =
+    DecimalFormat("#,###", DecimalFormatSymbols(Locale.US)).format(n)
+
+/** credit 紧凑展示：≥1e8 亿 / ≥1e4 万（如 6.4万 / 10万），其余千分位。 */
+private fun fmtCredit(n: Long): String = when {
+    n >= 100_000_000L -> trimScale(n / 1e8) + "亿"
+    n >= 10_000L -> trimScale(n / 1e4) + "万"
+    else -> fmtCount(n)
+}
+
+private fun trimScale(v: Double): String {
+    val s = String.format(Locale.US, "%.1f", v)
+    return if (s.endsWith(".0")) s.dropLast(2) else s
 }
 
 @Composable

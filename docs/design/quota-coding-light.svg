@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="570" viewBox="0 0 390 570" font-family="system-ui,'Segoe UI','Microsoft YaHei',sans-serif">
+  <title>用量显示设计参考 · 次数制订阅（coding-plan）· 浅色</title>
+  <defs>
+    <pattern id="st" width="8" height="6" patternUnits="userSpaceOnUse">
+      <rect width="4.5" height="6" fill="#177CB0" fill-opacity="0.45"/>
+    </pattern>
+  </defs>
+  <rect width="390" height="570" fill="#F5F9FA"/>
+
+  <!-- 顶栏（上下文） -->
+  <rect x="16" y="16" width="40" height="40" rx="10" fill="#177CB0"/>
+  <text x="36" y="36" font-size="20" font-weight="700" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle">Z</text>
+  <text x="68" y="38" font-size="20" font-weight="600" fill="#1F2A30">ZCode Proxy</text>
+  <text x="68" y="54" font-size="12" fill="#5A6B74">本地反向代理 · 已连接</text>
+
+  <!-- 英雄卡 -->
+  <rect x="16" y="72" width="358" height="258" rx="24" fill="#D8EAEF"/>
+
+  <!-- 状态行 -->
+  <circle cx="41" cy="96" r="9" fill="#21A675" fill-opacity="0.18"/>
+  <circle cx="41" cy="96" r="5" fill="#21A675"/>
+  <text x="56" y="96" font-size="20" font-weight="600" fill="#123B4E" dominant-baseline="middle">运行中</text>
+  <rect x="258" y="84" width="96" height="24" rx="12" fill="#177CB0" fill-opacity="0.14"/>
+  <text x="306" y="96" font-size="12" font-family="ui-monospace,Consolas,monospace" fill="#123B4E" text-anchor="middle" dominant-baseline="middle">coding-plan</text>
+
+  <!-- 地址行 -->
+  <text x="36" y="144" font-size="24" font-weight="600" font-family="ui-monospace,Consolas,monospace" fill="#123B4E" dominant-baseline="middle">127.0.0.1:8317</text>
+  <rect x="290" y="128" width="64" height="32" rx="16" fill="none" stroke="#177CB0" stroke-opacity="0.45" stroke-width="1.5"/>
+  <rect x="300" y="136" width="10" height="12" rx="2" fill="none" stroke="#123B4E" stroke-opacity="0.85" stroke-width="1.5"/>
+  <rect x="305" y="141" width="10" height="12" rx="2" fill="#D8EAEF" stroke="#123B4E" stroke-opacity="0.85" stroke-width="1.5"/>
+  <text x="332" y="145" font-size="13" fill="#123B4E" text-anchor="middle" dominant-baseline="middle">复制</text>
+
+  <!-- ★ 用量块（替换「近 60 分钟请求」，同原块位置与体量） -->
+  <text x="36" y="188" font-size="11" fill="#123B4E" fill-opacity="0.65" dominant-baseline="middle">套餐用量</text>
+  <rect x="92" y="179" width="44" height="18" rx="9" fill="#177CB0" fill-opacity="0.14"/>
+  <text x="114" y="188" font-size="10" font-weight="600" font-family="ui-monospace,Consolas,monospace" fill="#123B4E" text-anchor="middle" dominant-baseline="middle">Max</text>
+  <text x="354" y="188" font-size="11" font-family="ui-monospace,Consolas,monospace" fill="#123B4E" fill-opacity="0.65" text-anchor="end" dominant-baseline="middle">UP 02:14:36</text>
+
+  <!-- 5 小时：值=remaining，条=距重置时间进度（条纹） -->
+  <text x="36" y="214" font-size="12" font-weight="600" fill="#123B4E" dominant-baseline="middle">5 小时</text>
+  <rect x="100" y="209" width="184" height="6" rx="3" fill="#177CB0" fill-opacity="0.12"/>
+  <rect x="100" y="209" width="114" height="6" rx="3" fill="#177CB0" fill-opacity="0.15"/>
+  <rect x="100" y="209" width="114" height="6" rx="3" fill="url(#st)"/>
+  <text x="354" y="214" font-size="12" font-weight="600" font-family="ui-monospace,Consolas,monospace" fill="#123B4E" text-anchor="end" dominant-baseline="middle">3,894 次</text>
+
+  <!-- 每周 -->
+  <text x="36" y="240" font-size="12" font-weight="600" fill="#123B4E" dominant-baseline="middle">每周</text>
+  <rect x="100" y="235" width="184" height="6" rx="3" fill="#177CB0" fill-opacity="0.12"/>
+  <rect x="100" y="235" width="57" height="6" rx="3" fill="#177CB0" fill-opacity="0.15"/>
+  <rect x="100" y="235" width="57" height="6" rx="3" fill="url(#st)"/>
+  <text x="354" y="240" font-size="12" font-weight="600" font-family="ui-monospace,Consolas,monospace" fill="#123B4E" text-anchor="end" dominant-baseline="middle">12,306 次</text>
+
+  <!-- 按钮 -->
+  <rect x="36" y="258" width="318" height="52" rx="26" fill="#177CB0"/>
+  <rect x="151" y="277" width="14" height="14" rx="3" fill="#FFFFFF"/>
+  <text x="201" y="284" font-size="16" font-weight="600" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle">停止代理</text>
+
+  <!-- 设计规格 -->
+  <text x="16" y="386" font-size="12" font-weight="600" fill="#1F2A30">设计规格 · coding-plan（monitor 平面，次数制）· 浅色</text>
+  <rect x="16" y="400" width="18" height="10" rx="3" fill="#177CB0" fill-opacity="0.15"/>
+  <rect x="16" y="400" width="18" height="10" rx="3" fill="url(#st)"/>
+  <text x="42" y="409" font-size="11" fill="#5A6B74">两行 = 5 小时 / 每周窗口（TIME_LIMIT ×2，镜像官方 Xj）</text>
+  <text x="16" y="427" font-size="11" fill="#5A6B74">条纹条 = 距重置时间进度；值 = remaining（上游无可比总量）</text>
+  <text x="16" y="445" font-size="11" fill="#5A6B74">Max pill = data.level · 点按整块刷新（网关限频，勿轮询）</text>
+  <text x="16" y="463" font-size="11" fill="#5A6B74">与 credit 制区分：条纹 = 时间进度 / 实心 = 余量占比</text>
+</svg>

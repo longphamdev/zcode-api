@@ -247,6 +247,55 @@ describe("android control listener — getLogs", () => {
   });
 });
 
+describe("android control listener — quota", () => {
+  const state: ControlState = { provider: "bigmodel", plan: "coding-plan", proxyPort: 0 };
+  const snapshot = {
+    provider: "bigmodel",
+    serverTime: 1759195200,
+    jwt: null,
+    balances: [],
+    claimablePlans: [],
+    codingPlan: { level: "max", limits: [{ type: "TIME_LIMIT", remaining: 3894 }] },
+    errors: [],
+  };
+
+  it("returns the snapshot from the onQuota hook", async () => {
+    const ctx: HandlerContext = {
+      logBuffer: new LogBuffer(),
+      onQuota: async () => snapshot,
+    };
+    const result = await post({ cmd: "quota" }, state, ctx);
+    expect(result.status).toBe(200);
+    expect(result.body.ok).toBe(true);
+    if (result.body.ok && "quota" in result.body) {
+      expect(result.body.quota).toEqual(snapshot);
+      expect(result.body.quota.codingPlan?.level).toBe("max");
+    }
+  });
+
+  it("returns quota_unavailable when the hook is missing", async () => {
+    const result = await post({ cmd: "quota" }, state);
+    expect(result.body.ok).toBe(false);
+    if (!result.body.ok) {
+      expect(result.body.error).toBe("quota_unavailable");
+    }
+  });
+
+  it("surfaces hook failures verbatim (not-logged-in message)", async () => {
+    const ctx: HandlerContext = {
+      logBuffer: new LogBuffer(),
+      onQuota: async () => {
+        throw new Error("not logged in (run: zcode-proxy auth login)");
+      },
+    };
+    const result = await post({ cmd: "quota" }, state, ctx);
+    expect(result.body.ok).toBe(false);
+    if (!result.body.ok) {
+      expect(result.body.error).toContain("not logged in");
+    }
+  });
+});
+
 describe("android control startOAuth callback-port lifecycle", () => {
   /** Find a free loopback TCP port (bind port 0, read back, close). */
   async function freePort(): Promise<number> {

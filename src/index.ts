@@ -6,6 +6,7 @@ import { loadConfig } from "./config/loader.js";
 import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";
 import { startControlListener, LogBuffer, type ControlState } from "./android/control.js";
+import { collectQuotaSnapshot } from "./server/routes-quota.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
 import { ZaiOAuthClient, BigmodelOAuthClient, BigmodelPollOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthResult } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
@@ -325,6 +326,7 @@ async function runAndroid(): Promise<void> {
     onStartProxy: startProxy,
     onStopProxy: stopProxy,
     onSetConfig: setConfig,
+    onQuota: () => collectQuotaSnapshot(config),
     onShutdown: async () => {
       serverRef.current?.stop(true);
     },
