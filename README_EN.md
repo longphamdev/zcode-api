@@ -39,7 +39,7 @@ After launching, you'll land in the terminal control panel (this is the main UI)
 
 <img src="docs/images/tui-annotated.png" alt="ZCode Proxy terminal control panel" width="980" />
 
-The panel has three areas: **Login & Settings** (provider / plan / login), **Proxy Service** (start/stop, current config) and **Logs** (one line per request, scrolling live). Press <kbd>s</kbd> to start the proxy — once you see `Status: running`, you're ready.
+The panel has four cards: **Login & Settings** (provider / plan / login), **Quota** (remaining-share bars + reset countdowns, press <kbd>r</kbd> or click Refresh), **Proxy Service** (start/stop, current config) and **Logs** (one line per request, scrolling live). Press <kbd>s</kbd> to start the proxy — once you see `Status: running`, you're ready.
 
 > Not fond of keyboard shortcuts? The panel buttons support **mouse clicks**. Want it to run silently in the background? Use `zcode-proxy.exe --cli serve`.
 
@@ -52,6 +52,7 @@ The panel has three areas: **Login & Settings** (provider / plan / login), **Pro
 | <kbd>L</kbd> | bigmodel paste login (fallback mode; the `l` login itself is callback-free and works headless) |
 | <kbd>o</kbd> | Log out |
 | <kbd>p</kbd> / <kbd>t</kbd> | Switch provider (Z.AI ↔ Zhipu) / plan (coding-plan ↔ start-plan) |
+| <kbd>r</kbd> | Refresh the quota card |
 | <kbd>↑</kbd><kbd>↓</kbd> / <kbd>PgUp</kbd> / <kbd>g</kbd> | Scroll logs / jump back to the bottom |
 | <kbd>c</kbd> | Clear the log screen |
 | <kbd>q</kbd> | Quit the panel |

@@ -77,6 +77,10 @@ class SVG:
         self.e = []
 
     def rect(self, x, y, w, h, rx, fill, stroke=None, sw=0, fo=1.0, so=1.0):
+        # Compose 的 RoundedCornerShape(50) 是「半径=短边一半」的真胶囊；SVG 只给 rx
+        # 时 ry 钳到 h/2 而 rx 不钳（rx>h/2 会画成扁椭圆端）—— 必须显式钳到
+        # min(w/2, h/2) 才与真机形状一致。
+        rx = min(rx, w / 2.0, h / 2.0)
         s = f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="{rx:.1f}" fill="{fill}"'
         if fo < 1: s += f' fill-opacity="{fo:.2f}"'
         if stroke: s += f' stroke="{stroke}" stroke-width="{sw:.1f}" stroke-opacity="{so:.2f}"'
@@ -175,12 +179,53 @@ def pill(s, x, y, label, size_sp, fill, fg, mono=False, weight=600, stroke=None,
     s.text(x + tw / 2, y + h / 2, label, dp(size_sp), fg, weight=weight, anchor="middle", mono=mono)
     return tw, h
 
+def quota_row(s, pal, x, y, w, label, value, frac, warn=0, reset="", striped=False):
+    """QuotaRow：标签 + 6dp 圆角条（实心=剩余占比 / 条纹=时间进度兜底）+ 右列两行。"""
+    bar_color = pal.primary if warn == 0 else (_WARNING(pal) if warn == 1 else pal.error)
+    s.text(x, y + dp(8), label, dp(12), pal.onPrimaryContainer, weight=600)
+    bx = x + dp(46)
+    bw = w - dp(46) - dp(96)
+    s.rect(bx, y + dp(5), bw, dp(6), dp(3), _alpha(pal.primary, 0.12))
+    if frac is not None:
+        fw = max(0.0, min(1.0, frac)) * bw
+        if not striped:
+            s.rect(bx, y + dp(5), fw, dp(6), dp(3), bar_color)
+        else:
+            s.rect(bx, y + dp(5), fw, dp(6), dp(3), _alpha(pal.primary, 0.15))
+            period, sw = dp(8), dp(4)
+            cx = bx
+            while cx < bx + fw:
+                s.rect(cx, y + dp(5), min(sw, bx + fw - cx), dp(6), dp(3), _alpha(pal.primary, 0.45))
+                cx += period
+    s.text(x + w, y + dp(5), value, dp(12), bar_color, weight=600, anchor="end", mono=True)
+    if reset:
+        s.text(x + w, y + dp(21), reset, dp(10), pal.onPrimaryContainer, fo=0.55, anchor="end", mono=True)
+    return y + dp(30)
+
+def _WARNING(pal):
+    return "#A9760B" if pal is LIGHT else "#E0BC5E"
+
+def quota_block(s, pal, x, y, w, level, rows, uptime):
+    """QuotaBlock：套餐用量头行（+ Max pill + UP）+ 窗口行 ×N（12dp 间距）。"""
+    s.text(x, y + dp(8), "套餐用量", dp(11), pal.onPrimaryContainer, fo=0.65)
+    if level:
+        pill(s, x + dp(56), y - dp(1), level, 10, _alpha(pal.primary, 0.14),
+             pal.onPrimaryContainer, mono=True, weight=600, padx=8, pady=2)
+    s.text(x + w, y + dp(8), uptime, dp(11), pal.onPrimaryContainer, fo=0.65, anchor="end", mono=True)
+    ry = y + dp(17 + 12)
+    for label, value, frac, warn, reset, striped in rows:
+        quota_row(s, pal, x, ry, w, label, value, frac, warn=warn, reset=reset,
+                  striped=striped)
+        ry += dp(30 + 12)
+    return ry
+
 def hero_card(s, pal, y0, running=True):
     p = dp(20)
     y = y0
     card_x, card_w = dp(16), W - dp(32)
     inner_w = card_w - p * 2
-    ch = dp(24 + 16 + 34 + 14 + 17 + 36 + 14 + 52) + p * 2
+    n_rows = 3
+    ch = dp(24 + 16 + 34 + 14 + 17 + 12 + (30 + 12) * n_rows + 14 + 52) + p * 2
     s.rect(card_x, y, card_w, ch, dp(24), pal.primaryContainer)
     cy = y + p
     # 行1：状态点 + 状态文本 + plan 徽章
@@ -201,14 +246,15 @@ def hero_card(s, pal, y0, running=True):
         copy_glyph(s, pal, bx + dp(14), cy + dp(17) - dp(7.5), _alpha(pal.onPrimaryContainer, 0.85))
         s.text(bx + dp(14) + dp(15) + dp(6), cy + dp(17), "复制", dp(13), pal.onPrimaryContainer, anchor="start")
     cy += dp(34 + 14)
-    # 行3：sparkline + UP（停止态无数据：半高空线 + UP —）
-    s.text(card_x + p, cy + dp(8), "近 60 分钟请求", dp(11), pal.onPrimaryContainer, fo=0.65)
-    spark_w = inner_w - dp(100)
-    sparkline(s, pal, card_x + p, cy + dp(17), spark_w, dp(36),
-              [] if not running else [0, 1, 0, 2, 3, 1, 0, 1, 4, 2, 6, 3, 2, 5], pal.primary)
-    s.text(card_x + p + inner_w, cy + dp(17) + dp(36), "UP 00:12:34" if running else "UP —", dp(12),
-           pal.onPrimaryContainer, fo=0.65, anchor="end", mono=True)
-    cy += dp(17 + 36 + 14)
+    # 行3：套餐用量块（替换旧 sparkline）——镜像 MainActivity.kt QuotaBlock
+    rows = [
+        ("5 小时", "剩 96%", 0.96, 0, "3h 55m 后重置", False),
+        ("每周", "剩 40%", 0.40, 0, "4d 00h 后重置", False),
+        ("月度", "剩 3,891 次", 0.98, 0, "14d 08h 后重置", False),
+    ]
+    quota_block(s, pal, card_x + p, cy, inner_w, "Max", rows,
+                "UP 00:12:34" if running else "UP —")
+    cy += dp(17 + 12 + (30 + 12) * n_rows + 14)
     # 主按钮
     s.rect(card_x + p, cy, inner_w, dp(52), dp(50), pal.primary)
     if running:
@@ -431,7 +477,7 @@ def settings_body(s, pal):
     # 关于
     x, w, cy, y2 = card_block(s, pal, y, "关于", dp(12 + 93 + 6 + 48 + 25 + 17 + 17 + 10))
     setting_row(s, pal, x, cy + dp(12), w, "应用", "ZCode Proxy")
-    setting_row(s, pal, x, cy + dp(12 + 31), w, "版本", "4.6.3")
+    setting_row(s, pal, x, cy + dp(12 + 31), w, "版本", "4.7.2")
     setting_row(s, pal, x, cy + dp(12 + 62), w, "控制协议", "Node · 127.0.0.1 本地监听")
     ry = cy + dp(12 + 93 + 6)
     s.text(x, ry + dp(10), "自动检查更新", dp(14), pal.onSurfaceVariant)
@@ -441,7 +487,7 @@ def settings_body(s, pal):
     s.circle(swx + dp(52 - 16), swy + dp(16), dp(12), pal.onPrimary)
     ry2 = ry + dp(48)
     s.text(x, ry2, "更新", dp(14), pal.onSurfaceVariant)
-    s.text(x + dp(40), ry2, "已是最新（v4.6.3）", dp(13), pal.success)
+    s.text(x + dp(40), ry2, "已是最新（v4.7.2）", dp(13), pal.success)
     s.text(x + w, ry2, "检查更新", dp(13), pal.primary, anchor="end")
     s.text(x, ry2 + dp(25), "更新来自 GitHub Releases · TriDefender/zcode-api", dp(12), pal.dim)
     s.text(x, ry2 + dp(25 + 17), "上游：Z.AI / 智谱开放平台（OAuth 登录）", dp(12), pal.dim)

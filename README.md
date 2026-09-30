@@ -38,7 +38,7 @@
 
 <img src="docs/images/tui-annotated.png" alt="ZCode Proxy 终端控制面板" width="980" />
 
-面板分三块：**登录与设置**（服务商 / 套餐 / 登录）、**代理服务**（启动停止 / 当前配置）、**日志**（每个请求一行，实时滚动）。按 <kbd>s</kbd> 启动代理，看到 `Status: running` 就绪了。
+面板四块卡：**登录与设置**（服务商 / 套餐 / 登录）、**套餐用量**（余量占比条 + 重置倒计时，按 <kbd>r</kbd> 或点 Refresh 刷新）、**代理服务**（启动停止 / 当前配置）、**日志**（每个请求一行，实时滚动）。按 <kbd>s</kbd> 启动代理，看到 `Status: running` 就绪了。
 
 > 用不惯键盘快捷键？面板上的按钮支持**鼠标点击**。想让它在后台静默运行？`zcode-proxy.exe --cli serve`。
 
@@ -51,6 +51,7 @@
 | <kbd>L</kbd> | bigmodel 粘贴登录（回退模式；`l` 登录本身就免回调，无头可用） |
 | <kbd>o</kbd> | 退出登录 |
 | <kbd>p</kbd> / <kbd>t</kbd> | 切换服务商（Z.AI ↔ 智谱）/ 套餐（coding-plan ↔ start-plan） |
+| <kbd>r</kbd> | 刷新套餐用量 |
 | <kbd>↑</kbd><kbd>↓</kbd> / <kbd>PgUp</kbd> / <kbd>g</kbd> | 滚动日志 / 回到底部 |
 | <kbd>c</kbd> | 清屏日志 |
 | <kbd>q</kbd> | 退出面板 |
