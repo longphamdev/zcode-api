@@ -7,6 +7,20 @@ function baseReq(overrides: Partial<ResponsesRequest> = {}): ResponsesRequest {
 }
 
 describe("responsesToChatCompletions", () => {
+  it("preserves easy input messages alongside explicit messages and skips unknown items", () => {
+    const r = responsesToChatCompletions(baseReq({ input: [
+      { role: "developer", content: "instruction" },
+      { type: "message", role: "assistant", content: "previous answer" },
+      { role: "user", content: [{ type: "input_text", text: "next question" }] },
+      { type: "unknown", role: "user", content: "skip" },
+    ] }));
+    expect(r.chatRequest.messages).toEqual([
+      { role: "system", content: "instruction" },
+      { role: "assistant", content: "previous answer" },
+      { role: "user", content: "next question" },
+    ]);
+  });
+
   it("translates instructions → system message", () => {
     const r = responsesToChatCompletions(baseReq({ instructions: "be brief" }));
     expect(r.chatRequest.messages[0]).toEqual({ role: "system", content: "be brief" });

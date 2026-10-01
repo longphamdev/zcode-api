@@ -173,7 +173,8 @@ function buildMessagesFromItems(items: ResponsesInputItem[]): OpenAIMessage[] {
   let pendingReasoning = "";
 
   for (const item of items) {
-    const type = (item as { type?: string }).type ?? "";
+    const role = (item as { role?: string }).role;
+    const type = item.type ?? (["user", "assistant", "developer", "system"].includes(role ?? "") ? "message" : "");
 
     switch (type) {
       case "message": {
@@ -192,12 +193,12 @@ function buildMessagesFromItems(items: ResponsesInputItem[]): OpenAIMessage[] {
         continue;
       }
       case "function_call": {
-        const fc = item as { call_id: string; name: string; arguments?: string };
+        const fc = item as { call_id: string; name: string; namespace?: string; arguments?: string };
         const args = (fc.arguments ?? "").trim().length === 0 ? "{}" : fc.arguments!;
         const toolCall = {
           id: fc.call_id,
           type: "function" as const,
-          function: { name: fc.name, arguments: args },
+          function: { name: fc.namespace ? `${fc.namespace}__${fc.name}` : fc.name, arguments: args },
         };
         mergeToolCallIntoAssistant(out, toolCall, pendingReasoning);
         pendingReasoning = "";
@@ -207,12 +208,12 @@ function buildMessagesFromItems(items: ResponsesInputItem[]): OpenAIMessage[] {
         // Custom tool calls arrive as {call_id, name, input}; rewrite to a
         // function_call-shaped assistant message so the upstream sees the same
         // tool-call invariant. Input is wrapped in {input: "..."}.
-        const ct = item as { call_id: string; name: string; input?: string };
+        const ct = item as { call_id: string; name: string; namespace?: string; input?: string };
         const argObj = JSON.stringify({ input: ct.input ?? "" });
         const toolCall = {
           id: ct.call_id,
           type: "function" as const,
-          function: { name: ct.name, arguments: argObj },
+          function: { name: ct.namespace ? `${ct.namespace}__${ct.name}` : ct.name, arguments: argObj },
         };
         mergeToolCallIntoAssistant(out, toolCall, pendingReasoning);
         pendingReasoning = "";

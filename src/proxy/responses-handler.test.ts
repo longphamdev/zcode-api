@@ -67,6 +67,70 @@ function makeReq(body: unknown): Request {
 }
 
 describe("handleResponses", () => {
+  it("sends easy input messages to the Anthropic upstream", async () => {
+    let sent = "";
+    const response = await handleResponses(makeReq({ model: "glm-5.2", input: [{ role: "user", content: "easy question" }] }), {
+      config: CONFIG, auth, endpointRouting: null, clientSigning: null,
+      fetchImpl: (async (request: Request) => {
+        sent = await request.text();
+        return new Response(anthropicMsg("answer"));
+      }) as typeof fetch,
+    });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(sent).messages[0].content).toContainEqual(expect.objectContaining({ type: "text", text: "easy question" }));
+  });
+
+  it.each([false, true])("surfaces Anthropic errors without completing or storing the response (partial=%s)", async (partial) => {
+    const store = new ResponseStore({ maxEntries: 10, ttlMs: 60000 });
+    const prefix = partial ? anthropicSse("partial").split("event: message_delta")[0] : "";
+    const upstream = prefix + 'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}\n\n';
+    const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hello", stream: true }), {
+      config: CONFIG, auth, responseStore: store, endpointRouting: null, clientSigning: null,
+      fetchImpl: chatUpstream(upstream),
+    });
+    const wire = await response.text();
+    const events = wire.split("\n").filter(l => l.startsWith("data: ")).map(l => JSON.parse(l.slice(6)));
+    const failed = events.find(e => e.type === "response.failed");
+    expect(failed?.response.status).toBe("failed");
+    expect(failed?.response.error).toEqual({ code: "overloaded_error", message: "upstream overloaded" });
+    expect(events.some(e => e.type === "response.completed" || e.type === "response.output_item.done")).toBe(false);
+    expect(store.get(failed.response.id)).toBeUndefined();
+  });
+
+  it.each([false, true])("replays namespaced tool calls with matching Anthropic tool definitions (stream=%s)", async (stream) => {
+    const store = new ResponseStore({ maxEntries: 10, ttlMs: 60000 });
+    const tools = [{ type: "namespace", name: "fs", tools: [{ type: "function", name: "read", parameters: { type: "object" } }] }];
+    const toolEvents = [
+      { type: "message_start", message: { id: "m1", model: "glm-5.2", usage: { input_tokens: 1, output_tokens: 0 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "call_ns", name: "fs__read", input: {} } },
+      { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ];
+    const batch = { ...JSON.parse(anthropicMsg("")), content: [{ type: "tool_use", id: "call_ns", name: "fs__read", input: {} }], stop_reason: "tool_use" };
+    const first = await handleResponses(makeReq({ model: "glm-5.2", input: "read file", tools, stream }), {
+      config: CONFIG, auth, responseStore: store, endpointRouting: null, clientSigning: null,
+      fetchImpl: chatUpstream(stream ? toolEvents.map(e => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("") : JSON.stringify(batch)),
+    });
+    const wire = await first.text();
+    const result = stream ? wire.split("\n").filter(l => l.startsWith("data: ")).map(l => JSON.parse(l.slice(6))).find(e => e.type === "response.completed").response : JSON.parse(wire);
+    expect(result.output[0]).toMatchObject({ name: "read", namespace: "fs" });
+    for (const useStore of [false, true]) {
+      let sent = "";
+      const reply = { type: "function_call_output", call_id: "call_ns", output: "file content" };
+      const next = await handleResponses(makeReq({ model: "glm-5.2", tools,
+        ...(useStore ? { previous_response_id: result.id, input: [reply] } : { input: [...result.output, reply] }),
+      }), { config: CONFIG, auth, responseStore: store, endpointRouting: null, clientSigning: null,
+        fetchImpl: (async (request: Request) => { sent = await request.text(); return new Response(anthropicMsg("done")); }) as typeof fetch,
+      });
+      expect(next.status).toBe(200);
+      const body = JSON.parse(sent);
+      expect(body.tools[0].name).toBe("fs__read");
+      const assistant = body.messages.find((m: { role: string }) => m.role === "assistant");
+      expect(assistant.content[0]).toMatchObject({ type: "tool_use", id: "call_ns", name: "fs__read" });
+    }
+  });
+
   it("returns a ResponsesResponse with message output for a basic text request", async () => {
     const fetchImpl = chatUpstream(anthropicMsg("hi back"));
     const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), { config: CONFIG, auth, fetchImpl });

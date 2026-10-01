@@ -391,7 +391,7 @@ function handleChoice(choice: OpenAIStreamChoice, state: ResponsesStreamState): 
         output_index: outputIndex,
         item: toolCallAddedItem(entry, state.meta),
       }));
-      if (initialArgs.length > 0) {
+      if (initialArgs.length > 0 && !state.meta?.customToolNames.has(entry.name)) {
         events.push(seq(state, toolArgsDeltaEvent(entry, initialArgs, state)));
       }
     } else {
@@ -401,7 +401,9 @@ function handleChoice(choice: OpenAIStreamChoice, state: ResponsesStreamState): 
       const argDelta = tc.function?.arguments ?? "";
       if (argDelta.length > 0) {
         entry.args += argDelta;
-        events.push(seq(state, toolArgsDeltaEvent(entry, argDelta, state)));
+        if (!state.meta?.customToolNames.has(entry.name)) {
+          events.push(seq(state, toolArgsDeltaEvent(entry, argDelta, state)));
+        }
       }
     }
   }
@@ -509,6 +511,29 @@ export function finalizeResponsesStream(state: ResponsesStreamState): ResponsesS
       output: buildFinalOutput(state),
       ...(incomplete ? { incomplete_details: incomplete } : {}),
       ...(state.usage ? { usage: state.usage } : {}),
+    },
+  }));
+  return events;
+}
+
+/** Fail without completing pending tool calls or caching a successful response. */
+export function failResponsesStream(
+  state: ResponsesStreamState,
+  error: { code: string; message: string },
+): ResponsesStreamEvent[] {
+  if (state.completedSent) return [];
+  const events = ensureCreated(state);
+  state.completedSent = true;
+  events.push(seq(state, {
+    type: "response.failed",
+    response: {
+      id: state.responseId,
+      object: "response",
+      created_at: state.createdAt,
+      model: state.model,
+      status: "failed",
+      output: [],
+      error,
     },
   }));
   return events;
@@ -688,6 +713,10 @@ function closeToolItems(state: ResponsesStreamState): ResponsesStreamEvent[] {
     // args.done event (function vs custom differ in event name + payload key).
     if (isCustom) {
       const inputStr = extractCustomToolInput(finalArgs);
+      // Buffer the JSON wrapper until complete: emitting raw argument fragments
+      // would expose {input:...} and JSON escapes as the custom tool's input.
+      // A single decoded delta also preserves the malformed-JSON fallback.
+      if (inputStr.length > 0) events.push(seq(state, toolArgsDeltaEvent(entry, inputStr, state)));
       events.push(seq(state, {
         type: "response.custom_tool_call_input.done",
         output_index: entry.outputIndex,
@@ -767,7 +796,7 @@ function closeToolItems(state: ResponsesStreamState): ResponsesStreamEvent[] {
   return events;
 }
 
-/** Reconstruct the final `output[]` array for `response.completed`. Order: reasoning → message → tool_calls. */
+/** Reconstruct output in the same index order as output_item.added events. */
 function buildFinalOutput(state: ResponsesStreamState): ResponsesOutputItem[] {
   const out: ResponsesOutputItem[] = [];
   if (state.reasoningDone && state.reasoningText.length > 0) {
@@ -839,7 +868,11 @@ function buildFinalOutput(state: ResponsesStreamState): ResponsesOutputItem[] {
       });
     }
   }
-  return out;
+  const indices = new Map<string, number>();
+  if (state.reasoningItemId) indices.set(state.reasoningItemId, state.reasoningIndex);
+  if (state.messageItemId) indices.set(state.messageItemId, state.messageIndex);
+  for (const entry of state.toolCalls.values()) indices.set(entry.itemId, entry.outputIndex);
+  return out.sort((a, b) => (indices.get(a.id ?? "") ?? 0) - (indices.get(b.id ?? "") ?? 0));
 }
 
 // ─────────────────────────────────────────────

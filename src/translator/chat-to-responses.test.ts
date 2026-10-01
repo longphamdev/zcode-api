@@ -273,5 +273,38 @@ describe("streaming", () => {
     expect(types).toContain("response.custom_tool_call_input.delta");
     expect(types).toContain("response.custom_tool_call_input.done");
     expect(types).not.toContain("response.function_call_arguments.delta");
+    expect(events.filter(e => e.type === "response.custom_tool_call_input.delta").map(e => e.delta).join("")).toBe("ls");
+  });
+
+  it.each(['echo "hi"\n你好 😀', 'raw non-JSON input', '{"other":"value"}'])("keeps custom deltas equal to final input: %s", (input) => {
+    const state = newResponsesStreamState("glm-5.2", {
+      meta: { customToolNames: new Set(["exec"]), namespaceMap: new Map(), hasToolSearch: false },
+    });
+    const raw = input.startsWith("echo") ? JSON.stringify({ input }) : input;
+    const events = [...raw].flatMap((part, index) => chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: {
+      tool_calls: [{ index: 0, ...(index === 0 ? { id: "c1" } : {}), function: { ...(index === 0 ? { name: "exec" } : {}), arguments: part } }],
+    } }] }), state));
+    events.push(...finalizeResponsesStream(state));
+    expect(events.filter(e => e.type === "response.custom_tool_call_input.delta").map(e => e.delta).join("")).toBe(input);
+    expect(events.find(e => e.type === "response.custom_tool_call_input.done")?.input).toBe(input);
+  });
+
+  it("preserves allocated output indices when tools precede text and arrive out of index order", () => {
+    const state = newResponsesStreamState("glm-5.2");
+    const events = [
+      ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { tool_calls: [
+        { index: 2, id: "c2", function: { name: "second", arguments: "{}" } },
+        { index: 0, id: "c0", function: { name: "first", arguments: "{}" } },
+      ] } }] }), state),
+      ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { content: "after tools" }, finish_reason: "tool_calls" }] }), state),
+      ...finalizeResponsesStream(state),
+    ];
+    const terminal = events.find(e => e.type === "response.completed");
+    if (terminal?.type !== "response.completed") throw new Error("missing completed event");
+    for (const e of events) {
+      if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
+        expect(terminal.response.output[e.output_index].id).toBe(e.item.id);
+      }
+    }
   });
 });

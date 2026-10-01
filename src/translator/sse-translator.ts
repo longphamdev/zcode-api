@@ -167,6 +167,7 @@ export function anthropicSseToOpenaiSse(
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       } catch (err) {
         errored = true;
+        void reader.cancel(err).catch(() => {});
         // error()/close() 互斥:errored 流上再 close() 会抛 TypeError,进而触发 Bun 引擎空指针崩溃。
         try { controller.error(err); } catch {}
       } finally {
@@ -179,8 +180,21 @@ export function anthropicSseToOpenaiSse(
   });
 }
 
+/** An in-band Anthropic failure must not become a successful empty Chat stream. */
+export class AnthropicStreamError extends Error {
+  constructor(public readonly code: string, message: string) {
+    super(message);
+    this.name = "AnthropicStreamError";
+  }
+}
+
 export function translateEvent(state: TranslationState, sse: ParsedSSE): string | null {
   const data = sse.data as AnthropicStreamEvent;
+
+  if ((sse.data as { type?: string }).type === "error") {
+    const error = (data as { error?: { type?: string; message?: string } }).error;
+    throw new AnthropicStreamError(error?.type ?? "upstream_error", error?.message ?? "Anthropic upstream stream failed");
+  }
 
   switch (data.type) {
     case "message_start": {

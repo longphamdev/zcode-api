@@ -47,7 +47,7 @@ export type ResponsesTool =
 
 /** Input items — Responses conversations are a flat list of typed items. */
 export type ResponsesInputItem =
-  | { type: "message"; role: "user" | "assistant" | "developer" | "system"; content: ResponsesContentPart[] | string; [k: string]: unknown }
+  | { type?: "message"; role: "user" | "assistant" | "developer" | "system"; content: ResponsesContentPart[] | string; [k: string]: unknown }
   | { type: "reasoning"; id?: string; content?: ResponsesContentPart[]; summary?: ResponsesContentPart[]; encrypted_content?: string; [k: string]: unknown }
   | { type: "function_call"; call_id: string; name: string; arguments: string; id?: string; [k: string]: unknown }
   | { type: "function_call_output"; call_id: string; output: string; id?: string; [k: string]: unknown }
