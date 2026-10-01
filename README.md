@@ -181,8 +181,35 @@ services:
 | `ZCODE_PROXY_CONFIG` | `config.yaml` | 配置文件路径 |
 | `ZCODE_PROXY_CREDENTIAL_SECRET` | 机器相关 | 登录凭据的加密种子（跨机器迁移/Docker 时需要固定它） |
 | `ZCODE_LOG_FORMAT` | 桌面表格 | 设为 `compact` 可得到单行日志（适合窄屏） |
+| `ZCODE_PANEL_ENABLED` | 关 | 设为 `1`/`true` 后，无界面的 `serve` 模式（含 Docker）额外启动一个本机 Web 面板 |
+| `ZCODE_PANEL_TOKEN` | 无 | 面板的访问令牌，**开启面板时必填**（不填则面板不启动，避免裸奔的控制接口） |
+| `ZCODE_PANEL_PORT` | `8090` | 面板端口（只监听 `127.0.0.1`） |
 
 套餐类型（`plan`: `coding-plan` 个人套餐 / `start-plan` 体验套餐）在面板里按 <kbd>t</kbd> 切换，会写回 config.yaml。
+
+服务器这类没有 TUI 的场景，可以让浏览器来看：设 `ZCODE_PANEL_ENABLED=1`、`ZCODE_PANEL_TOKEN=<一段你自己的随机串>` 后启动，再用 SSH 端口转发打开 `http://127.0.0.1:8090` —— 能看状态和额度、切服务商/套餐、登录登出、看实时日志和 MCP 列表。面板只绑回环、每次调 API 都要带 token，没有 token 不启动；命令走进程内分发，不会再额外开一个控制端口。面板上的「Stop proxy」只停代理，进程本身仍能正常退出（SIGTERM/SIGINT 和面板的 shutdown 都会先清掉后台定时器——自动领取、验证码池——再退出）；在面板里登出会同时清掉运行中的凭据并停掉代理，避免登出后新请求还继续花旧账号的额度。
+
+**Docker 里怎么连面板**：面板只监听**容器自己的** `127.0.0.1`，所以默认 bridge 网络下 `-p 8080:8080` 映射不出来，只补一个 `-p 8090:8090` 也连不上（端口映射到的是容器的非回环地址）。Linux 服务器上用 host 网络，让容器直接用宿主机回环：
+
+```yaml
+services:
+  zcode-proxy:
+    # 保留现有 image / volumes / restart 等配置
+    network_mode: host        # host 模式下删掉原来的 ports:
+    environment:
+      ZCODE_PROXY_CREDENTIAL_SECRET: "一串只有你知道的口令"
+      ZCODE_PANEL_ENABLED: "1"
+      ZCODE_PANEL_TOKEN: "${ZCODE_PANEL_TOKEN:?请先在 .env 里设置面板 token}"
+      ZCODE_PANEL_PORT: "8090"
+```
+
+然后在本机建一条只转发的隧道（`-N` 不开 shell）：
+
+```bash
+ssh -N -L 8090:127.0.0.1:8090 user@host
+```
+
+再打开 `http://127.0.0.1:8090`。host 网络下代理主端口也直接占用宿主机端口，安全组/防火墙照旧按原来放行 8080，**不要**对外放行 8090。
 
 </details>
 
@@ -193,7 +220,7 @@ services:
 
 **周末/体验套餐自动领取 (claim)** —— 默认开启。代理每 5 分钟探测一次官方的限量套餐活动页，上新瞬间自动帮你抢（`claim.enabled: false` 可关闭）。手动抢：`bun run src/index.ts claim`。
 
-**额度显示 (quota)** —— 登录后面板会自动查一次额度，之后按 <kbd>r</kbd> 手动刷新。数据来自上游两个额度平面：体验/积分制套餐的积分桶（`billing/balance`，剩余 / 总额、到期时间），以及个人编码套餐的用量窗口（`/api/monitor/usage/quota/limit`，与官方用量面板同源，5 小时 / 周窗口的剩余 / 总量与重置时间）。命令行直接查：`bun run src/index.ts quota`（对应 HTTP 接口 `GET /quota`）。注意上游网关对频繁查询有限速，所以面板不做定时轮询。
+**额度显示 (quota)** —— 登录后面板会自动查一次额度，之后按 <kbd>r</kbd> 手动刷新。数据来自上游两个额度平面：体验/积分制套餐的积分桶（`billing/balance`，剩余 / 总额、到期时间），以及个人编码套餐的用量窗口（`/api/monitor/usage/quota/limit`，与官方用量面板同源，5 小时 / 周窗口的**剩余额度**与重置时间——上游 `number` 不是可与剩余比较的总量，所以与 CLI/TUI 一致只显示剩余，只有上游给出百分比时才画比例条）。命令行直接查：`bun run src/index.ts quota`（对应 HTTP 接口 `GET /quota`）。注意上游网关对频繁查询有限速，所以面板不做定时轮询。
 
 </details>
 

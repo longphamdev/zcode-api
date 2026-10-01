@@ -182,8 +182,35 @@ The config file is `config.yaml` in the project root (auto-generated on first st
 | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file path |
 | `ZCODE_PROXY_CREDENTIAL_SECRET` | machine-specific | Encryption seed for login credentials (fix it when migrating across machines / using Docker) |
 | `ZCODE_LOG_FORMAT` | desktop table | Set to `compact` for single-line logs (good for narrow screens) |
+| `ZCODE_PANEL_ENABLED` | off | Set to `1`/`true` to start a local web panel in headless `serve` mode (including Docker) |
+| `ZCODE_PANEL_TOKEN` | none | Access token for the panel, **required when the panel is enabled** (without it the panel does not start, so the control endpoints are never left open) |
+| `ZCODE_PANEL_PORT` | `8090` | Panel port (bound to `127.0.0.1` only) |
 
 The plan type (`plan`: `coding-plan` personal / `start-plan` trial) can be toggled in the panel with <kbd>t</kbd>, which writes the change back to config.yaml.
+
+Without a TUI (cloud server) you can use a browser instead: set `ZCODE_PANEL_ENABLED=1` and `ZCODE_PANEL_TOKEN=<your own random string>`, start the proxy, then forward the port and open `http://127.0.0.1:8090` — it shows status and quota, switches provider/plan, logs in and out, and tails the live logs plus the MCP list. The panel binds loopback only and requires the token on every API call; without a token it does not start. Commands are dispatched in process, so no extra control port is opened. Stopping the proxy from the page does not keep the process alive: SIGTERM/SIGINT and the panel's own shutdown all clear the background timers (auto-claim, captcha pool) before exiting. Logging out from the page also clears the live credential and stops the proxy, so a logged-out account is not spent any further.
+
+**Reaching the panel from Docker**: the panel listens on the *container's own* `127.0.0.1`, so with the default bridge network `-p 8080:8080` does not expose it, and adding `-p 8090:8090` does not help either (that maps a non-loopback container address). On a Linux server, use host networking so the container shares the host's loopback:
+
+```yaml
+services:
+  zcode-proxy:
+    # keep the existing image / volumes / restart settings
+    network_mode: host        # and drop the original ports: block
+    environment:
+      ZCODE_PROXY_CREDENTIAL_SECRET: "a-passphrase-only-you-know"
+      ZCODE_PANEL_ENABLED: "1"
+      ZCODE_PANEL_TOKEN: "${ZCODE_PANEL_TOKEN:?set a panel token in .env first}"
+      ZCODE_PANEL_PORT: "8090"
+```
+
+Then forward-only tunnel from your machine (`-N` = no shell):
+
+```bash
+ssh -N -L 8090:127.0.0.1:8090 user@host
+```
+
+and open `http://127.0.0.1:8090`. With host networking the proxy port is the host port too, so keep the firewall rules for 8080 as they were and do **not** expose 8090 publicly.
 
 </details>
 
@@ -194,7 +221,7 @@ The plan type (`plan`: `coding-plan` personal / `start-plan` trial) can be toggl
 
 **Weekend/trial plan auto-claiming (claim)** — enabled by default. The proxy probes the official limited-plan campaign page every 5 minutes and grabs new drops for you the instant they appear (`claim.enabled: false` to disable). Manual run: `bun run src/index.ts claim`.
 
-**Quota display (quota)** — after login the panel fetches quota once automatically; refresh manually with <kbd>r</kbd>. Data comes from two upstream planes: trial/credits-plan buckets (`billing/balance`, remaining / total units, expiry) and individual coding-plan usage windows (`/api/monitor/usage/quota/limit`, same endpoint the official usage panel reads — 5-hour / weekly window remaining / total and reset time). CLI: `bun run src/index.ts quota` (HTTP: `GET /quota`). The upstream gateways rate-limit frequent queries, so the panel does not poll on a timer.
+**Quota display (quota)** — after login the panel fetches quota once automatically; refresh manually with <kbd>r</kbd>. Data comes from two upstream planes: trial/credits-plan buckets (`billing/balance`, remaining / total units, expiry) and individual coding-plan usage windows (`/api/monitor/usage/quota/limit`, same endpoint the official usage panel reads — 5-hour / weekly window **remaining** and reset time. Upstream `number` is not a total comparable with remaining, so like the CLI/TUI only remaining is shown, and a bar is drawn only when upstream reports a percentage). CLI: `bun run src/index.ts quota` (HTTP: `GET /quota`). The upstream gateways rate-limit frequent queries, so the panel does not poll on a timer.
 
 </details>
 

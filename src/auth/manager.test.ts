@@ -66,4 +66,19 @@ describe("AuthManager", () => {
     await expect(mgr.getCredential()).rejects.toThrow(/expired/);
     await expect(mgr.getCredential()).rejects.toThrow(/not available/);
   });
+
+  it("drops the credential on clearOAuthCredential", async () => {
+    const mgr = new AuthManager();
+    mgr.setOAuthCredential({ apiKey: "oa", provider: "zai" });
+    mgr.clearOAuthCredential();
+    await expect(mgr.getCredential()).rejects.toThrow(/not available/);
+  });
+
+  it("accepts a fresh credential after clearOAuthCredential", async () => {
+    const mgr = new AuthManager();
+    mgr.setOAuthCredential({ apiKey: "old", provider: "zai" });
+    mgr.clearOAuthCredential();
+    mgr.setOAuthCredential({ apiKey: "new", provider: "zai" });
+    expect((await mgr.getCredential()).apiKey).toBe("new");
+  });
 });
