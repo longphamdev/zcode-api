@@ -391,7 +391,10 @@
       $("login").onclick = () => startLogin("zai");
       $("login-bm").onclick = () => startLogin("bigmodel");
       $("logout").onclick = () => {
-        if (confirm("Log out and delete the stored credential?")) guard("logout", { cmd: "logout" });
+        if (
+          confirm("Log out and delete the stored credential? The proxy stops using it immediately and is stopped if it is running.")
+        )
+          guard("logout", { cmd: "logout" });
       };
       $("logs-clear").onclick = () => { $("logs").textContent = ""; };
 

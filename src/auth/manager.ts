@@ -36,4 +36,16 @@ export class AuthManager {
   setOAuthCredential(cred: Credential): void {
     this.oauthCred = cred;
   }
+
+  /**
+   * Drop the in-memory credential without touching the store.
+   *
+   * Used when the user logs out while the process keeps running (the `serve`
+   * web panel): this manager is consulted before the store, so a credential
+   * that is already gone from disk would otherwise keep being spent by `/v1`
+   * requests and by auto-claim.
+   */
+  clearOAuthCredential(): void {
+    this.oauthCred = null;
+  }
 }

@@ -25,6 +25,7 @@ import { buildServerOptions } from "./server/server-options.js";
 import {
   resolvePanelSettings,
   startPanelServer,
+  type ControlDispatcher,
   type PanelServer,
   type PanelSettings,
 } from "./server/panel.js";
@@ -205,6 +206,11 @@ function installLogTee(): LogBuffer {
  * The proxy lifecycle hooks mirror `runAndroid` on purpose: `serve` starts the
  * proxy eagerly, so `serverRef` is pre-filled and the start/stop commands only
  * matter for restarts (including the `stop_proxy_first` rule before setConfig).
+ *
+ * Two behaviours are panel-only and stay out of the shared control layer: the
+ * `shutdown` command unwinds the whole process (through the same path as the
+ * signals, so it works after the proxy was stopped from the page), and a
+ * logout/login re-syncs the live credential — see `handleControl` below.
  */
 async function startServePanel(
   settings: PanelSettings,
@@ -214,9 +220,33 @@ async function startServePanel(
     auth: AuthManager;
     serverRef: { current: ProxyServer | null };
     logBuffer: LogBuffer;
+    /** Unwind the process; independent of whether the proxy is still running. */
+    shutdown: () => void;
   },
 ): Promise<PanelServer> {
-  const { config, path, auth, serverRef, logBuffer } = ctx;
+  const { config, path, auth, serverRef, logBuffer, shutdown } = ctx;
+
+  // The panel can log out (or log in another account) while `serve` keeps
+  // running, but AuthManager caches the credential in memory and auto-claim
+  // prefers it over the store — so a disk-only change would leave `/v1` and
+  // auto-claim serving the account that was just replaced (issue #58 review,
+  // P2). Fingerprint the store and re-sync after every panel command: the
+  // page polls `getLogs` every 2s, so a background login lands within one poll.
+  let authFingerprint = JSON.stringify((await loadCredential().catch(() => null)) ?? null);
+
+  async function syncAuthWithDisk(): Promise<void> {
+    const onDisk = await loadCredential().catch(() => null);
+    const fingerprint = JSON.stringify(onDisk ?? null);
+    if (fingerprint === authFingerprint) return;
+    authFingerprint = fingerprint;
+    if (onDisk) {
+      auth.setOAuthCredential(onDisk);
+      console.log("auth: switched to the account now on disk");
+    } else {
+      auth.clearOAuthCredential();
+      console.log("auth: credential cleared (logged out)");
+    }
+  }
 
   const controlState: ControlState = {
     provider: config.provider,
@@ -229,6 +259,7 @@ async function startServePanel(
     const cred = await loadCredential().catch(() => null);
     if (!cred) return { ok: false, error: "not_logged_in" };
     auth.setOAuthCredential(cred);
+    authFingerprint = JSON.stringify(cred);
     try {
       const s = await startServer(buildServerOptions(config, auth, false));
       serverRef.current = s;
@@ -268,16 +299,46 @@ async function startServePanel(
   // token, so a second loopback listener would only add an unauthenticated way
   // to reach stopProxy / logout / shutdown (issue #58 review, P1) and a second
   // thing to clean up when the panel fails to start (P2, now structurally gone).
-  const handleControl = createControlDispatcher(controlState, {
+  const dispatchControl = createControlDispatcher(controlState, {
     logBuffer,
     onStartProxy: startProxy,
     onStopProxy: stopProxy,
     onSetConfig: setConfig,
     onQuota: () => collectQuotaSnapshot(config),
-    onShutdown: async () => {
-      serverRef.current?.stop(true);
-    },
   });
+
+  /** Grace period for the `shutdown` reply before `process.exit()` runs. */
+  const SHUTDOWN_REPLY_GRACE_MS = 50;
+
+  /**
+   * The panel's transport wrapper. Two panel-only responsibilities live here
+   * rather than in the shared control layer, so the Android protocol keeps its
+   * existing semantics:
+   *
+   * - `shutdown` answers first and unwinds afterwards. Exiting inside the
+   *   command would truncate the reply the page is waiting for, and it unwinds
+   *   through the same path as SIGTERM/SIGINT, so it works whether or not the
+   *   proxy is still running (issue #58 review, P2).
+   * - Every other successful command re-syncs the live credential with the
+   *   store, and a logout while the proxy runs stops it. Otherwise `/v1` and
+   *   auto-claim keep spending the account that was just logged out (issue #58
+   *   review, P2).
+   */
+  const handleControl: ControlDispatcher = async (cmd) => {
+    if (cmd.cmd === "shutdown") {
+      setTimeout(shutdown, SHUTDOWN_REPLY_GRACE_MS);
+      return { ok: true, event: "shuttingDown" };
+    }
+    const res = await dispatchControl(cmd);
+    if (!res.ok) return res;
+    await syncAuthWithDisk();
+    if (cmd.cmd === "logout" && serverRef.current) {
+      await stopProxy();
+      controlState.proxyPort = 0;
+      console.log("panel: logout cleared the live credential — proxy stopped");
+    }
+    return res;
+  };
 
   const panel = await startPanelServer({
     port: settings.port,
@@ -319,17 +380,25 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   const serverRef: { current: ProxyServer | null } = { current: server };
   const url = `http://${server.hostname}:${server.port}`;
   console.log(`zcode-proxy listening on ${url}`);
+  // Handles for the background timers started below, so `shutdown` can clear
+  // them without the proxy handle being involved (issue #58 review, P2).
+  let claimScheduler: { stop: () => void } | null = null;
+  let captchaModule: { shutdownCaptcha: () => void } | null = null;
+
   if (config.plan === "start-plan") {
     // Pre-solve the captcha token pool in the background so first requests
     // don't pay the full solve latency (in-process happy-dom backend).
     import("./proxy/captcha.js")
-      .then((m) => m.startCaptchaPool(config.identity.appVersion))
+      .then(async (m) => {
+        captchaModule = m;
+        await m.startCaptchaPool(config.identity.appVersion);
+      })
       .catch((err) => console.error(`[captcha] pool warmup failed: ${(err as Error).message}`));
   }
   if (config.claim.enabled && config.claim.auto) {
     import("./claim/runtime.js")
       .then((m) => {
-        m.startAutoClaim(config, auth);
+        claimScheduler = m.startAutoClaim(config, auth);
         console.log(`  claim: auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1000)}s)`);
       })
       .catch((err) => console.error(`[claim] scheduler failed to start: ${(err as Error).message}`));
@@ -344,6 +413,52 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   if (debug) console.log(`  debug: ON`);
 
   let panelRuntime: PanelServer | null = null;
+
+  const closePanel = (): void => {
+    if (!panelRuntime) return;
+    void panelRuntime.close().catch(() => {});
+  };
+
+  // Single shutdown path, shared by the signals and the panel's `shutdown`
+  // command. It must not depend on `serverRef`: the page can stop the proxy,
+  // and the timers below keep the event loop alive, so "the proxy is already
+  // stopped" is not the same as "there is nothing left to do" — without this,
+  // SIGTERM/SIGINT and `docker stop` hung until the kill timeout after a
+  // panel-side Stop proxy (issue #58 review, P2).
+  let shuttingDown = false;
+  const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    closePanel();
+    const cleared: string[] = [];
+    if (claimScheduler) {
+      try {
+        claimScheduler.stop();
+        cleared.push("auto-claim");
+      } catch {
+        /* already stopped */
+      }
+      claimScheduler = null;
+    }
+    if (captchaModule) {
+      try {
+        captchaModule.shutdownCaptcha();
+        cleared.push("captcha pool");
+      } catch {
+        /* pool never started */
+      }
+      captchaModule = null;
+    }
+    if (cleared.length > 0) console.log(`shutdown: cleared ${cleared.join(" + ")} timers`);
+    if (serverRef.current) {
+      // Closes the listener and exits the process (`stop(true)`).
+      serverRef.current.stop(true);
+      return;
+    }
+    console.log("shutdown: proxy already stopped — exiting");
+    process.exit(0);
+  };
+
   if (panelSettings && panelLogBuffer) {
     try {
       panelRuntime = await startServePanel(panelSettings, {
@@ -352,6 +467,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
         auth,
         serverRef,
         logBuffer: panelLogBuffer,
+        shutdown,
       });
     } catch (err) {
       // The panel is a convenience layer; it must never take the proxy down.
@@ -359,19 +475,12 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
     }
   }
 
-  const closePanel = (): void => {
-    if (!panelRuntime) return;
-    void panelRuntime.close().catch(() => {});
-  };
-
   process.on("SIGINT", () => {
     console.log("\nShutting down...");
-    closePanel();
-    serverRef.current?.stop(true);
+    shutdown();
   });
   process.on("SIGTERM", () => {
-    closePanel();
-    serverRef.current?.stop(true);
+    shutdown();
   });
 }
 
