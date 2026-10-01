@@ -181,8 +181,14 @@ services:
 | `ZCODE_PROXY_CONFIG` | `config.yaml` | 配置文件路径 |
 | `ZCODE_PROXY_CREDENTIAL_SECRET` | 机器相关 | 登录凭据的加密种子（跨机器迁移/Docker 时需要固定它） |
 | `ZCODE_LOG_FORMAT` | 桌面表格 | 设为 `compact` 可得到单行日志（适合窄屏） |
+| `ZCODE_PANEL_ENABLED` | 关 | 设为 `1`/`true` 后，无界面的 `serve` 模式（含 Docker）额外启动一个本机 Web 面板 |
+| `ZCODE_PANEL_TOKEN` | 无 | 面板的访问令牌，**开启面板时必填**（不填则面板不启动，避免裸奔的控制接口） |
+| `ZCODE_PANEL_PORT` | `8090` | 面板端口（只监听 `127.0.0.1`） |
+| `ZCODE_PANEL_CONTROL_PORT` | `8091` | 面板背后的回环控制端口（与 Android 面板同一套协议，不能与上一项相同） |
 
 套餐类型（`plan`: `coding-plan` 个人套餐 / `start-plan` 体验套餐）在面板里按 <kbd>t</kbd> 切换，会写回 config.yaml。
+
+服务器 / Docker 这类没有 TUI 的场景，可以让浏览器来看：设 `ZCODE_PANEL_ENABLED=1`、`ZCODE_PANEL_TOKEN=<一段你自己的随机串>` 后启动，再用 SSH 端口转发（`ssh -L 8090:127.0.0.1:8090 ...`）打开 `http://127.0.0.1:8090` —— 能看状态和额度、切服务商/套餐、登录登出、看实时日志和 MCP 列表。面板只绑回环、每次调 API 都要带 token，没有 token 不启动。
 
 </details>
 

@@ -17,6 +17,12 @@ import { updateConfigYaml, ensureConfigFile } from "./config/edit.js";
 import { openBrowser } from "./runtime/open-browser.js";
 import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "./runtime/paste-login.js";
 import { buildServerOptions } from "./server/server-options.js";
+import {
+  resolvePanelSettings,
+  startPanelServer,
+  type PanelServer,
+  type PanelSettings,
+} from "./server/panel.js";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -166,6 +172,119 @@ Examples:
 `);
 }
 
+/** Live panel + its loopback control listener (issue #58). */
+interface PanelRuntime {
+  panel: PanelServer;
+  control: Awaited<ReturnType<typeof startControlListener>>;
+}
+
+/**
+ * Mirror console output into a ring buffer so the panel's Logs card has data.
+ * Same tee the Android entry installs — the buffer is also what `getLogs` reads.
+ */
+function installLogTee(): LogBuffer {
+  const buffer = new LogBuffer();
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  console.log = (...args: unknown[]) => { buffer.push(args.join(" ")); origLog(...args); };
+  console.error = (...args: unknown[]) => { buffer.push("[error] " + args.join(" ")); origErr(...args); };
+  console.warn = (...args: unknown[]) => { buffer.push("[warn] " + args.join(" ")); origWarn(...args); };
+  return buffer;
+}
+
+/**
+ * Start the optional web panel for `serve`: a loopback control listener (the
+ * same protocol the Android shell drives) plus the token-guarded panel page.
+ * `serve` has no TUI, so this is the only way to see quota, read live logs or
+ * switch provider/plan on a headless box without `docker exec`.
+ *
+ * The proxy lifecycle hooks mirror `runAndroid` on purpose: `serve` starts the
+ * proxy eagerly, so `serverRef` is pre-filled and the start/stop commands only
+ * matter for restarts (including the `stop_proxy_first` rule before setConfig).
+ */
+async function startServePanel(
+  settings: PanelSettings,
+  ctx: {
+    config: ProxyConfig;
+    path: string;
+    auth: AuthManager;
+    serverRef: { current: ProxyServer | null };
+    logBuffer: LogBuffer;
+  },
+): Promise<PanelRuntime> {
+  const { config, path, auth, serverRef, logBuffer } = ctx;
+
+  const controlState: ControlState = {
+    provider: config.provider,
+    plan: config.plan,
+    proxyPort: serverRef.current?.port ?? 0,
+  };
+
+  async function startProxy(): Promise<{ ok: true; port: number } | { ok: false; error: string }> {
+    if (serverRef.current) return { ok: false, error: "already_running" };
+    const cred = await loadCredential().catch(() => null);
+    if (!cred) return { ok: false, error: "not_logged_in" };
+    auth.setOAuthCredential(cred);
+    try {
+      const s = await startServer(buildServerOptions(config, auth, false));
+      serverRef.current = s;
+      console.log(`zcode-proxy listening on http://${s.hostname}:${s.port}`);
+      return { ok: true, port: s.port };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  async function stopProxy(): Promise<{ ok: true } | { ok: false; error: string }> {
+    const s = serverRef.current;
+    if (!s) return { ok: false, error: "not_running" };
+    try {
+      s.stop(false);
+      serverRef.current = null;
+      console.log("zcode-proxy stopped");
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  async function setConfig(changes: {
+    provider?: ProviderId;
+    plan?: "coding-plan" | "start-plan";
+  }): Promise<{ ok: true; provider: ProviderId; plan: "coding-plan" | "start-plan" } | { ok: false; error: string }> {
+    if (serverRef.current) return { ok: false, error: "stop_proxy_first" };
+    if (changes.provider) config.provider = changes.provider;
+    if (changes.plan) config.plan = changes.plan;
+    updateConfigYaml(path, { provider: config.provider, plan: config.plan });
+    console.log(`config updated: provider=${config.provider} plan=${config.plan}`);
+    return { ok: true, provider: config.provider, plan: config.plan };
+  }
+
+  const control = await startControlListener({
+    port: settings.controlPort,
+    state: controlState,
+    logBuffer,
+    onStartProxy: startProxy,
+    onStopProxy: stopProxy,
+    onSetConfig: setConfig,
+    onQuota: () => collectQuotaSnapshot(config),
+    onShutdown: async () => {
+      serverRef.current?.stop(true);
+    },
+  });
+  console.log(`control listener: 127.0.0.1:${settings.controlPort} (same protocol as Android)`);
+
+  const panel = await startPanelServer({
+    port: settings.port,
+    token: settings.token,
+    controlPort: settings.controlPort,
+  });
+  console.log(`panel: http://${panel.hostname}:${panel.port} (token required)`);
+
+  return { panel, control };
+}
+
 async function serve(configPath: string | undefined, debug: boolean): Promise<void> {
   const path = configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
   if (ensureConfigFile(path)) {
@@ -174,6 +293,11 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
     console.log(`Run: zcode-proxy auth login <zai|bigmodel>\n`);
   }
   const config = loadConfig(path);
+
+  // Optional web panel (issue #58). Resolved early so console output from the
+  // startup path below is already captured for the panel's Logs card.
+  const panelSettings = resolvePanelSettings();
+  const panelLogBuffer = panelSettings ? installLogTee() : null;
 
   const auth = new AuthManager();
   const cred = await loadCredential();
@@ -186,6 +310,9 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   if (debug) printDebugBanner(config, path, cred);
 
   const server = await startServer(buildServerOptions(config, auth, debug));
+  // The optional panel can stop and restart the proxy, so the signal handlers
+  // and the lifecycle hooks go through this ref rather than the initial handle.
+  const serverRef: { current: ProxyServer | null } = { current: server };
   const url = `http://${server.hostname}:${server.port}`;
   console.log(`zcode-proxy listening on ${url}`);
   if (config.plan === "start-plan") {
@@ -212,12 +339,36 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   }
   if (debug) console.log(`  debug: ON`);
 
+  let panelRuntime: PanelRuntime | null = null;
+  if (panelSettings && panelLogBuffer) {
+    try {
+      panelRuntime = await startServePanel(panelSettings, {
+        config,
+        path,
+        auth,
+        serverRef,
+        logBuffer: panelLogBuffer,
+      });
+    } catch (err) {
+      // The panel is a convenience layer; it must never take the proxy down.
+      console.error(`[panel] failed to start: ${(err as Error).message}`);
+    }
+  }
+
+  const closePanel = (): void => {
+    if (!panelRuntime) return;
+    void panelRuntime.control.close().catch(() => {});
+    void panelRuntime.panel.close().catch(() => {});
+  };
+
   process.on("SIGINT", () => {
     console.log("\nShutting down...");
-    server.stop(true);
+    closePanel();
+    serverRef.current?.stop(true);
   });
   process.on("SIGTERM", () => {
-    server.stop(true);
+    closePanel();
+    serverRef.current?.stop(true);
   });
 }
 

@@ -182,8 +182,14 @@ The config file is `config.yaml` in the project root (auto-generated on first st
 | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file path |
 | `ZCODE_PROXY_CREDENTIAL_SECRET` | machine-specific | Encryption seed for login credentials (fix it when migrating across machines / using Docker) |
 | `ZCODE_LOG_FORMAT` | desktop table | Set to `compact` for single-line logs (good for narrow screens) |
+| `ZCODE_PANEL_ENABLED` | off | Set to `1`/`true` to start a local web panel in headless `serve` mode (including Docker) |
+| `ZCODE_PANEL_TOKEN` | none | Access token for the panel, **required when the panel is enabled** (without it the panel does not start, so the control endpoints are never left open) |
+| `ZCODE_PANEL_PORT` | `8090` | Panel port (bound to `127.0.0.1` only) |
+| `ZCODE_PANEL_CONTROL_PORT` | `8091` | Loopback control port behind the panel (same protocol as the Android panel; must differ from the port above) |
 
 The plan type (`plan`: `coding-plan` personal / `start-plan` trial) can be toggled in the panel with <kbd>t</kbd>, which writes the change back to config.yaml.
+
+Without a TUI (cloud server / Docker) you can use a browser instead: set `ZCODE_PANEL_ENABLED=1` and `ZCODE_PANEL_TOKEN=<your own random string>`, start the proxy, then forward the port (`ssh -L 8090:127.0.0.1:8090 ...`) and open `http://127.0.0.1:8090` — it shows status and quota, switches provider/plan, logs in and out, and tails the live logs plus the MCP list. The panel binds loopback only and requires the token on every API call; without a token it does not start.
 
 </details>
 
