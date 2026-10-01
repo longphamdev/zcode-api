@@ -9,7 +9,14 @@
  * token-guarded HTTP surface plus one embedded page. It adds no new state and
  * no new upstream calls:
  *
- *   browser → panel (token) → POST /api/control → 127.0.0.1:<controlPort>/control
+ *   browser → panel (token) → POST /api/control → in-process dispatcher
+ *
+ * The dispatcher is `createControlDispatcher()` from `src/android/control.ts`:
+ * the same command semantics `POST /control` serves, called directly instead of
+ * over a second loopback HTTP port. Opening such a port would mean an
+ * unauthenticated path to `stopProxy` / `logout` / `shutdown` for anything that
+ * can reach loopback (a browser on the box can POST `text/plain` cross-origin
+ * without reading the response), so the panel does not do it.
  *
  * Security model (deliberate, see the discussion on #58):
  *  - off by default: `ZCODE_PANEL_ENABLED` must be set to a truthy value;
@@ -17,15 +24,15 @@
  *  - binds loopback only, and never touches `auth.proxyApiKey` or `/v1/*`,
  *    so enabling the panel does not change the proxy's own auth surface;
  *  - `/api/*` requires `Authorization: Bearer <token>` or `X-Panel-Token`,
- *    compared with `timingSafeEqual`;
- *  - the control listener keeps its own loopback check and its own port, so a
- *    reachable panel is not a privilege escalation of the `/webui` exemption;
+ *    compared with `timingSafeEqual`, and a body above `MAX_BODY_BYTES` is
+ *    rejected before it is parsed;
  *  - `GET /` and `GET /healthz` are tokenless because a browser cannot attach
  *    a header to a top-level navigation: `/` returns the static shell (no
  *    account data) and `/healthz` returns a fixed `{"ok":true}`.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import type { ControlCommand, ControlResponse } from "../android/control.js";
 import panelHtml from "./panel-page.txt" with { type: "text" };
 
 /** Env flag that enables the panel. Empty / `0` / `false` / `no` / `off` = off. */
@@ -34,25 +41,26 @@ export const PANEL_ENABLED_ENV = "ZCODE_PANEL_ENABLED";
 export const PANEL_TOKEN_ENV = "ZCODE_PANEL_TOKEN";
 /** Panel listen port (loopback). */
 export const PANEL_PORT_ENV = "ZCODE_PANEL_PORT";
-/** Loopback port of the control listener the panel forwards to. */
-export const PANEL_CONTROL_PORT_ENV = "ZCODE_PANEL_CONTROL_PORT";
 
 /** Defaults mirror the Android entry's wiring so operators only set one thing. */
 export const DEFAULT_PANEL_PORT = 8090;
-export const DEFAULT_PANEL_CONTROL_PORT = 8091;
 
 /** Control commands are small JSON documents; anything bigger is a mistake. */
 const MAX_BODY_BYTES = 64 * 1024;
-/** A `quota` command can hit two upstream planes, so allow a slow answer. */
-const CONTROL_TIMEOUT_MS = 30_000;
+
+/**
+ * In-process control dispatch: `POST /api/control` hands the parsed command to
+ * this and returns whatever the control protocol answers, unchanged.
+ */
+export type ControlDispatcher = (cmd: ControlCommand) => Promise<ControlResponse>;
 
 export interface PanelOptions {
   /** HTTP port. `0` picks a free port (used by tests). */
   port: number;
   /** Shared secret required on `/api/*`; must be non-empty. */
   token: string;
-  /** Loopback port of the control listener to forward commands to. */
-  controlPort: number;
+  /** In-process dispatcher backing `POST /api/control`. */
+  handleControl: ControlDispatcher;
   /** Bind address. Loopback by default and intentionally not configurable. */
   hostname?: string;
 }
@@ -68,7 +76,6 @@ export interface PanelServer {
 export interface PanelSettings {
   token: string;
   port: number;
-  controlPort: number;
 }
 
 /** Request handler produced by {@link createPanelHandler}. */
@@ -86,8 +93,8 @@ export function isPanelEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 /**
  * Resolve the panel configuration from the environment. Returns `null` when the
  * panel must not start — either it was not requested, or it was requested
- * without a token / with a port collision, both of which are configuration
- * mistakes worth a loud message rather than an unauthenticated listener.
+ * without a token, which is a configuration mistake worth a loud message rather
+ * than an unauthenticated listener.
  */
 export function resolvePanelSettings(env: NodeJS.ProcessEnv = process.env): PanelSettings | null {
   if (!isPanelEnabled(env)) return null;
@@ -99,16 +106,7 @@ export function resolvePanelSettings(env: NodeJS.ProcessEnv = process.env): Pane
   }
 
   const port = Number(env[PANEL_PORT_ENV] ?? DEFAULT_PANEL_PORT) || DEFAULT_PANEL_PORT;
-  const controlPort =
-    Number(env[PANEL_CONTROL_PORT_ENV] ?? DEFAULT_PANEL_CONTROL_PORT) || DEFAULT_PANEL_CONTROL_PORT;
-  if (port === controlPort) {
-    console.error(
-      `[panel] ${PANEL_PORT_ENV} and ${PANEL_CONTROL_PORT_ENV} must differ (both ${port}) — panel not started`,
-    );
-    return null;
-  }
-
-  return { token, port, controlPort };
+  return { token, port };
 }
 
 /** First value of a possibly-repeated request header. */
@@ -177,30 +175,6 @@ async function readBody(req: IncomingMessage): Promise<string | null> {
 }
 
 /**
- * Forward one command to the control listener. Status and body are passed
- * through unchanged, so the panel speaks exactly the documented protocol
- * (`{ok:true,...}` / `{ok:false,error}`) and never invents a shape.
- */
-async function forwardToControl(
-  controlPort: number,
-  body: string,
-): Promise<{ status: number; body: string }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CONTROL_TIMEOUT_MS);
-  try {
-    const res = await fetch(`http://127.0.0.1:${controlPort}/control`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body,
-      signal: controller.signal,
-    });
-    return { status: res.status, body: await res.text() };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
  * Build the panel request handler. Exported separately from
  * {@link startPanelServer} so tests can drive it without binding a port.
  */
@@ -229,6 +203,8 @@ export function createPanelHandler(opts: PanelOptions): PanelHandler {
       sendJson(res, 405, { ok: false, error: "method_not_allowed" });
       return;
     }
+    // Auth before anything else: an unauthenticated request must not reach the
+    // dispatcher (which can stop the proxy or clear the stored credential).
     if (!tokenMatches(extractToken(req), token)) {
       sendJson(res, 401, { ok: false, error: "unauthorized" });
       return;
@@ -240,22 +216,26 @@ export function createPanelHandler(opts: PanelOptions): PanelHandler {
       return;
     }
 
+    let cmd: ControlCommand;
     try {
-      const upstream = await forwardToControl(opts.controlPort, body);
-      const payload = upstream.body;
-      res.writeHead(upstream.status, {
-        "content-type": "application/json; charset=utf-8",
-        "content-length": Buffer.byteLength(payload),
-        "cache-control": "no-store",
-      });
-      res.end(payload);
+      const parsed: unknown = JSON.parse(body);
+      if (typeof parsed !== "object" || parsed === null || typeof (parsed as { cmd?: unknown }).cmd !== "string") {
+        sendJson(res, 400, { ok: false, error: "invalid_command" });
+        return;
+      }
+      cmd = parsed as ControlCommand;
+    } catch {
+      sendJson(res, 400, { ok: false, error: "invalid_json" });
+      return;
+    }
+
+    try {
+      // Same envelope semantics as the control listener: a failed command is a
+      // 200 with `{ok:false,error}`, so the page can render the reason verbatim.
+      const result = await opts.handleControl(cmd);
+      sendJson(res, 200, result);
     } catch (err) {
-      // The control listener is not up (wrong port, crashed, timed out): say so
-      // instead of returning a bare 500, because that is the common misconfig.
-      sendJson(res, 502, {
-        ok: false,
-        error: `control_unavailable: ${(err as Error).message}`,
-      });
+      sendJson(res, 500, { ok: false, error: `internal_error: ${(err as Error).message}` });
     }
   };
 }
@@ -263,7 +243,8 @@ export function createPanelHandler(opts: PanelOptions): PanelHandler {
 /**
  * Start the panel on the loopback interface. Throws when the token is missing
  * (silently starting an unauthenticated panel is the one outcome this module
- * refuses to allow) or when the port cannot be bound.
+ * refuses to allow) or when the port cannot be bound. There is nothing else to
+ * roll back on failure: the panel owns the only listener it opens.
  */
 export async function startPanelServer(opts: PanelOptions): Promise<PanelServer> {
   const token = (opts.token ?? "").trim();

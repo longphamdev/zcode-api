@@ -181,6 +181,23 @@ export interface ControlHandlerResult {
   body: ControlResponse;
 }
 
+/**
+ * Build an in-process dispatcher for the control protocol: identical command
+ * semantics to `POST /control`, but no listener and no loopback check — the
+ * caller owns its transport and must guard it (token, origin, size limits).
+ *
+ * The Android shell keeps using {@link startControlListener}. Embedders that
+ * already expose their own authenticated HTTP surface (the `serve` web panel)
+ * use this instead, so a reachable panel does not also open a second,
+ * unauthenticated port that can run stopProxy / logout / shutdown.
+ */
+export function createControlDispatcher(
+  state: ControlState,
+  ctx: HandlerContext,
+): (cmd: ControlCommand) => Promise<ControlResponse> {
+  return (cmd) => dispatch(cmd, state, ctx);
+}
+
 /** Context passed to `handleControlRequest` for hook wiring + log access. */
 export interface HandlerContext {
   onStartProxy?: () => Promise<LifecycleResult>;

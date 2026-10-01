@@ -278,13 +278,27 @@
         if (plan) {
           parts.push('<div class="row"><strong>' + esc(plan.level || "coding plan") + "</strong></div>");
           for (const limit of plan.limits || []) {
-            const used = limit.percentage != null ? limit.percentage : (limit.total ? (limit.used / limit.total) * 100 : null);
+            // Upstream `number` is NOT a comparable total (live TIME_LIMIT row:
+            // remaining=3894, number=1), so like the CLI/TUI this shows remaining
+            // alone. `percentage` is the one self-consistent signal: when present
+            // it is a used share (0-100), and the bar is the remaining share
+            // derived from it — never an X/Y fabrication. Direction is not
+            // re-labelled here because upstream owns its meaning.
+            const remaining = limit.remaining;
+            const pct = limit.percentage;
+            const remainingFrac =
+              typeof pct === "number" && isFinite(pct) && pct >= 0 && pct <= 100 ? 1 - pct / 100 : null;
             parts.push(
               '<div class="row"><span class="muted">' + esc(limit.type) + "</span> <strong>" +
-              esc(limit.remaining ?? "?") + "</strong> left of " + esc(limit.total ?? "?") + " " + esc(limit.unit || "") +
-              (limit.nextResetTime ? " · resets " + esc(fmtTs(limit.nextResetTime)) : "") +
-              "</span></div>" +
-              (used == null ? "" : '<div class="bar"><i style="width:' + Math.min(100, Math.max(0, used)).toFixed(1) + '%"></i></div>'),
+              (typeof remaining === "number"
+                ? esc(remaining.toLocaleString()) + (limit.unit ? " " + esc(limit.unit) : "") + " remaining"
+                : "unavailable") +
+              "</strong>" +
+              (limit.nextResetTime ? ' <span class="muted">· resets ' + esc(fmtTs(limit.nextResetTime)) + "</span>" : "") +
+              "</div>" +
+              (remainingFrac === null
+                ? ""
+                : '<div class="bar"><i style="width:' + (remainingFrac * 100).toFixed(1) + '%"></i></div>'),
             );
           }
         } else {

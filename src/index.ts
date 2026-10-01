@@ -5,7 +5,12 @@
 import { loadConfig } from "./config/loader.js";
 import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";
-import { startControlListener, LogBuffer, type ControlState } from "./android/control.js";
+import {
+  startControlListener,
+  createControlDispatcher,
+  LogBuffer,
+  type ControlState,
+} from "./android/control.js";
 import { collectQuotaSnapshot } from "./server/routes-quota.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
 import { ZaiOAuthClient, BigmodelOAuthClient, BigmodelPollOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthResult } from "./auth/oauth.js";
@@ -172,12 +177,6 @@ Examples:
 `);
 }
 
-/** Live panel + its loopback control listener (issue #58). */
-interface PanelRuntime {
-  panel: PanelServer;
-  control: Awaited<ReturnType<typeof startControlListener>>;
-}
-
 /**
  * Mirror console output into a ring buffer so the panel's Logs card has data.
  * Same tee the Android entry installs — the buffer is also what `getLogs` reads.
@@ -194,10 +193,14 @@ function installLogTee(): LogBuffer {
 }
 
 /**
- * Start the optional web panel for `serve`: a loopback control listener (the
- * same protocol the Android shell drives) plus the token-guarded panel page.
- * `serve` has no TUI, so this is the only way to see quota, read live logs or
- * switch provider/plan on a headless box without `docker exec`.
+ * Start the optional web panel for `serve`. `serve` has no TUI, so this is the
+ * only way to see quota, read live logs or switch provider/plan on a headless
+ * box without `docker exec`.
+ *
+ * Commands are dispatched in-process through `createControlDispatcher()` — the
+ * same protocol the Android shell drives over `POST /control`, without opening a
+ * second, unauthenticated loopback port. The panel token is therefore the only
+ * way in.
  *
  * The proxy lifecycle hooks mirror `runAndroid` on purpose: `serve` starts the
  * proxy eagerly, so `serverRef` is pre-filled and the start/stop commands only
@@ -212,7 +215,7 @@ async function startServePanel(
     serverRef: { current: ProxyServer | null };
     logBuffer: LogBuffer;
   },
-): Promise<PanelRuntime> {
+): Promise<PanelServer> {
   const { config, path, auth, serverRef, logBuffer } = ctx;
 
   const controlState: ControlState = {
@@ -261,9 +264,11 @@ async function startServePanel(
     return { ok: true, provider: config.provider, plan: config.plan };
   }
 
-  const control = await startControlListener({
-    port: settings.controlPort,
-    state: controlState,
+  // Dispatched in-process: the panel already guards its own transport with a
+  // token, so a second loopback listener would only add an unauthenticated way
+  // to reach stopProxy / logout / shutdown (issue #58 review, P1) and a second
+  // thing to clean up when the panel fails to start (P2, now structurally gone).
+  const handleControl = createControlDispatcher(controlState, {
     logBuffer,
     onStartProxy: startProxy,
     onStopProxy: stopProxy,
@@ -273,16 +278,15 @@ async function startServePanel(
       serverRef.current?.stop(true);
     },
   });
-  console.log(`control listener: 127.0.0.1:${settings.controlPort} (same protocol as Android)`);
 
   const panel = await startPanelServer({
     port: settings.port,
     token: settings.token,
-    controlPort: settings.controlPort,
+    handleControl,
   });
   console.log(`panel: http://${panel.hostname}:${panel.port} (token required)`);
 
-  return { panel, control };
+  return panel;
 }
 
 async function serve(configPath: string | undefined, debug: boolean): Promise<void> {
@@ -339,7 +343,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   }
   if (debug) console.log(`  debug: ON`);
 
-  let panelRuntime: PanelRuntime | null = null;
+  let panelRuntime: PanelServer | null = null;
   if (panelSettings && panelLogBuffer) {
     try {
       panelRuntime = await startServePanel(panelSettings, {
@@ -357,8 +361,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
 
   const closePanel = (): void => {
     if (!panelRuntime) return;
-    void panelRuntime.control.close().catch(() => {});
-    void panelRuntime.panel.close().catch(() => {});
+    void panelRuntime.close().catch(() => {});
   };
 
   process.on("SIGINT", () => {

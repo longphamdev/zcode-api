@@ -1,14 +1,12 @@
 /**
  * Tests for the optional web panel (issue #58): token enforcement, the
- * pass-through to the loopback control listener, and the tokenless static
- * routes that a browser navigation cannot attach headers to.
+ * in-process control dispatch behind `POST /api/control` (no second listener),
+ * and the tokenless static routes a browser navigation cannot attach a header
+ * to.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { createServer, type Server } from "node:http";
 import {
-  DEFAULT_PANEL_CONTROL_PORT,
   DEFAULT_PANEL_PORT,
-  PANEL_CONTROL_PORT_ENV,
   PANEL_ENABLED_ENV,
   PANEL_PORT_ENV,
   PANEL_TOKEN_ENV,
@@ -17,64 +15,33 @@ import {
   startPanelServer,
   type PanelServer,
 } from "./panel.js";
+import {
+  LogBuffer,
+  createControlDispatcher,
+  type ControlCommand,
+  type ControlResponse,
+  type ControlState,
+} from "../android/control.js";
 
 const TOKEN = "panel-token-for-tests";
-const CONTROL_OK = JSON.stringify({ ok: true, event: "proxyStopped" });
 
-interface StubControl {
-  port: number;
-  /** Bodies the panel actually forwarded, in order. */
-  bodies: string[];
-  /** Canned answer the stub returns for the next request. */
-  reply: { status: number; body: string };
-  close(): Promise<void>;
-}
-
-/** Minimal stand-in for `startControlListener` (same POST /control contract). */
-async function startStubControl(): Promise<StubControl> {
-  const stub: StubControl = {
-    port: 0,
-    bodies: [],
-    reply: { status: 200, body: CONTROL_OK },
-    close: async () => {},
-  };
-  const server: Server = createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => {
-      stub.bodies.push(Buffer.concat(chunks).toString("utf8"));
-      res.writeHead(stub.reply.status, { "content-type": "application/json" });
-      res.end(stub.reply.body);
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-  const address = server.address();
-  stub.port = typeof address === "object" && address ? address.port : 0;
-  stub.close = () => new Promise<void>((resolve) => server.close(() => resolve()));
-  return stub;
-}
+/** Same shape the serve entry passes to `startPanelServer`. */
+type Dispatcher = (cmd: ControlCommand) => Promise<ControlResponse>;
 
 let panels: PanelServer[] = [];
-let stubs: StubControl[] = [];
 
 afterEach(async () => {
   await Promise.all(panels.map((panel) => panel.close().catch(() => {})));
-  await Promise.all(stubs.map((stub) => stub.close()));
   panels = [];
-  stubs = [];
 });
 
 /** Panel bound to a free port; the token is always the test token. */
-async function startPanel(controlPort: number): Promise<PanelServer> {
-  const panel = await startPanelServer({ port: 0, token: TOKEN, controlPort });
+async function startPanel(
+  handleControl: Dispatcher = async () => ({ ok: true, event: "proxyStopped" }),
+): Promise<PanelServer> {
+  const panel = await startPanelServer({ port: 0, token: TOKEN, handleControl });
   panels.push(panel);
   return panel;
-}
-
-async function startStub(): Promise<StubControl> {
-  const stub = await startStubControl();
-  stubs.push(stub);
-  return stub;
 }
 
 function panelUrl(panel: PanelServer, path: string): string {
@@ -113,70 +80,71 @@ describe("resolvePanelSettings", () => {
     expect(resolvePanelSettings({ [PANEL_TOKEN_ENV]: TOKEN })).toBeNull();
   });
 
-  it("falls back to the default ports", () => {
+  it("resolves the token, the default port, and nothing else", () => {
+    // Only `{token, port}`: the panel no longer has a control port to forward
+    // to, so there is no second listener that could outlive a failed start.
     expect(resolvePanelSettings({ [PANEL_ENABLED_ENV]: "1", [PANEL_TOKEN_ENV]: ` ${TOKEN} ` })).toEqual({
       token: TOKEN,
       port: DEFAULT_PANEL_PORT,
-      controlPort: DEFAULT_PANEL_CONTROL_PORT,
     });
   });
 
-  it("honours explicit ports", () => {
+  it("honours an explicit panel port", () => {
     expect(
       resolvePanelSettings({
         [PANEL_ENABLED_ENV]: "true",
         [PANEL_TOKEN_ENV]: TOKEN,
         [PANEL_PORT_ENV]: "9100",
-        [PANEL_CONTROL_PORT_ENV]: "9101",
       }),
-    ).toEqual({ token: TOKEN, port: 9100, controlPort: 9101 });
+    ).toEqual({ token: TOKEN, port: 9100 });
   });
 
   it("refuses to start without a token rather than serving an open control plane", () => {
     expect(resolvePanelSettings({ [PANEL_ENABLED_ENV]: "1" })).toBeNull();
     expect(resolvePanelSettings({ [PANEL_ENABLED_ENV]: "1", [PANEL_TOKEN_ENV]: "  " })).toBeNull();
   });
-
-  it("refuses a port collision with the control listener", () => {
-    expect(
-      resolvePanelSettings({
-        [PANEL_ENABLED_ENV]: "1",
-        [PANEL_TOKEN_ENV]: TOKEN,
-        [PANEL_PORT_ENV]: "8091",
-        [PANEL_CONTROL_PORT_ENV]: "8091",
-      }),
-    ).toBeNull();
-  });
 });
 
 describe("startPanelServer", () => {
   it("refuses to start without a token", async () => {
-    await expect(startPanelServer({ port: 0, token: "", controlPort: 1 })).rejects.toThrow(
+    const handleControl: Dispatcher = async () => ({ ok: true, event: "proxyStopped" });
+    await expect(startPanelServer({ port: 0, token: "", handleControl })).rejects.toThrow(
       /panel token required/,
     );
-    await expect(startPanelServer({ port: 0, token: "  ", controlPort: 1 })).rejects.toThrow(
+    await expect(startPanelServer({ port: 0, token: "  ", handleControl })).rejects.toThrow(
       /panel token required/,
     );
   });
 
   it("binds loopback on a free port and reports the real one", async () => {
-    const panel = await startPanel(1);
+    const panel = await startPanel();
     expect(panel.hostname).toBe("127.0.0.1");
     expect(panel.port).toBeGreaterThan(0);
   });
 
   it("frees the port on close", async () => {
-    const panel = await startPanel(1);
+    const panel = await startPanel();
     const port = panel.port;
     await panel.close();
     panels = panels.filter((candidate) => candidate !== panel);
     await expect(fetch(`http://127.0.0.1:${port}/healthz`)).rejects.toThrow();
   });
+
+  it("fails on a taken port without disturbing the panel already there", async () => {
+    // Regression for the #58 review's P2: with no control listener in the
+    // startup path there is nothing partially started to leak or to clean up.
+    const first = await startPanel();
+    const handleControl: Dispatcher = async () => ({ ok: true, event: "proxyStopped" });
+    await expect(startPanelServer({ port: first.port, token: TOKEN, handleControl })).rejects.toThrow();
+
+    const health = await fetch(panelUrl(first, "/healthz"));
+    expect(health.status).toBe(200);
+  });
 });
 
 describe("panel static routes", () => {
   it("serves the shell and the liveness probe without a token", async () => {
-    const panel = await startPanel(1);
+    const panel = await startPanel();
 
     for (const path of ["/", "/panel"]) {
       const res = await fetch(panelUrl(panel, path));
@@ -192,8 +160,21 @@ describe("panel static routes", () => {
     expect(await health.json()).toEqual({ ok: true, service: "zcode-panel" });
   });
 
+  it("never fabricates a total for a coding-plan limit", async () => {
+    // Regression for the #58 review's P2/P4: upstream `number` is not a
+    // comparable total (live TIME_LIMIT row: remaining=3894, number=1), so the
+    // window row shows `remaining` alone and only draws a bar when upstream
+    // hands us a usable percentage.
+    const panel = await startPanel();
+    const html = await (await fetch(panelUrl(panel, "/"))).text();
+    expect(html).not.toContain("left of");
+    expect(html).not.toContain("limit.total");
+    expect(html).toContain("remaining");
+    expect(html).toContain("limit.percentage");
+  });
+
   it("answers unknown paths with 404 and a non-POST control call with 405", async () => {
-    const panel = await startPanel(1);
+    const panel = await startPanel();
 
     const missing = await fetch(panelUrl(panel, "/nope"));
     expect(missing.status).toBe(404);
@@ -206,9 +187,12 @@ describe("panel static routes", () => {
 });
 
 describe("panel control authentication", () => {
-  it("rejects a missing or wrong token and never talks to the control listener", async () => {
-    const stub = await startStub();
-    const panel = await startPanel(stub.port);
+  it("rejects a missing or wrong token without dispatching anything", async () => {
+    let calls = 0;
+    const panel = await startPanel(async () => {
+      calls++;
+      return { ok: true, event: "proxyStopped" };
+    });
 
     const attempts: RequestInit[] = [
       {},
@@ -221,66 +205,83 @@ describe("panel control authentication", () => {
       expect(res.status).toBe(401);
       expect(await res.json()).toEqual({ ok: false, error: "unauthorized" });
     }
-    expect(stub.bodies).toEqual([]);
+    expect(calls).toBe(0);
   });
 
-  it("accepts either header spelling and forwards the body verbatim", async () => {
-    const stub = await startStub();
-    const panel = await startPanel(stub.port);
-    stub.reply = {
-      status: 200,
-      body: JSON.stringify({ ok: true, event: "quota", quota: { provider: "zai" } }),
+  it("rejects an unauthenticated oversized body as 401, not 413", async () => {
+    let calls = 0;
+    const panel = await startPanel(async () => {
+      calls++;
+      return { ok: true, event: "proxyStopped" };
+    });
+
+    const res = await controlRequest(panel, { body: "x".repeat(70 * 1024) });
+    expect(res.status).toBe(401);
+    expect(calls).toBe(0);
+  });
+
+  it("accepts either header spelling and returns the control envelope", async () => {
+    const seen: ControlCommand[] = [];
+    const handleControl: Dispatcher = async (cmd) => {
+      seen.push(cmd);
+      if (cmd.cmd !== "quota") return { ok: true, event: "loggedOut" };
+      return { ok: true, event: "quota", quota: { provider: "zai" } as never };
     };
+    const panel = await startPanel(handleControl);
 
     const viaHeader = await controlRequest(panel, {
       headers: { "content-type": "application/json", "x-panel-token": TOKEN },
       body: JSON.stringify({ cmd: "quota" }),
     });
     expect(viaHeader.status).toBe(200);
-    expect(await viaHeader.json()).toEqual({
-      ok: true,
-      event: "quota",
-      quota: { provider: "zai" },
-    });
+    expect(await viaHeader.json()).toEqual({ ok: true, event: "quota", quota: { provider: "zai" } });
 
     const viaBearer = await controlRequest(panel, {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
     expect(viaBearer.status).toBe(200);
 
-    expect(stub.bodies).toEqual(['{"cmd":"quota"}', '{"cmd":"status"}']);
+    expect(seen).toEqual([{ cmd: "quota" }, { cmd: "status" }]);
   });
 
-  it("passes a control-layer error status and body through unchanged", async () => {
-    const stub = await startStub();
-    const panel = await startPanel(stub.port);
-    stub.reply = { status: 400, body: JSON.stringify({ ok: false, error: "invalid_json" }) };
-
+  it("keeps the control protocol's error envelope (200 + ok:false) verbatim", async () => {
+    const panel = await startPanel(async (cmd) => ({ ok: false, error: `unknown_cmd: ${cmd.cmd}` }));
     const res = await controlRequest(panel, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ cmd: "nope" }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: false, error: "unknown_cmd: nope" });
+  });
+
+  it("rejects malformed JSON and non-command payloads before dispatch", async () => {
+    let calls = 0;
+    const panel = await startPanel(async () => {
+      calls++;
+      return { ok: true, event: "proxyStopped" };
+    });
+
+    const badJson = await controlRequest(panel, {
       headers: { authorization: `Bearer ${TOKEN}` },
       body: "not json",
     });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ ok: false, error: "invalid_json" });
-    expect(stub.bodies).toEqual(["not json"]);
+    expect(badJson.status).toBe(400);
+    expect(await badJson.json()).toEqual({ ok: false, error: "invalid_json" });
+
+    for (const body of ["null", "[]", '"status"', "{}", '{"cmd":42}']) {
+      const res = await controlRequest(panel, { headers: { authorization: `Bearer ${TOKEN}` }, body });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ ok: false, error: "invalid_command" });
+    }
+    expect(calls).toBe(0);
   });
 
-  it("reports control_unavailable when the control listener is down", async () => {
-    const stub = await startStub();
-    const controlPort = stub.port;
-    await stub.close();
-
-    const panel = await startPanel(controlPort);
-    const res = await controlRequest(panel, { headers: { authorization: `Bearer ${TOKEN}` } });
-    expect(res.status).toBe(502);
-    const body = (await res.json()) as { ok: boolean; error: string };
-    expect(body.ok).toBe(false);
-    expect(body.error).toContain("control_unavailable");
-  });
-
-  it("rejects an oversized command body", async () => {
-    const stub = await startStub();
-    const panel = await startPanel(stub.port);
+  it("rejects an oversized command body before dispatch", async () => {
+    let calls = 0;
+    const panel = await startPanel(async () => {
+      calls++;
+      return { ok: true, event: "proxyStopped" };
+    });
 
     const res = await controlRequest(panel, {
       headers: { authorization: `Bearer ${TOKEN}` },
@@ -288,6 +289,62 @@ describe("panel control authentication", () => {
     });
     expect(res.status).toBe(413);
     expect(await res.json()).toEqual({ ok: false, error: "request_too_large" });
-    expect(stub.bodies).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
+  it("reports a dispatcher crash as internal_error instead of a bare failure", async () => {
+    const panel = await startPanel(async () => {
+      throw new Error("boom");
+    });
+    const res = await controlRequest(panel, { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ ok: false, error: "internal_error: boom" });
+  });
+});
+
+describe("panel ↔ control dispatcher wiring", () => {
+  it("runs a real control command in process, with no extra listener", async () => {
+    // The full path the panel uses in `serve`: a real dispatcher built from the
+    // Android control module, driven over the panel's own authenticated HTTP
+    // surface. Nothing here binds a control port.
+    let stops = 0;
+    const state: ControlState = { provider: "zai", plan: "coding-plan", proxyPort: 8080 };
+    const handleControl = createControlDispatcher(state, {
+      logBuffer: new LogBuffer(),
+      onStopProxy: async () => {
+        stops++;
+        return { ok: true };
+      },
+    });
+    const panel = await startPanel(handleControl);
+
+    const denied = await controlRequest(panel, {
+      body: JSON.stringify({ cmd: "stopProxy" }),
+    });
+    expect(denied.status).toBe(401);
+    expect(stops).toBe(0);
+
+    const allowed = await controlRequest(panel, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ cmd: "stopProxy" }),
+    });
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toEqual({ ok: true, event: "proxyStopped" });
+    expect(stops).toBe(1);
+    expect(state.proxyPort).toBe(0);
+  });
+
+  it("answers `status` from the same hook state the proxy entry uses", async () => {
+    const state: ControlState = { provider: "bigmodel", plan: "start-plan", proxyPort: 0 };
+    const handleControl = createControlDispatcher(state, { logBuffer: new LogBuffer() });
+    const panel = await startPanel(handleControl);
+
+    const res = await controlRequest(panel, { headers: { authorization: `Bearer ${TOKEN}` } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; provider: string; plan: string; proxyPort: number };
+    expect(body.ok).toBe(true);
+    expect(body.provider).toBe("bigmodel");
+    expect(body.plan).toBe("start-plan");
+    expect(body.proxyPort).toBe(0);
   });
 });
