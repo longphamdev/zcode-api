@@ -29,6 +29,7 @@ import { appendFileSync } from "node:fs";
 import type { ProxyConfig } from "../config/types.js";
 import type { ProviderId } from "../provider/types.js";
 import { LogPane, type LogLevel } from "./log-pane.js";
+import { checkForUpdate } from "../update/check.js";
 import { KeyParser, type KeyAction } from "./keys.js";
 import { buildFrame, findRegion, type ClickAction, type ClickRegion, type Frame, type QuotaState } from "./frame.js";
 
@@ -233,6 +234,31 @@ export async function runTui(args: ServeArgs): Promise<void> {
     }, TOAST_MS);
     if (typeof toastTimer.unref === "function") toastTimer.unref();
     scheduleRender();
+  }
+
+  // --- update notice (issue #60) -------------------------------------------
+  // Same check the Android app runs at startup: silent on every failure, and
+  // the result lands in the Logs card (the panel surfaces it through the log
+  // tee for free). `u` re-runs it manually — an explicit request overrides
+  // ZCODE_UPDATE_CHECK=off and the muted-tag list, and always answers visibly.
+  let updateCheckInFlight = false;
+  async function runUpdateCheck(manual = false): Promise<void> {
+    if (updateCheckInFlight) return;
+    updateCheckInFlight = true;
+    try {
+      const result = await checkForUpdate(VERSION, { force: manual });
+      if (result.kind === "update") {
+        emit(`update: ${result.notice.text}`, "info");
+        if (manual) setToast(`update available: ${result.notice.latest}`, "info");
+        return;
+      }
+      if (!manual) return;
+      if (result.kind === "up-to-date") setToast(`already on the latest version (v${VERSION})`, "ok");
+      else if (result.kind === "skipped") setToast(`v${VERSION} is muted via ZCODE_UPDATE_SKIP`, "info");
+      else setToast("update check unavailable (offline, or GitHub blocked)", "err");
+    } finally {
+      updateCheckInFlight = false;
+    }
   }
 
   // --- auth ----------------------------------------------------------------
@@ -593,6 +619,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
           case "l": void startLogin(); return;
           case "o": void logout(); return;
           case "r": void refreshQuota(); return;
+          case "u": void runUpdateCheck(true); return;
           case "p": switchProvider(); return;
           case "t": switchPlan(); return;
           case "c": pane.clear(); scheduleRender(); return;
@@ -677,6 +704,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
   // --- boot ---------------------------------------------------------------------
   console.log(`zcode-proxy TUI — config: ${path}`);
   console.log(`provider: ${state.provider} · plan: ${state.plan}`);
+  void runUpdateCheck();
   await refreshAuth();
   renderNow();
   if (!state.loggedIn) {
