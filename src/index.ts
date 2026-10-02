@@ -29,6 +29,7 @@ import {
   type PanelServer,
   type PanelSettings,
 } from "./server/panel.js";
+import { checkForUpdate } from "./update/check.js";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -411,6 +412,13 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
     console.log(config.plan === "coding-plan" ? `  /async/v1/*: ON` : `  /async/v1/*: OFF (requires plan "coding-plan")`);
   }
   if (debug) console.log(`  debug: ON`);
+
+  // Update notice (issue #60): fire-and-forget — a slow or blocked GitHub must
+  // never delay startup, and every failure mode is silent (see update/check.ts).
+  // In a container the hint is the compose command: the image cannot self-update.
+  void checkForUpdate(VERSION).then((result) => {
+    if (result.kind === "update") console.log(`  update: ${result.notice.text}`);
+  });
 
   let panelRuntime: PanelServer | null = null;
 

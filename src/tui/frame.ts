@@ -621,7 +621,7 @@ export function buildFrame(s: FrameState): Frame {
   // narrow terminals, so the primary actions must come first.
   const footerItems: Array<[string, string]> = [
     ["s", "start/stop"], ["l", "login"], ["o", "logout"], ["g", "follow"], ["q", "quit"],
-    ["p", "provider"], ["t", "plan"], ["r", "quota refresh"], ["c", "clear"],
+    ["p", "provider"], ["t", "plan"], ["r", "quota refresh"], ["u", "update"], ["c", "clear"],
   ];
   footerParts.push({ t: "↑↓ scroll", c: DIM });
   for (const [key, label] of footerItems) {
