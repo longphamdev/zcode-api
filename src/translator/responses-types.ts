@@ -26,9 +26,17 @@ export interface ResponsesReasoning {
 
 /** A single text content part inside a Responses input/output message. */
 export interface ResponsesContentPart {
-  type: "input_text" | "output_text" | "text" | "input_image" | "image_url" | "summary_text";
+  type: "input_text" | "output_text" | "text" | "input_image" | "image_url" | "summary_text" | "input_video" | "video_url" | "input_file" | "file";
   text?: string;
   image_url?: string | { url: string; detail?: string };
+  /** Video part (`input_video`/`video_url`): data URL or http(s) URL. */
+  video_url?: string | { url: string };
+  /** Inline media payload alias used by some Responses clients (`input_video.data`). */
+  data?: string;
+  /** File part (`input_file`/`file`): `file_data` is a data URL (usually PDF). */
+  file_data?: string;
+  file?: { filename?: string; file_data?: string };
+  filename?: string;
 }
 
 /** Tool definitions on a Responses request. */

@@ -32,9 +32,13 @@ export interface OpenAIMessage {
 
 /** Multi-modal content part (OpenAI format). */
 export interface OpenAIContentPart {
-  type: "text" | "image_url";
+  type: "text" | "image_url" | "video_url" | "file";
   text?: string;
   image_url?: { url: string; detail?: string };
+  /** GLM-style video part (`video_url.url` is a data URL or an http(s) URL). */
+  video_url?: { url: string };
+  /** File part (`file_data` is a data URL, usually `data:application/pdf;base64,...`). */
+  file?: { filename?: string; file_data?: string };
 }
 
 /** Tool call in an assistant message. */
@@ -164,15 +168,28 @@ export interface OpenAIModelList {
 // Anthropic types
 // ─────────────────────────────────────────────
 
-/** Anthropic image source: inline base64 payload or a remote URL. */
+/** Anthropic image/video source: inline base64 payload or a remote URL. */
 export type AnthropicImageSource =
   | { type: "base64"; media_type: string; data: string }
+  | { type: "url"; url: string };
+
+/**
+ * Anthropic document source. `base64` carries binary documents (PDF), `text`
+ * carries inline plain text, `url` references a remote file — the three shapes
+ * the official ZCode client emits for `application/pdf` / `text/plain` files
+ * (`_reverse` bundle 3.14.0, Anthropic request builder).
+ */
+export type AnthropicDocumentSource =
+  | { type: "base64"; media_type: string; data: string }
+  | { type: "text"; media_type: string; data: string }
   | { type: "url"; url: string };
 
 /** Anthropic content block types. */
 export type AnthropicContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; source: AnthropicImageSource }
+  | { type: "video"; source: AnthropicImageSource }
+  | { type: "document"; source: AnthropicDocumentSource; title?: string }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[]; is_error?: boolean }
   | { type: "thinking"; thinking: string; signature?: string };

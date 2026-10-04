@@ -62,3 +62,97 @@ describe("translateRequestAnthropicToOpenAI: output_config.effort", () => {
     expect(result.reasoning_effort).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────
+// video / document block mapping (mirror of the openai-to-anthropic direction)
+// ─────────────────────────────────────────────
+
+describe("translateRequestAnthropicToOpenAI: video / document blocks", () => {
+  it("maps video block with base64 source → video_url part with data URL", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6v",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "video", source: { type: "base64", media_type: "video/mp4", data: "AAAAKGZ0eXBtcDQy" } },
+          { type: "text", text: "describe this" },
+        ],
+      }],
+      max_tokens: 100,
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    const parts = result.messages[0].content as any[];
+    expect(parts[0]).toEqual({
+      type: "video_url",
+      video_url: { url: "data:video/mp4;base64,AAAAKGZ0eXBtcDQy" },
+    });
+  });
+
+  it("maps video block with url source → video_url part carrying the URL", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6v",
+      messages: [{
+        role: "user",
+        content: [{ type: "video", source: { type: "url", url: "https://example.com/clip.mp4" } }],
+      }],
+      max_tokens: 100,
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    const parts = result.messages[0].content as any[];
+    expect(parts[0]).toEqual({
+      type: "video_url",
+      video_url: { url: "https://example.com/clip.mp4" },
+    });
+  });
+
+  it("maps PDF document block with base64 source → file part with file_data data URL", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "document", source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK" }, title: "report.pdf" },
+          { type: "text", text: "summarize" },
+        ],
+      }],
+      max_tokens: 100,
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    const parts = result.messages[0].content as any[];
+    expect(parts[0]).toEqual({
+      type: "file",
+      file: { filename: "report.pdf", file_data: "data:application/pdf;base64,JVBERi0xLjQK" },
+    });
+  });
+
+  it("maps text-source document block → plain text part (no base64 round-trip)", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "plain notes" }, title: "notes.txt" }],
+      }],
+      max_tokens: 100,
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    // single text part collapses to plain-string content (existing rule)
+    expect(result.messages[0].content).toBe("plain notes");
+  });
+
+  it("maps url-source document block → file part carrying the URL in file_data", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [{ type: "document", source: { type: "url", url: "https://example.com/doc.pdf" }, title: "doc.pdf" }],
+      }],
+      max_tokens: 100,
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    const parts = result.messages[0].content as any[];
+    expect(parts[0]).toEqual({
+      type: "file",
+      file: { filename: "doc.pdf", file_data: "https://example.com/doc.pdf" },
+    });
+  });
+});

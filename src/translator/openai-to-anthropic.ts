@@ -7,6 +7,7 @@ import type {
   OpenAIChatResponse,
   OpenAIUsage,
   OpenAIMessage,
+  OpenAIContentPart,
   OpenAIToolDefinition,
   AnthropicMessagesRequest,
   AnthropicMessagesResponse,
@@ -293,6 +294,12 @@ function toolResultContent(msg: OpenAIMessage): string | AnthropicContentBlock[]
     if (c.type === "image_url" && c.image_url?.url) {
       return imageUrlToAnthropicBlock(c.image_url.url);
     }
+    if (c.type === "video_url" && c.video_url?.url) {
+      return videoUrlToAnthropicBlock(c.video_url.url);
+    }
+    if (c.type === "file") {
+      return filePartToAnthropicDocument(c);
+    }
     return { type: "text" as const, text: "" };
   });
 }
@@ -325,6 +332,67 @@ function imageUrlToAnthropicBlock(url: string): AnthropicContentBlock {
     return { type: "image", source: { type: "url", url } };
   }
   return { type: "text", text: url };
+}
+
+/**
+ * Map an OpenAI `video_url` part to an Anthropic video block.
+ *
+ * The ZCode-plan Anthropic gateway accepts base64-source video blocks even
+ * though the public open-platform API documents URL-only video input (live
+ * verified 2026-10-03: glm-5.3-flash via `zcode.z.ai/api/v1/zcode-plan`
+ * correctly described a base64 test clip sent as
+ * `{type:"video",source:{type:"base64",...}}` — the shape the official client
+ * emits). Same two-shape rule as images: data: base64 URL → inline source,
+ * http(s) → url source, anything else degrades to a text block carrying the
+ * URL verbatim rather than a block the upstream would reject.
+ */
+function videoUrlToAnthropicBlock(url: string): AnthropicContentBlock {
+  const parsed = parseDataUrl(url);
+  if (parsed) {
+    return {
+      type: "video",
+      source: { type: "base64", media_type: parsed.mediaType, data: parsed.data },
+    };
+  }
+  if (/^https?:\/\//i.test(url)) {
+    return { type: "video", source: { type: "url", url } };
+  }
+  return { type: "text", text: url };
+}
+
+/**
+ * Map an OpenAI `file` part to an Anthropic document block.
+ *
+ * `file_data` data URLs become base64-source documents with the data-URL media
+ * type preserved (the OpenAI ecosystem only realistically sends PDFs here —
+ * the official client hard-codes `application/pdf` for the same translation);
+ * http(s) URLs become url-source documents. A bare `file_id` or unparseable
+ * `file_data` degrades to a text block carrying whatever identifying info the
+ * part still has — an OpenAI-hosted file_id has no fetchable payload here, and
+ * silently dropping the part would leave the model answering questions about a
+ * document it never saw.
+ */
+function filePartToAnthropicDocument(part: OpenAIContentPart): AnthropicContentBlock {
+  const file = part.file;
+  const fileData = file?.file_data;
+  if (fileData) {
+    const parsed = parseDataUrl(fileData);
+    if (parsed) {
+      return {
+        type: "document",
+        source: { type: "base64", media_type: parsed.mediaType, data: parsed.data },
+        ...(file?.filename ? { title: file.filename } : {}),
+      };
+    }
+    if (/^https?:\/\//i.test(fileData)) {
+      return {
+        type: "document",
+        source: { type: "url", url: fileData },
+        ...(file?.filename ? { title: file.filename } : {}),
+      };
+    }
+  }
+  return { type: "text", text: file?.filename ?? fileData ?? "" };
 }
 
 /**
@@ -423,6 +491,12 @@ function translateContentOpenAIToAnthropic(msg: OpenAIMessage): string | Anthrop
       if (c.type === "text") return { type: "text" as const, text: c.text ?? "" };
       if (c.type === "image_url" && c.image_url?.url) {
         return imageUrlToAnthropicBlock(c.image_url.url);
+      }
+      if (c.type === "video_url" && c.video_url?.url) {
+        return videoUrlToAnthropicBlock(c.video_url.url);
+      }
+      if (c.type === "file") {
+        return filePartToAnthropicDocument(c);
       }
       return { type: "text" as const, text: "" };
     });

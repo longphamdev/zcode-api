@@ -192,3 +192,82 @@ describe("responsesToChatCompletions", () => {
     expect(r.chatRequest.reasoning_effort).toBe("high");
   });
 });
+
+// ─────────────────────────────────────────────
+// input_video / input_file parts (media through the Responses endpoint)
+// ─────────────────────────────────────────────
+
+describe("responsesToChatCompletions: media parts", () => {
+  it("maps input_video part → chat video_url part (keeps parts array form)", () => {
+    const r = responsesToChatCompletions(baseReq({ input: [{
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_video", video_url: "data:video/mp4;base64,AAAAKGZ0eXBtcDQy" } as any,
+        { type: "input_text", text: "describe this" },
+      ],
+    }] }));
+    expect(r.chatRequest.messages[0]).toEqual({
+      role: "user",
+      content: [
+        { type: "video_url", video_url: { url: "data:video/mp4;base64,AAAAKGZ0eXBtcDQy" } },
+        { type: "text", text: "describe this" },
+      ],
+    });
+  });
+
+  it("maps input_file part with file_data → chat file part", () => {
+    const r = responsesToChatCompletions(baseReq({ input: [{
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_file", filename: "report.pdf", file_data: "data:application/pdf;base64,JVBERi0xLjQK" } as any,
+        { type: "input_text", text: "summarize" },
+      ],
+    }] }));
+    expect(r.chatRequest.messages[0]).toEqual({
+      role: "user",
+      content: [
+        { type: "file", file: { filename: "report.pdf", file_data: "data:application/pdf;base64,JVBERi0xLjQK" } },
+        { type: "text", text: "summarize" },
+      ],
+    });
+  });
+
+  it("skips a file_id-only input_file (hosted, no payload) and collapses to text", () => {
+    const r = responsesToChatCompletions(baseReq({ input: [{
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_file", file_id: "file_123" } as any,
+        { type: "input_text", text: "hello" },
+      ],
+    }] }));
+    expect(r.chatRequest.messages[0]).toEqual({ role: "user", content: "hello" });
+  });
+
+  it("degrades media parts in non-user roles to text (existing image rule)", () => {
+    const r = responsesToChatCompletions(baseReq({ input: [
+      { type: "message", role: "assistant", content: [
+        { type: "input_video", video_url: "data:video/mp4;base64,AAAA" } as any,
+        { type: "input_text", text: "looked at this" },
+      ] },
+    ] }));
+    expect(r.chatRequest.messages[0]).toEqual({ role: "assistant", content: "looked at this" });
+  });
+});
+
+  it("accepts a bare data field as the input_video URL carrier", () => {
+    const r = responsesToChatCompletions(baseReq({ input: [{
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_video", data: "data:video/mp4;base64,AAAAKGZ0eXBtcDQy" } as any,
+        { type: "input_text", text: "describe" },
+      ],
+    }] }));
+    expect((r.chatRequest.messages[0].content as any[])[0]).toEqual({
+      type: "video_url",
+      video_url: { url: "data:video/mp4;base64,AAAAKGZ0eXBtcDQy" },
+    });
+  });

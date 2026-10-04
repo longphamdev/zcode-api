@@ -1482,3 +1482,146 @@ describe("translateResponseOpenAIToAnthropic", () => {
     expect(result.usage.cache_creation_input_tokens).toBe(100);
   });
 });
+
+// ─────────────────────────────────────────────
+// video_url / file part mapping (ZCode-plan gateway accepts base64 video and
+// PDF document blocks — live-verified 2026-10-03 against glm-5.3-flash)
+// ─────────────────────────────────────────────
+
+describe("translateRequestOpenAIToAnthropic: video_url / file parts", () => {
+  it("maps video_url data URL → video block with base64 source", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6v",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "video_url", video_url: { url: "data:video/mp4;base64,AAAAKGZ0eXBtcDQy" } },
+          { type: "text", text: "describe this" },
+        ],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as any[];
+    expect(blocks[0]).toEqual({
+      type: "video",
+      source: { type: "base64", media_type: "video/mp4", data: "AAAAKGZ0eXBtcDQy" },
+    });
+  });
+
+  it("maps video_url http(s) URL → video block with url source", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6v",
+      messages: [{
+        role: "user",
+        content: [{ type: "video_url", video_url: { url: "https://example.com/clip.mp4" } }],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as any[];
+    expect(blocks[0]).toEqual({
+      type: "video",
+      source: { type: "url", url: "https://example.com/clip.mp4" },
+    });
+  });
+
+  it("degrades an exotic-scheme video_url to a text block carrying the URL", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6v",
+      messages: [{
+        role: "user",
+        content: [{ type: "video_url", video_url: { url: "ftp://example.com/clip.mp4" } }],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as any[];
+    expect(blocks[0]).toEqual({ type: "text", text: "ftp://example.com/clip.mp4" });
+  });
+
+  it("maps file file_data PDF data URL → document block with base64 source and title", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "file", file: { filename: "report.pdf", file_data: "data:application/pdf;base64,JVBERi0xLjQK" } },
+          { type: "text", text: "summarize" },
+        ],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as any[];
+    expect(blocks[0]).toEqual({
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: "JVBERi0xLjQK" },
+      title: "report.pdf",
+    });
+  });
+
+  it("maps file file_data http(s) URL → document block with url source", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [{ type: "file", file: { filename: "doc.pdf", file_data: "https://example.com/doc.pdf" } }],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as any[];
+    expect(blocks[0]).toEqual({
+      type: "document",
+      source: { type: "url", url: "https://example.com/doc.pdf" },
+      title: "doc.pdf",
+    });
+  });
+
+  it("degrades a file_id-only file part to a text block carrying the filename", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [{ type: "file", file: { filename: "upload.pdf" } }],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as any[];
+    expect(blocks[0]).toEqual({ type: "text", text: "upload.pdf" });
+  });
+
+  it("maps video_url/file parts inside tool_result content", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6v",
+      messages: [
+        { role: "user", content: "record" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_1", type: "function", function: { name: "read_video", arguments: "{}" } }],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: [
+            { type: "text", text: "clip:" },
+            { type: "video_url", video_url: { url: "data:video/webm;base64,AAAA" } },
+            { type: "file", file: { filename: "log.pdf", file_data: "data:application/pdf;base64,JVBERi0=" } },
+          ],
+        },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const toolResultMsg = result.messages[2];
+    expect(toolResultMsg.role).toBe("user");
+    const inner = (toolResultMsg.content as any[])[0].content;
+    expect(Array.isArray(inner)).toBe(true);
+    expect(inner[0]).toEqual({ type: "text", text: "clip:" });
+    expect(inner[1]).toEqual({
+      type: "video",
+      source: { type: "base64", media_type: "video/webm", data: "AAAA" },
+    });
+    expect(inner[2]).toEqual({
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: "JVBERi0=" },
+      title: "log.pdf",
+    });
+  });
+});

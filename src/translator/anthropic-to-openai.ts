@@ -197,6 +197,27 @@ function translateMessageAnthropicToOpenAI(m: AnthropicMessage): OpenAIMessage[]
         }
         break;
       }
+      case "video": {
+        // GLM's OpenAI-compat dialect carries video as `video_url` with a data:
+        // URL for inline payloads — the same shape the official client's
+        // OpenAI-format translator emits (`data:${mediaType};base64,...`).
+        if (block.source.type === "base64") {
+          contentParts.push({
+            type: "video_url",
+            video_url: { url: `data:${block.source.media_type};base64,${block.source.data}` },
+          });
+        } else if (block.source.type === "url") {
+          contentParts.push({
+            type: "video_url",
+            video_url: { url: block.source.url },
+          });
+        }
+        break;
+      }
+      case "document": {
+        contentParts.push(documentBlockToOpenAIPart(block));
+        break;
+      }
       case "tool_use": {
         toolCalls.push({
           id: block.id,
@@ -246,6 +267,34 @@ function translateMessageAnthropicToOpenAI(m: AnthropicMessage): OpenAIMessage[]
   }
 
   return result;
+}
+
+/**
+ * Map an Anthropic document block to an OpenAI content part.
+ *
+ * base64 sources rehydrate into a `file` part whose `file_data` is the data
+ * URL (title becomes filename); a `text` source is already plain utf8, so it
+ * degrades to a plain text part rather than paying a base64 round-trip for
+ * content OpenAI can carry verbatim; a url source rides in `file_data` as-is —
+ * OpenAI has no remote-file part and dropping the reference would lose the
+ * only pointer the conversation has (deliberate deviation from the official
+ * client, which throws on PDF-with-URL in this direction).
+ */
+function documentBlockToOpenAIPart(
+  block: { type: "document"; source: { type: "base64"; media_type: string; data: string } | { type: "text"; media_type: string; data: string } | { type: "url"; url: string }; title?: string },
+): OpenAIContentPart {
+  const source = block.source;
+  const fileMeta = block.title ? { filename: block.title } : {};
+  if (source.type === "base64") {
+    return {
+      type: "file",
+      file: { ...fileMeta, file_data: `data:${source.media_type};base64,${source.data}` },
+    };
+  }
+  if (source.type === "text") {
+    return { type: "text", text: source.data };
+  }
+  return { type: "file", file: { ...fileMeta, file_data: source.url } };
 }
 
 /**
