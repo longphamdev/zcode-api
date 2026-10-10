@@ -5,9 +5,7 @@ import {
   sendWithClientSigning,
 } from "./client-signing.js";
 import type { UpstreamHeaderPair } from "./upstream.js";
-import type { ProxyIdentity } from "../config/types.js";
 
-const identity: ProxyIdentity = { appVersion: "3.8.1", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" };
 const CRED = "testkey.testsecret";
 const API_KEY_ID = "testkey";
 const API_KEY_SECRET = "testsecret";
@@ -67,20 +65,15 @@ async function buildHandshakeFixture(): Promise<HandshakeFixture> {
 }
 
 interface MockCalls {
-  gate: number;
   handshakes: { url: string; body: Record<string, unknown>; auth: string }[];
 }
 
-function signingFetchFixture(fixture: HandshakeFixture, calls: MockCalls, gateEnabled = true): typeof fetch {
+// No gate branch on purpose: any fetch of GATE_URL hits the "unexpected fetch"
+// throw — a regression guard proving the 3.15.1 static rule never probes
+// agent/configs from the signing path.
+function signingFetchFixture(fixture: HandshakeFixture, calls: MockCalls): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
-    if (url === GATE_URL) {
-      calls.gate++;
-      return new Response(JSON.stringify({
-        code: 0,
-        data: gateEnabled ? { codingPlanSignature: { enable: true } } : {},
-      }), { status: 200 });
-    }
     if (url === HANDSHAKE_URL) {
       calls.handshakes.push({
         url,
@@ -94,14 +87,13 @@ function signingFetchFixture(fixture: HandshakeFixture, calls: MockCalls, gateEn
 }
 
 describe("ClientSigningManager.sign", () => {
-  it("signs a coding-plan request with a verifiable Ed25519 signature and proof of work", async () => {
+  it("signs a coding-plan request (3.15.1 static rule — no agent/configs gate) with a verifiable Ed25519 signature and proof of work", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
 
     const signed = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
 
-    expect(calls.gate).toBe(1);
     expect(calls.handshakes.length).toBe(1);
     expect(signed.length).toBe(BASE_PAIRS.length + 6);
     expect(pair(signed, "X-App-Id")).toBe("zcode");
@@ -140,38 +132,29 @@ describe("ClientSigningManager.sign", () => {
     expect(powDigest[0]).toBe(0);
   });
 
-  it("attaches the g6n gate header set (X-ZCode-Agent inline, no X-Device-Mid, no Accept) on the gate fetch", async () => {
+  it("never fetches /api/v1/agent/configs (the 3.12.3–3.14.4 codingPlanSignature gate is gone)", async () => {
     const fixture = await buildHandshakeFixture();
-    let gateHeaders: Headers | undefined;
+    const fetched: string[] = [];
     const manager = new ClientSigningManager({
-      identity: { ...identity, deviceMid: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0" },
       fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input instanceof Request ? input.url : input);
-        if (url === GATE_URL) {
-          gateHeaders = new Headers(init?.headers);
-          return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 });
-        }
+        fetched.push(url);
         if (url === HANDSHAKE_URL) {
           return new Response(JSON.stringify({ code: 200, data: { privateCipher: fixture.cipherB64 } }), { status: 200 });
         }
         throw new Error(`unexpected fetch: ${url}`);
       }) as unknown as typeof fetch,
     });
-    await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
-    expect(gateHeaders).toBeDefined();
-    expect(gateHeaders!.get("x-api-key")).toBe(CRED);
-    // 3.12.3: the gate fetch reuses the g6n LLM header set — X-ZCode-Agent
-    // present, X-Device-Mid absent.
-    expect(gateHeaders!.get("x-zcode-agent")).toBe("glm");
-    expect(gateHeaders!.get("x-device-mid")).toBeNull();
-    expect(gateHeaders!.get("accept")).toBeNull();
-    expect(gateHeaders!.get("user-agent")).toBe("ZCode/3.8.1");
+    const signed = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
+    expect(pair(signed, "X-Client-Sig")).toBeDefined();
+    expect(fetched).toEqual([HANDSHAKE_URL]);
+    expect(fetched.some((u) => u === GATE_URL)).toBeFalse();
   });
 
   it("re-emits the session id in canonical X-Session-Id form after X-Client-Sig on signed requests", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     const signed = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
 
     const canonical = signed.filter(([k]) => k === "X-Session-Id");
@@ -182,135 +165,60 @@ describe("ClientSigningManager.sign", () => {
     expect(sessionIndex).toBe(sigIndex + 1);
   });
 
-  it("reuses the handshake key across sign() calls (one handshake, cached gate)", async () => {
+  it("reuses the handshake key across sign() calls (one handshake total)", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
-    expect(calls.gate).toBe(1);
     expect(calls.handshakes.length).toBe(1);
-  });
-
-  it("does not sign when the gate is disabled", async () => {
-    const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls, false) });
-    const signed = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
-    expect(calls.handshakes.length).toBe(0);
-    expect(signed).toBe(BASE_PAIRS);
   });
 
   it("never signs exempt paths (start-plan gateway, off-peak)", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     for (const url of [STARTPLAN_URL, OFFPEAK_URL, "https://api.z.ai/api/v1/zcode-plan/chat/completions/"]) {
       const signed = await manager.sign(url, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
       expect(signed).toBe(BASE_PAIRS);
     }
-    expect(calls.gate).toBe(0);
     expect(calls.handshakes.length).toBe(0);
   });
 
-  it("skips signing for legacy separator-less credentials without probing the gate", async () => {
+  it("skips signing for legacy separator-less credentials without a handshake", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     const signed = await manager.sign(LLM_URL, BASE_PAIRS, { credential: "bigmodelkeyonly", appVersion: "3.8.1" });
     expect(signed).toBe(BASE_PAIRS);
-    expect(calls.gate).toBe(0);
     expect(calls.handshakes.length).toBe(0);
   });
 
-  it("skips signing when no x-session-id header is present, without probing the gate", async () => {
+  it("skips signing when no x-session-id header is present", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     const noSession = BASE_PAIRS.filter(([k]) => k !== "x-session-id");
     const signed = await manager.sign(LLM_URL, noSession, { credential: CRED, appVersion: "3.8.1" });
     expect(signed).toBe(noSession);
-    expect(calls.gate).toBe(0);
+    expect(calls.handshakes.length).toBe(0);
   });
 
   it("fails open when the handshake endpoint errors", async () => {
-    const calls: MockCalls = { gate: 0, handshakes: [] };
+    const calls: MockCalls = { handshakes: [] };
     const manager = new ClientSigningManager({
-      identity,
-      fetchImpl: (async (input: RequestInfo | URL) => {
-        const url = String(input instanceof Request ? input.url : input);
-        if (url === GATE_URL) {
-          calls.gate++;
-          return new Response(JSON.stringify({ code: 0, data: { codingPlanSignature: { enable: true } } }), { status: 200 });
-        }
+      fetchImpl: (async () => {
         throw new Error("handshake unreachable");
       }) as unknown as typeof fetch,
     });
     const signed = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     expect(signed).toBe(BASE_PAIRS);
   });
-
-  it("negative-caches a failing gate (one retry per cooldown window)", async () => {
-    let gateCalls = 0;
-    const manager = new ClientSigningManager({
-      identity,
-      fetchImpl: (async (input: RequestInfo | URL) => {
-        const url = String(input instanceof Request ? input.url : input);
-        if (url === GATE_URL) {
-          gateCalls++;
-          throw new Error("gate unreachable");
-        }
-        throw new Error("unexpected");
-      }) as unknown as typeof fetch,
-    });
-    await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
-    await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
-    expect(gateCalls).toBe(1);
-  });
-
-  it("re-probes an unavailable gate (non-2xx) only after the short cooldown", async () => {
-    let clock = 0;
-    let gateCalls = 0;
-    const manager = new ClientSigningManager({
-      identity,
-      now: () => clock,
-      fetchImpl: (async () => {
-        gateCalls++;
-        return new Response("boom", { status: 500 });
-      }) as unknown as typeof fetch,
-    });
-    const cred = { credential: CRED, appVersion: "3.8.1" };
-    await manager.sign(LLM_URL, BASE_PAIRS, cred);
-    await manager.sign(LLM_URL, BASE_PAIRS, cred);
-    expect(gateCalls).toBe(1); // within the 30s unavailable cooldown
-    clock = 31_000;
-    await manager.sign(LLM_URL, BASE_PAIRS, cred);
-    expect(gateCalls).toBe(2); // cooldown expired: re-probed
-  });
-
-  it("deduplicates concurrent gate probes into a single fetch", async () => {
-    let gateCalls = 0;
-    const manager = new ClientSigningManager({
-      identity,
-      fetchImpl: (async () => {
-        gateCalls++;
-        await new Promise((r) => setTimeout(r, 10));
-        return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 });
-      }) as unknown as typeof fetch,
-    });
-    const cred = { credential: CRED, appVersion: "3.8.1" };
-    await Promise.all([
-      manager.sign(LLM_URL, BASE_PAIRS, cred),
-      manager.sign(LLM_URL, BASE_PAIRS, cred),
-      manager.sign(LLM_URL, BASE_PAIRS, cred),
-    ]);
-    expect(gateCalls).toBe(1);
-  });
 });
 
 describe("ClientSigningManager.isVerifyFailure", () => {
-  const manager = new ClientSigningManager({ identity });
+  const manager = new ClientSigningManager();
 
   it("matches 401 envelopes carrying VERIFY codes in msg/reason/data/error", async () => {
     for (const body of [
@@ -338,8 +246,8 @@ describe("sendWithClientSigning", () => {
 
   it("returns the first successful response without retries", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     const sends: UpstreamHeaderPair[][] = [];
     const resp = await sendWithClientSigning(manager, {
       url: LLM_URL,
@@ -358,8 +266,8 @@ describe("sendWithClientSigning", () => {
 
   it("re-handshakes and retries once after a VERIFY 401", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     const sends: UpstreamHeaderPair[][] = [];
     const resp = await sendWithClientSigning(manager, {
       url: LLM_URL,
@@ -379,8 +287,8 @@ describe("sendWithClientSigning", () => {
 
   it("falls back to unsigned after two VERIFY 401s and bypasses future signing", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     const sends: UpstreamHeaderPair[][] = [];
     const resp = await sendWithClientSigning(manager, {
       url: LLM_URL,
@@ -399,7 +307,6 @@ describe("sendWithClientSigning", () => {
 
     const afterBypass = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     expect(afterBypass).toBe(BASE_PAIRS);
-    expect(calls.gate).toBe(1);
   });
 
   it("sends as-is when the manager is null (feature disabled)", async () => {
@@ -421,8 +328,8 @@ describe("sendWithClientSigning", () => {
 
   it("does not apply the retry ladder when the request was never signed (exempt path)", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     const sends: UpstreamHeaderPair[][] = [];
     const resp = await sendWithClientSigning(manager, {
       url: STARTPLAN_URL,
@@ -436,15 +343,15 @@ describe("sendWithClientSigning", () => {
     });
     expect(resp.status).toBe(401);
     expect(sends.length).toBe(1);
-    expect(calls.gate).toBe(0);
+    expect(calls.handshakes.length).toBe(0);
   });
 });
 
 describe("poW nonce/format details", () => {
   it("nonce uses crypto randomness (two signs differ)", async () => {
     const fixture = await buildHandshakeFixture();
-    const calls: MockCalls = { gate: 0, handshakes: [] };
-    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({ fetchImpl: signingFetchFixture(fixture, calls) });
     const a = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     const b = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     expect(pair(a, "X-Client-Nonce")).not.toBe(pair(b, "X-Client-Nonce"));

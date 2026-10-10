@@ -79,7 +79,6 @@ const DEFAULTS = {
   ENDPOINT_ROUTING_ENABLED: true,
   ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
   CLIENT_SIGNING_ENABLED: true,
-  CLIENT_SIGNING_ORIGIN: "https://zcode.z.ai",
 };
 
 /** Printable-ASCII gate copied from the ZCode bundle's `rYn` helper. */
@@ -282,12 +281,8 @@ function resolveEndpointRoutingConfig(raw: unknown): EndpointRoutingConfig {
 function resolveClientSigningConfig(raw: unknown): ClientSigningConfig {
   const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
   const enabledEnv = process.env[ENV.CLIENT_SIGNING_ENABLED];
-  const origin = (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLIENT_SIGNING_ORIGIN).trim()
-    || DEFAULTS.CLIENT_SIGNING_ORIGIN;
-  validateOrigin(origin, "clientSigning.origin");
   return {
     enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.CLIENT_SIGNING_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLIENT_SIGNING_ENABLED),
-    origin,
   };
 }
 

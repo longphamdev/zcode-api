@@ -93,16 +93,15 @@ endpointRouting:
   enabled: true
   origin: "https://zcode.z.ai"
 
-# Client request signing V4 (mirrors the ZCode 3.9.1 ClientRequestSigningV4Signer).
-# When enabled, the proxy probes {origin}/api/v1/agent/configs (cached 1h) and,
-# only if the server sets data.codingPlanSignature.enable=true, signs coding-plan
-# requests: handshake against {provider}/api/paas/c1f3a7e2/v2/client, Ed25519
-# signature + proof-of-work headers on every request, fail-open retry ladder
-# (two 401 VERIFY rejections -> permanent unsigned bypass). Start-plan and
-# off-peak paths are never signed. Env override: ZCODE_CLIENT_SIGNING=false.
+# Client request signing V4 (mirrors the ZCode 3.15.1 static signing rule).
+# When enabled, coding-plan requests are always signed: handshake against
+# {provider}/api/paas/c1f3a7e2/v2/client, Ed25519 signature + proof-of-work
+# headers on every request, fail-open retry ladder (two 401 VERIFY rejections
+# -> permanent unsigned bypass). Start-plan and off-peak paths are never
+# signed (the old agent/configs codingPlanSignature gate is gone on both
+# sides). Env override: ZCODE_CLIENT_SIGNING=false.
 clientSigning:
   enabled: true
-  origin: "https://zcode.z.ai"
 
 logging:
   level: info

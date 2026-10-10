@@ -14,25 +14,30 @@
  * a 2026-09-18 session briefly "corrected" these to spaces that way.
  *
  * Per-request Ed25519 signatures + proof-of-work over coding-plan traffic.
- * Everything here is fail-open, matching the client: gate disabled/unreachable
- * → unsigned; handshake failure → unsigned; two consecutive 401 VERIFY_*
- * rejections → permanent bypass for that (origin, credential) pair.
+ * Everything here is fail-open, matching the client: handshake failure →
+ * unsigned; two consecutive 401 VERIFY_* rejections → permanent bypass for
+ * that (origin, credential) pair.
  *
- * Start-plan gateway and off-peak LLM paths are permanently exempt (the
- * client's `isUnsignedModelRequestPath` set). Credentials without the
- * `{apiKeyId}.{apiKeySecret}` separator (legacy bigmodel keys issued before
- * the copy endpoint returned secretKeys) are silently skipped — the client
- * hard-throws there; skipping is a deliberate fail-open deviation. Both
- * providers now issue two-part keys, which sign normally.
+ * Enablement mirrors ZCode 3.15.1 (`_reverse/NOTEPAD.md` §B): the client no
+ * longer probes `agent/configs` for `data.codingPlanSignature` — signing is a
+ * static client-side rule (`TUs` requiresClientRequestSigning): coding-plan
+ * credentials (individual/team/API-key) are always signed; start-plan,
+ * off-peak and highspeed modes are never signed. This proxy applies the same
+ * rule structurally: the manager is wired only into the coding-plan request
+ * paths, and the client's `isUnsignedModelRequestPath` set below exempts the
+ * start-plan gateway + off-peak paths as defense-in-depth. The 3.12.3–3.14.4
+ * gate probe (GET /api/v1/agent/configs, 1h TTL) was removed in lockstep.
+ *
+ * Credentials without the `{apiKeyId}.{apiKeySecret}` separator (legacy
+ * bigmodel keys issued before the copy endpoint returned secretKeys) are
+ * silently skipped — the client hard-throws there; skipping is a deliberate
+ * fail-open deviation. Both providers now issue two-part keys, which sign
+ * normally.
  *
  * Full protocol: `_reverse/NOTEPAD.md` "Client Request Signing V4".
  */
 import type { UpstreamHeaderPair } from "./upstream.js";
-import { buildLlmIdentityHeaders, identityCacheKey } from "./identity.js";
-import type { ProxyIdentity } from "../config/types.js";
 
-const DEFAULT_ORIGIN = "https://zcode.z.ai";
-const GATE_PATH = "/api/v1/agent/configs";
 const HANDSHAKE_PATH = "/api/paas/c1f3a7e2/v2/client";
 const APP_ID = "zcode";
 const POW_BITS = 8;
@@ -42,12 +47,6 @@ const KDF_SALT = "WD_CLIENT_SIGN_KDF_SALT";
 const KDF_INFO_HMAC = "getSignKey_hmac";
 const KDF_INFO_ED25519 = "ed25519_priv";
 const HANDSHAKE_METHOD = "get_sign_key";
-const GATE_TTL_MS = 3_600_000;
-/** Negative-cache cooldown after a gate fetch network failure. */
-const GATE_FAILURE_COOLDOWN_MS = 60_000;
-/** Negative-cache cooldown for "unavailable" gate responses (non-2xx / bad envelope). */
-const GATE_UNAVAILABLE_COOLDOWN_MS = 30_000;
-const GATE_TIMEOUT_MS = 15_000;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const VERIFY_SIGNATURE_INVALID = "VERIFY_SIGNATURE_INVALID";
 const VERIFY_APIKEY_EXPIRED = "VERIFY_APIKEY_EXPIRED";
@@ -85,10 +84,6 @@ interface ParsedCredential {
 }
 
 interface SignerState {
-  gateEnabled: boolean;
-  gateExpiresAt: number;
-  gateNegUntil: number;
-  gatePromise?: Promise<boolean>;
   privKey?: CryptoKey;
   handshake?: Promise<CryptoKey>;
   epoch: number;
@@ -242,33 +237,24 @@ function findHeader(pairs: UpstreamHeaderPair[], name: string): string | undefin
 }
 
 export class ClientSigningManager {
-  private readonly gateUrl: string;
-  private readonly identity: ProxyIdentity;
   private readonly fetchImpl: typeof fetch;
-  private readonly now: () => number;
   private readonly states = new Map<string, SignerState>();
   private readonly notedKeys = new Set<string>();
   onEvent?: (message: string) => void;
 
   constructor(opts: {
-    identity: ProxyIdentity;
-    origin?: string;
     fetchImpl?: typeof fetch;
-    now?: () => number;
     onEvent?: (message: string) => void;
-  }) {
-    this.gateUrl = `${(opts.origin?.trim() || DEFAULT_ORIGIN).replace(/\/+$/u, "")}${GATE_PATH}`;
-    this.identity = opts.identity;
+  } = {}) {
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.now = opts.now ?? Date.now;
     this.onEvent = opts.onEvent;
   }
 
   /**
    * Add the V4 signing headers to an upstream header-pair list. Returns the
    * input pairs unchanged whenever signing does not apply: exempt path,
-   * bypass, non-signable credential, missing session id, gate off/unreachable,
-   * or handshake failure. Never throws.
+   * bypass, non-signable credential, missing session id, or handshake
+   * failure. Never throws.
    */
   async sign(url: string, pairs: UpstreamHeaderPair[], cred: SigningCredential): Promise<UpstreamHeaderPair[]> {
     return (await this.signWithStatus(url, pairs, cred)).pairs;
@@ -278,8 +264,8 @@ export class ClientSigningManager {
    * `sign` with a `signed` flag so the retry ladder can distinguish
    * "signed but rejected" from "never signed" without identity checks on the
    * returned array reference. Cheap local eligibility checks (credential
-   * separator, session id) run BEFORE the gate probe so non-signable
-   * credentials never pay for network fetches.
+   * separator, session id) run BEFORE the handshake fetch so non-signable
+   * credentials never pay for network round-trips.
    */
   async signWithStatus(url: string, pairs: UpstreamHeaderPair[], cred: SigningCredential): Promise<SignOutcome> {
     let parsed: URL;
@@ -307,8 +293,6 @@ export class ClientSigningManager {
       this.noteOnce(stateKey, "upstream request has no x-session-id — signing skipped");
       return { pairs, signed: false };
     }
-
-    if (!(await this.gateEnabled(state, cred))) return { pairs, signed: false };
 
     let privateKey: CryptoKey;
     try {
@@ -417,71 +401,10 @@ export class ClientSigningManager {
   private stateFor(stateKey: string): SignerState {
     let state = this.states.get(stateKey);
     if (!state) {
-      state = { gateEnabled: false, gateExpiresAt: 0, gateNegUntil: 0, epoch: 0, bypass: false };
+      state = { epoch: 0, bypass: false };
       this.states.set(stateKey, state);
     }
     return state;
-  }
-
-  private async gateEnabled(state: SignerState, cred: SigningCredential): Promise<boolean> {
-    const now = this.now();
-    if (state.gateExpiresAt > now) return state.gateEnabled;
-    if (state.gateNegUntil > now) return false;
-    if (state.gatePromise) return state.gatePromise;
-    const promise = this.probeGate(state, cred).finally(() => {
-      if (state.gatePromise === promise) state.gatePromise = undefined;
-    });
-    state.gatePromise = promise;
-    return promise;
-  }
-
-  private async probeGate(state: SignerState, cred: SigningCredential): Promise<boolean> {
-    const now = this.now();
-    let outcome: "enabled" | "disabled" | "unavailable";
-    try {
-      outcome = await this.fetchGate(cred);
-    } catch {
-      state.gateNegUntil = now + GATE_FAILURE_COOLDOWN_MS;
-      return false;
-    }
-    state.gateEnabled = outcome === "enabled";
-    if (outcome === "unavailable") {
-      // proxy deviation: the client re-probes unavailable gates on every request
-      // from a UI process; on the proxy hot path a short negative cache bounds
-      // the worst-case per-request latency to one probe per window
-      state.gateNegUntil = now + GATE_UNAVAILABLE_COOLDOWN_MS;
-    } else {
-      state.gateExpiresAt = now + GATE_TTL_MS;
-      state.gateNegUntil = 0;
-    }
-    if (state.gateEnabled) this.onEvent?.("client-signing: server enabled codingPlanSignature — signing requests");
-    return state.gateEnabled;
-  }
-
-  private async fetchGate(cred: SigningCredential): Promise<"enabled" | "disabled" | "unavailable"> {
-    // 3.12.3: the gate fetch reuses `g6n` (the LLM source-header set, WITH
-    // X-ZCode-Agent inline and no X-Device-Mid) via `ESs`; the request adds
-    // only `x-api-key` — no Accept header.
-    const identityHeaders = buildLlmIdentityHeaders(this.identity);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GATE_TIMEOUT_MS);
-    try {
-      const resp = await this.fetchImpl(this.gateUrl, {
-        method: "GET",
-        headers: { ...identityHeaders, "x-api-key": cred.credential },
-        redirect: "manual",
-        signal: controller.signal,
-      });
-      if (!resp.ok) return "unavailable";
-      const parsed = await resp.json() as Record<string, unknown>;
-      if (!parsed || parsed.code !== 0) return "unavailable";
-      const data = parsed.data as Record<string, unknown> | undefined;
-      if (!data || !Object.prototype.hasOwnProperty.call(data, "codingPlanSignature")) return "disabled";
-      const signature = data.codingPlanSignature as Record<string, unknown> | undefined;
-      return signature?.enable === true ? "enabled" : "disabled";
-    } finally {
-      clearTimeout(timer);
-    }
   }
 
   private async ensurePrivateKey(
@@ -580,29 +503,23 @@ export async function sendWithClientSigning(
 }
 
 let defaultSigner: ClientSigningManager | null = null;
-let defaultSignerKey = "";
 
 /**
- * Process-wide signing manager, shared across requests (gate + key caches).
- * Returns `null` when `clientSigning.enabled` is false. Recreated when the
- * relevant config values change (Android `setConfig`) — keyed on the full
- * identity because the manager embeds it in gate-fetch headers.
+ * Process-wide signing manager, shared across requests (handshake key caches).
+ * Returns `null` when `clientSigning.enabled` is false. The manager holds no
+ * config-derived state (3.15.1 removed the agent/configs gate), so a single
+ * instance serves every request regardless of identity/config churn.
  */
 export function getDefaultClientSigning(config: {
-  clientSigning: { enabled: boolean; origin: string };
-  identity: ProxyIdentity;
+  clientSigning: { enabled: boolean };
 }): ClientSigningManager | null {
   if (!config.clientSigning.enabled) return null;
-  const key = `${config.clientSigning.origin}\n${identityCacheKey(config.identity)}`;
-  if (!defaultSigner || key !== defaultSignerKey) {
+  if (!defaultSigner) {
     defaultSigner = new ClientSigningManager({
-      identity: config.identity,
-      origin: config.clientSigning.origin,
-      // Fail-open decisions (gate off, handshake failure, VERIFY bypass) are
-      // otherwise silent in production — surface each once per (origin, cred).
+      // Fail-open decisions (handshake failure, VERIFY bypass) are otherwise
+      // silent in production — surface each once per (origin, cred).
       onEvent: (message) => console.log(message),
     });
-    defaultSignerKey = key;
   }
   return defaultSigner;
 }
