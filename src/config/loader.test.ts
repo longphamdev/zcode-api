@@ -125,7 +125,7 @@ logging:
     expect(cfg.logging.level).toBe("info");
     expect(cfg.providers.zai.anthropicBase).toBe("https://api.z.ai/api/anthropic");
     expect(cfg.providers.bigmodel.openaiBase).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
-    expect(cfg.clientIdentity).toEqual({ mode: "observe", ttlSeconds: 900, maxSessions: 1024 });
+    expect(cfg.clientIdentity).toEqual({ mode: "enforce", ttlSeconds: 900, maxSessions: 1024 });
     expect(cfg.responses).toEqual({ enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 });
     expect(cfg.mcp).toEqual({ enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.z.ai" } });
     expect(cfg.async).toEqual({

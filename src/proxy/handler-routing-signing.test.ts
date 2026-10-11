@@ -178,4 +178,34 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
     expect(capturedHeaders!.get("x-client-pow")).toBeNull();
     expect(capturedHeaders!.get("x-app-id")).toBeNull();
   });
+
+  // Regression: exact trace contexts without a resolvable session id
+  // (degenerate bodies / requestId-only requests) must still carry a
+  // synthesized x-session-id so coding-plan signing never silently skips.
+  for (const [label, cfg, headers, body] of [
+    ["enforce + degenerate body", { ...TEST_CONFIG, clientIdentity: { mode: "enforce" as const, ttlSeconds: 900, maxSessions: 1024 } }, {}, JSON.stringify({ model: "glm-4.6", max_tokens: 32 })],
+    ["observe + requestId-only", { ...TEST_CONFIG, clientIdentity: { mode: "observe" as const, ttlSeconds: 900, maxSessions: 1024 } }, { "x-request-id": "req_only_1" }, JSON.stringify({ model: "glm-4.6", max_tokens: 32, messages: [{ role: "user", content: "hi" }] })],
+  ] as const) {
+    it(`signs coding-plan requests with no resolvable session (${label})`, async () => {
+      const { manager } = await buildSigningManagerFixture();
+      let capturedHeaders: Headers | undefined;
+      const resp = await proxyRequest(new Request("http://localhost:8080/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body,
+      }), "anthropic", {
+        config: cfg,
+        auth: oauthAuth(CRED),
+        fetchImpl: Object.assign(async (input: RequestInfo | URL) => {
+          capturedHeaders = input instanceof Request ? input.headers : new Headers();
+          return anthropicOk();
+        }, { preconnect: () => {} }) as typeof fetch,
+        endpointRouting: null,
+        clientSigning: manager,
+      });
+      expect(resp.status).toBe(200);
+      expect(capturedHeaders!.get("x-session-id")).toMatch(/^[0-9a-f-]{36}$/);
+      expect(capturedHeaders!.get("x-client-sig")).toBeDefined();
+    });
+  }
 });

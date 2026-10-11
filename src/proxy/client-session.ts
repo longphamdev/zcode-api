@@ -140,13 +140,39 @@ function result(source: ClientSessionSource, action: ClientSessionAction, node: 
   };
 }
 
+// Explicit session-id headers, tool-specific before generic (first match wins).
+// Evidence (2026-10-11, real-source survey):
+// - x-opencode-session            OpenCode harness
+// - x-claude-code-session-id      Claude Code 2.1.87+ (gateway protocol; also
+//                                 paired with x-app: cli / x-stainless-*)
+// - claude-code-session-id        non-x variant some Claude Code SDK clients send
+// - x-vscode-sessionid            VSCode family — Google Antigravity sends it
+//                                 per app launch (agproxy/Antigravity-Manager 抓包)
+// - x-session-id                  generic convention
+// - x-parent-session-id           subagent lineage
+// - helicone-session-id           Helicone proxy convention
+// Not added: x-machine-id (machine-granular — would fuse every conversation of
+// a machine into one affinity session); x-claude-code-agent-id/-parent-agent-id
+// (agent lineage, not conversation identity). SillyTavern has NO native session
+// header (thin-server: its Express backend sends only auth/content-type plus
+// user-configured additional headers — users can set x-session-id themselves).
+const SESSION_ID_HEADERS = [
+  "x-opencode-session",
+  "x-claude-code-session-id",
+  "claude-code-session-id",
+  "x-vscode-sessionid",
+  "x-session-id",
+  "x-parent-session-id",
+  "helicone-session-id",
+];
+
 function requestTraceContext(req: Request, body: string | undefined): ExplicitTraceContext {
   const bodyTrace = bodyMetadataTrace(body);
   return {
-    requestId: firstHeader(req.headers, ["x-request-id"]) ?? bodyTrace.requestId,
+    requestId: firstHeader(req.headers, ["x-request-id", "x-client-request-id"]) ?? bodyTrace.requestId,
     traceId: firstHeader(req.headers, ["x-zcode-trace-id"]) ?? bodyTrace.traceId,
     queryId: firstHeader(req.headers, ["x-query-id"]) ?? bodyTrace.queryId,
-    sessionId: firstHeader(req.headers, ["x-opencode-session", "x-claude-code-session-id", "x-session-id", "x-parent-session-id", "helicone-session-id"])
+    sessionId: firstHeader(req.headers, SESSION_ID_HEADERS)
       ?? bodyTrace.sessionId,
   };
 }

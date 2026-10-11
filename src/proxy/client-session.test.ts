@@ -69,6 +69,31 @@ describe("client session resolver", () => {
     expect(result.upstreamSessionId).toBe("claude_session_1");
   });
 
+  it("recognizes the expanded explicit-session header set (Claude Code non-x, VSCode family)", () => {
+    const resolver = createClientSessionResolver();
+    const body = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] });
+
+    // Claude Code SDK variant without the x- prefix
+    expect(resolver.resolve(makeReq(body, { "claude-code-session-id": "cc_nox_1" }), body, "anthropic", "glm-4.6", CFG)
+      .sessionId).toBe("cc_nox_1");
+    // VSCode family (Google Antigravity sends x-vscode-sessionid per launch)
+    expect(resolver.resolve(makeReq(body, { "x-vscode-sessionid": "vs_sess_1" }), body, "anthropic", "glm-4.6", CFG)
+      .sessionId).toBe("vs_sess_1");
+    // Claude Code per-request id feeds requestId detection
+    expect(resolver.resolve(makeReq(body, { "x-client-request-id": "ccr_1" }), body, "anthropic", "glm-4.6", CFG)
+      .requestId).toBe("ccr_1");
+  });
+
+  it("prefers tool-specific session headers over the generic x-session-id", () => {
+    const resolver = createClientSessionResolver();
+    const body = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] });
+    const result = resolver.resolve(makeReq(body, {
+      "x-vscode-sessionid": "vs_specific_1",
+      "x-session-id": "generic_1",
+    }), body, "anthropic", "glm-4.6", CFG);
+    expect(result.sessionId).toBe("vs_specific_1");
+  });
+
   it("keeps existing snake_case metadata session fallbacks", () => {
     const resolver = createClientSessionResolver();
     const body = JSON.stringify({

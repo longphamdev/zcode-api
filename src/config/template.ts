@@ -74,12 +74,13 @@ identity:
   # Leave empty on Android — the app injects ZCODE_IDENTITY_DEVICE_MID instead.
   deviceMid: ""
 
-# Local client-session inference for cache-affinity experiments.
-# "observe" (default) logs inferred sessions in debug mode but does not change
-# upstream x-session-id. "enforce" reuses a stable x-session-id for inferred
-# coding-plan sessions. "off" disables inference entirely.
+# Local client-session inference for upstream session affinity.
+# "enforce" (default) forwards a stable x-session-id for inferred sessions
+# (cache affinity + closer to the official client, whose signing template
+# always carries a session id). "observe" logs inferred sessions in debug
+# mode without changing upstream x-session-id. "off" disables inference.
 clientIdentity:
-  mode: observe
+  mode: enforce
   ttlSeconds: 900
   maxSessions: 1024
 

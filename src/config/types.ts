@@ -50,7 +50,11 @@ export interface ProxyIdentity {
 
 /** Local client-session inference mode for upstream session affinity. */
 export interface ClientIdentityConfig {
-  /** "observe" logs/instruments only; "enforce" reuses upstream x-session-id; "off" disables inference. */
+  /**
+   * "enforce" (default) forwards a stable x-session-id for inferred sessions
+   * (cache affinity; the official signing template always carries a session
+   * id); "observe" logs only; "off" disables inference.
+   */
   mode: "off" | "observe" | "enforce";
   /** In-memory session TTL in seconds. */
   ttlSeconds: number;

@@ -108,8 +108,9 @@ export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "c
  *
  * Trace/attribution headers mirror the bundle's `Bdt`
  * ("createModelRequestAttributionHeaders") when an explicit/enforced trace
- * context exists. Default observe mode keeps the prior synthesized query/session
- * behavior for compatibility.
+ * context exists. Default enforce mode forwards the inferred conversation
+ * session id; sessions without a resolvable id fall back to a synthesized
+ * one (coding-plan must always carry x-session-id — signing requires it).
  */
 export function buildAuthHeaders(
   format: Format,
@@ -151,11 +152,18 @@ export function buildAuthHeaders(
 
 function buildTraceHeaders(plan: "coding-plan" | "start-plan", clientSession?: UpstreamClientSession): Record<string, string> {
   if (shouldUseExactTraceHeaders(plan, clientSession)) {
+    // Degenerate bodies (lineage failed) and requestId-only requests resolve
+    // to an exact context with NO session id — coding-plan would then ship
+    // without x-session-id and signing would skip (client-signing requires
+    // it), violating the "coding-plan 必签" invariant. Synthesize like the
+    // fallback branch; start-plan is never signed and keeps the omission.
+    const sessionId = sessionIdForHeader(clientSession)
+      ?? (plan === "coding-plan" ? crypto.randomUUID() : undefined);
     return buildZcodeTraceHeaders({
       requestId: clientSession?.requestId,
       traceId: clientSession?.traceId,
       queryId: clientSession?.queryId,
-      sessionId: sessionIdForHeader(clientSession),
+      sessionId,
     });
   }
 
