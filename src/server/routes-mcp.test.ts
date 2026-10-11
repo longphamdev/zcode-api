@@ -24,7 +24,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}, mcpGateway: McpGateway
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
     endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
-    clientSigning: { enabled: false },
+    clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
     mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: mcpGateway },
     async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
     claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },

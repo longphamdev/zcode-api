@@ -43,7 +43,15 @@ interface ExplicitTraceContext {
 }
 
 export interface ClientSessionResolver {
-  resolve(req: Request, body: string | undefined, format: Format, model: string, config: ClientIdentityConfig): ClientSessionResult;
+  /**
+   * @param body canonical body for lineage hashing — the POST-TRANSLATION
+   *   Anthropic-shaped upstream body (session identity aligns with the
+   *   upstream conversation, not the client dialect).
+   * @param traceBody raw client body for explicit trace-metadata detection
+   *   (client attribution intent lives in the client's own body; OpenAI→
+   *   Anthropic translation drops foreign metadata fields).
+   */
+  resolve(req: Request, body: string | undefined, format: Format, model: string, config: ClientIdentityConfig, traceBody?: string): ClientSessionResult;
 }
 
 export function createClientSessionResolver(now: () => number = () => Date.now()): ClientSessionResolver {
@@ -87,11 +95,11 @@ export function createClientSessionResolver(now: () => number = () => Date.now()
   }
 
   return {
-    resolve(req, body, format, model, config) {
+    resolve(req, body, format, model, config, traceBody) {
       if (config.mode === "off") return { source: "none", action: "off", confidence: 0 };
 
       prune(config);
-      const explicitTrace = requestTraceContext(req, body);
+      const explicitTrace = requestTraceContext(req, traceBody ?? body);
       if (explicitTrace.sessionId) return explicitResult(explicitTrace, config);
 
       const canonical = canonicalize(body, format, model);

@@ -16,7 +16,10 @@ import {
 
 export interface ResolveSessionContextInput {
   clientReq: Request;
+  /** Canonical body for lineage hashing — post-translation Anthropic shape. */
   body: string | undefined;
+  /** Raw client body for explicit trace-metadata detection (defaults to `body`). */
+  traceBody?: string;
   upstreamFormat: Format;
   model: string;
   config: ProxyConfig;
@@ -36,7 +39,7 @@ export interface SessionHeaderContext {
 export function resolveSessionContext(input: ResolveSessionContextInput): ClientSessionResult | undefined {
   if (input.config.clientIdentity.mode === "off") return undefined;
   const resolver = input.resolver ?? defaultClientSessionResolver;
-  return resolver.resolve(input.clientReq, input.body, input.upstreamFormat, input.model, input.config.clientIdentity);
+  return resolver.resolve(input.clientReq, input.body, input.upstreamFormat, input.model, input.config.clientIdentity, input.traceBody);
 }
 
 export function shouldUseExactTraceHeaders(

@@ -20,6 +20,16 @@ import { getProvider } from "../provider/providers.js";
 import { buildUpstreamHeaderPairs, buildUpstreamRequest, type UpstreamHeaderPair } from "./upstream.js";
 import { getDefaultEndpointRouting, type EndpointRoutingService } from "./endpoint-routing.js";
 import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManager } from "./client-signing.js";
+import {
+  applyHighspeedCardHeaders,
+  getDefaultHighspeedManager,
+  highspeedAuthFrom,
+  isHighspeedCardRejection,
+  rewriteBodyModel,
+  type HighspeedAuth,
+  type HighspeedCard,
+  type HighspeedManager,
+} from "../highspeed/manager.js";
 import { credentialString } from "../auth/types.js";
 import { sendOrderedUpstreamRequest, orderedAdvertisedCodings } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
@@ -63,6 +73,8 @@ export interface ProxyHandlerOptions {
   endpointRouting?: EndpointRoutingService | null;
   /** Override the process-wide client signing manager (for testing). `null` disables. */
   clientSigning?: ClientSigningManager | null;
+  /** Override the process-wide highspeed card manager (for testing). `null` disables. */
+  highspeed?: HighspeedManager | null;
 }
 
 /**
@@ -139,11 +151,6 @@ export async function proxyRequest(
   const translateAnthropicToOpenAI = false;
   const translateOpenAIToAnthropic = format === "openai";
   const upstreamFormat: Format = "anthropic";
-  const clientSession = resolveSessionContext({ clientReq, body, upstreamFormat, model: meta.model, config });
-  if (debug && clientSession) {
-    const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
-    debugLine(reqId, `clientIdentity source=${clientSession.source} action=${clientSession.action} confidence=${clientSession.confidence.toFixed(2)} session=${shortSession}`);
-  }
 
   let upstreamBody = body;
   if (translateOpenAIToAnthropic) {
@@ -158,12 +165,45 @@ export async function proxyRequest(
     if (debug) debugLine(reqId, `translated Anthropic→OpenAI (bytes=${upstreamBody?.length ?? 0})`);
   }
 
+  // Session affinity 在转换后的 anthropic 侧计算：上游请求恒为 Anthropic
+  // 形状，OpenAI 客户端与 Anthropic 客户端的同一逻辑对话得到同构的
+  // canonical 身份（hash 谱系/任务身份与上游会话对齐，而非客户端方言）。
+  const clientSession = resolveSessionContext({ clientReq, body: upstreamBody, traceBody: body, upstreamFormat, model: meta.model, config });
+  if (debug && clientSession) {
+    const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
+    debugLine(reqId, `clientIdentity source=${clientSession.source} action=${clientSession.action} confidence=${clientSession.confidence.toFixed(2)} session=${shortSession}`);
+  }
+
   // Bundle `E2e` fires for EVERY anthropic-kind request (both plans) — the
   // injected user_id is the device/session blob, never the account uuid.
   const metadataUserId = buildAnthropicMetadataUserId(config.identity.deviceMid, clientSession?.sessionId);
-  const transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, metadataUserId, startPlan, provider: config.provider });
+  let transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, metadataUserId, startPlan, provider: config.provider });
   if (debug && transformedBody !== upstreamBody) {
     debugLine(reqId, `body transformed (upstreamFormat=${upstreamFormat}, startPlan=${startPlan}, bytes=${transformedBody?.length ?? 0})`);
+  }
+
+  // ── HighSpeed 加速卡（3.15.1 镜像，默认开）──
+  // coding-plan + 合格模型：懒触发抽卡（affinity task_id）；持卡窗口内改写
+  // 模型为卡上模型并替换鉴权套装（buildHighspeedTurnExecution 同构）。挂卡
+  // 请求不签名（官方静态规则：highspeed mode 永不签名）。
+  const highspeedManager = opts.highspeed !== undefined ? opts.highspeed : getDefaultHighspeedManager(config);
+  let highspeedCard: HighspeedCard | undefined;
+  let highspeedAuth: HighspeedAuth | undefined = undefined;
+  let highspeedOrigBody: string | undefined;
+  let highspeedOrigPairs: UpstreamHeaderPair[] | undefined;
+  if (highspeedManager && !startPlan && highspeedManager.isEligibleModel(meta.model) && transformedBody) {
+    const auth = highspeedAuthFrom(cred);
+    if (auth) {
+      highspeedAuth = auth;
+      highspeedManager.onRequest(meta.model, clientSession?.upstreamSessionId, auth);
+      const card = highspeedManager.activeCard();
+      if (card) {
+        highspeedOrigBody = transformedBody;
+        transformedBody = rewriteBodyModel(transformedBody, card.model);
+        highspeedCard = card;
+        if (debug) debugLine(reqId, `highspeed card applied (${card.cardId.slice(0, 12)}… model=${card.model}, window ${Math.round((card.expiresAt - Date.now()) / 1000)}s)`);
+      }
+    }
   }
 
   let captchaHeaders: Record<string, string> | undefined;
@@ -179,10 +219,27 @@ export async function proxyRequest(
 
   const useOrderedTransport = shouldUseOrderedTransport(config, clientSession, hasCustomFetchImpl);
   let upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, captchaHeaders, clientSession);
+  if (highspeedCard && highspeedAuth) {
+    highspeedOrigPairs = upstreamHeaderPairs;
+    upstreamHeaderPairs = applyHighspeedCardHeaders(upstreamHeaderPairs, highspeedCard, highspeedAuth);
+  }
   let upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
+  if (highspeedCard && highspeedAuth) {
+    // dispatch reuses the pre-built Request whenever the signer returns the
+    // pairs unchanged (unsigned path) — rebuild it from the swapped pairs so
+    // the card headers actually reach the wire (buildUpstreamRequest derives
+    // its own header set internally).
+    upstreamReq = new Request(upstreamReq.url, {
+      method: upstreamReq.method,
+      headers: Object.fromEntries(upstreamHeaderPairs),
+      body: transformedBody ?? undefined,
+    });
+  }
 
   const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(config);
-  const signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(config);
+  let signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(config);
+  // 官方 3.15.1 静态规则：highspeed mode 的推理请求永不签名（`TUs` 返回 false）。
+  if (highspeedCard) signer = null;
   const translateMode = translateOpenAIToAnthropic || translateAnthropicToOpenAI;
   // When the ordered transport must READ the upstream body (translate mode), it
   // has to inflate whatever coding the upstream picks — cap the advertised
@@ -273,7 +330,16 @@ export async function proxyRequest(
         dispatchAttempt += 1;
         const currentReq = dispatchAttempt === 1
           ? upstreamReq
-          : buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
+          : highspeedCard
+            // buildUpstreamRequest derives its own (uncarded) header set; a
+            // carded rebuild must come from the swapped pairs — same reuse
+            // hazard as the attempt-1 rebuild above
+            ? new Request(upstreamReq.url, {
+              method: upstreamReq.method,
+              headers: Object.fromEntries(upstreamHeaderPairs),
+              body: transformedBody ?? undefined,
+            })
+            : buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
         return dispatch(currentReq, upstreamHeaderPairs);
       },
       {
@@ -310,6 +376,31 @@ export async function proxyRequest(
     if (debug) debugError(reqId, "start_plan_jwt_invalid", "JWT rejected upstream");
     printRow(reqId, format, meta, 401, started, headersAt, 0, 0, 0);
     return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
+  }
+
+  // highspeed selectionFallback（官方语义）：挂卡请求收到 401 / biz 3402
+  // （卡过期/拒绝）时弃卡，用原模型 + 常规 coding-plan 鉴权（恢复签名）重发一次。
+  if (highspeedCard && highspeedManager && highspeedOrigBody !== undefined && highspeedOrigPairs !== undefined
+    && (await isHighspeedCardRejection(upstreamResp))) {
+    console.log(`${reqId} highspeed card rejected upstream — falling back to session model`);
+    highspeedManager.dropCard("upstream_rejected");
+    transformedBody = highspeedOrigBody;
+    // restore + re-cap: highspeedOrigPairs was captured BEFORE the ordered-
+    // transport accept-encoding cap, which only ran against the carded pairs
+    // (same re-cap the captcha retry path performs after rebuilding pairs)
+    upstreamHeaderPairs = useOrderedTransport && translateMode
+      ? capOrderedAcceptEncoding(highspeedOrigPairs)
+      : highspeedOrigPairs;
+    signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(config);
+    const fallbackReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
+    try {
+      upstreamResp = await dispatch(fallbackReq, upstreamHeaderPairs);
+    } catch (err) {
+      if (debug) debugError(reqId, "upstream_unreachable", (err as Error).message);
+      printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
+      return errorResponse(502, "upstream_unreachable", (err as Error).message);
+    }
+    if (debug) debugLine(reqId, `highspeed fallback dispatched (status=${upstreamResp.status})`);
   }
 
   // start-plan: on explicit captcha challenge, retry once with a fresh

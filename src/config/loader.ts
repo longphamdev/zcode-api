@@ -4,7 +4,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
-import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig, ClaimConfig } from "./types.js";
+import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig, HighspeedConfig, ClaimConfig } from "./types.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {
@@ -24,6 +24,7 @@ const ENV = {
   CLAIM_POLL_INTERVAL_MS: "ZCODE_CLAIM_POLL_INTERVAL_MS",
   ENDPOINT_ROUTING_ENABLED: "ZCODE_ENDPOINT_ROUTING",
   CLIENT_SIGNING_ENABLED: "ZCODE_CLIENT_SIGNING",
+  HIGHSPEED_ENABLED: "ZCODE_HIGHSPEED_ENABLED",
   MCP_GATEWAY_ENABLED: "ZCODE_MCP_GATEWAY",
   MCP_GATEWAY_ORIGIN: "ZCODE_MCP_GATEWAY_ORIGIN",
 } as const;
@@ -79,6 +80,9 @@ const DEFAULTS = {
   ENDPOINT_ROUTING_ENABLED: true,
   ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
   CLIENT_SIGNING_ENABLED: true,
+  HIGHSPEED_ENABLED: true,
+  HIGHSPEED_ORIGIN: "https://zcode.z.ai",
+  HIGHSPEED_MODELS: ["glm-5.3", "glm-5.2", "glm-5.1"],
 };
 
 /** Printable-ASCII gate copied from the ZCode bundle's `rYn` helper. */
@@ -143,6 +147,7 @@ export function loadConfig(path: string): ProxyConfig {
   const claimCfg = resolveClaimConfig(parsed?.claim);
   const endpointRouting = resolveEndpointRoutingConfig(parsed?.endpointRouting);
   const clientSigning = resolveClientSigningConfig(parsed?.clientSigning);
+  const highspeed = resolveHighspeedConfig(parsed?.highspeed);
 
   const config: ProxyConfig = {
     server: { port, host },
@@ -157,6 +162,7 @@ export function loadConfig(path: string): ProxyConfig {
     responses,
     endpointRouting,
     clientSigning,
+  highspeed,
     mcp,
     async: asyncCfg,
     claim: claimCfg,
@@ -283,6 +289,22 @@ function resolveClientSigningConfig(raw: unknown): ClientSigningConfig {
   const enabledEnv = process.env[ENV.CLIENT_SIGNING_ENABLED];
   return {
     enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.CLIENT_SIGNING_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLIENT_SIGNING_ENABLED),
+  };
+}
+
+function resolveHighspeedConfig(raw: unknown): HighspeedConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const enabledEnv = process.env[ENV.HIGHSPEED_ENABLED];
+  const origin = (typeof obj.origin === "string" ? obj.origin : DEFAULTS.HIGHSPEED_ORIGIN).trim()
+    || DEFAULTS.HIGHSPEED_ORIGIN;
+  validateOrigin(origin, "highspeed.origin");
+  const models = Array.isArray(obj.models)
+    ? obj.models.filter((m): m is string => typeof m === "string" && m.trim().length > 0).map((m) => m.trim())
+    : DEFAULTS.HIGHSPEED_MODELS;
+  return {
+    enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.HIGHSPEED_ENABLED) : resolveBool(obj.enabled, DEFAULTS.HIGHSPEED_ENABLED),
+    origin,
+    models,
   };
 }
 

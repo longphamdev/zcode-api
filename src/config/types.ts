@@ -199,6 +199,24 @@ export interface ClientSigningConfig {
   enabled: boolean;
 }
 
+/**
+ * HighSpeed 加速卡（ZCode 3.15.1 HighspeedCardService 镜像，见
+ * `_reverse/NOTEPAD.md` §C）。coding-plan 请求到达时懒触发抽卡
+ * (`POST {origin}/api/v1/highspeed/draw`)；命中后窗口内（服务端 expires_at，
+ * 设计基准 5min）的合格请求共享该卡：模型改写为卡上模型 + 鉴权替换为
+ * JWT 套装 + `X-Highspeed-Card-ID`，且该请求不签名（官方静态规则）。
+ * task_id 复用 client-session affinity 推断。账号未灰度（503/3404）时
+ * 负缓存 10min，fail-open 回普通转发。
+ */
+export interface HighspeedConfig {
+  /** Enable the highspeed card worker. Default `true` (the official client has no toggle at all). */
+  enabled: boolean;
+  /** Base origin of the highspeed gateway. Default `"https://zcode.z.ai"`. */
+  origin: string;
+  /** Eligible model prefixes that trigger draws / accept cards. Default `["glm-5.3", "glm-5.2", "glm-5.1"]`. */
+  models: string[];
+}
+
 /** Top-level proxy configuration. */
 export interface ProxyConfig {
   server: {
@@ -230,8 +248,10 @@ export interface ProxyConfig {
   responses: ResponsesConfig;
   /** Server-controlled upstream URL remapping (ultra endpoints). */
   endpointRouting: EndpointRoutingConfig;
-  /** Client request signing V4 (Ed25519 + PoW, gate-driven). */
+  /** Client request signing V4 (Ed25519 + PoW, static coding-plan rule). */
   clientSigning: ClientSigningConfig;
+  /** HighSpeed 加速卡 worker (enabled by default — the official client has no toggle). */
+  highspeed: HighspeedConfig;
   /** GLM MCP hosted-tool configuration. */
   mcp: McpConfig;
   /** Async (off-peak / idle-plan) bridge configuration. */
