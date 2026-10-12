@@ -26,15 +26,15 @@ export function parseSSEChunk(raw: string): ParsedSSE[] {
   const blocks = raw.split(SSE_FRAME_SPLIT);
 
   for (const block of blocks) {
-    const lines = block.trim().split("\n").filter(Boolean);
+    const lines = block.trim().split(/\r\n|\r|\n/).filter(Boolean);
     if (lines.length === 0) continue;
 
     let eventType = "";
     let dataStr = "";
 
     for (const line of lines) {
-      if (line.startsWith("event: ")) {
-        eventType = line.slice(7).trim();
+      if (line.startsWith("event:")) {
+        eventType = line.slice(6).trim();
       } else if (line.startsWith("data:")) {
         // SSE spec: the colon may be followed by at most ONE space. Strip at
         // most one leading space so both `data: x` and `data:x` parse while

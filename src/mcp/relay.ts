@@ -23,7 +23,7 @@
  */
 import { credentialString, type Credential } from "../auth/types.js";
 
-export type OfficialMcpAuthMode = "coding-plan";
+type OfficialMcpAuthMode = "coding-plan";
 export type McpCredentialReason = "missing_jwt";
 
 export class McpCredentialsUnavailableError extends Error {

@@ -196,7 +196,7 @@ function buildDesktopOAuthRedirectParam(appVersion: string): string {
  *      `{token, user, zai|bigmodel:{access_token}}` — or `"failed"`, a fatal
  *      4xx, or the `expires_at`/timeout deadline.
  */
-export class PollOAuthClient extends OAuthFlowClient {
+class PollOAuthClient extends OAuthFlowClient {
   private flow: CliInitData | null = null;
   private pollToken = "";
 

@@ -242,15 +242,14 @@ export class CaptchaTokenPool {
   async takeToken(cfg: CaptchaConfig): Promise<string> {
     this.cfg = cfg;
 
-    const readyBefore = this.tokens.length;
     const token = this.popFresh();
     if (token) {
-      this.onTokenTaken(false, readyBefore - 1);
+      this.onTokenTaken();
       void this.refill({ urgent: true });
       return token;
     }
 
-    this.onTokenTaken(true, 0);
+    this.onTokenTaken();
     // Re-size immediately from current demand (this take is already in the
     // window) so an empty-pool arrival widens the buffer right away.
     this.effectiveTarget = Math.max(this.effectiveTarget, this.computeActiveTarget());
@@ -303,10 +302,6 @@ export class CaptchaTokenPool {
         : this.opts.solveConcurrency;
       await this.solveBatch(cfg, need, Math.max(1, concurrency));
     }
-  }
-
-  requestUrgentRefill(): void {
-    void this.refill({ urgent: true });
   }
 
   private poolHasCertifyId(certifyId: string): boolean {
@@ -384,7 +379,7 @@ export class CaptchaTokenPool {
     );
   }
 
-  private onTokenTaken(wasEmpty: boolean, readyAfter: number): void {
+  private onTokenTaken(): void {
     this.lastTakeAt = Date.now();
     this.takeTimestamps.push(this.lastTakeAt);
     this.pruneTakeWindow();
@@ -688,17 +683,6 @@ export function configureCaptchaPool(opts: CaptchaPoolOptions): void {
   pool.configure(opts);
 }
 
-export function getCaptchaPoolStats(): {
-  ready: number;
-  target: number;
-  min?: number;
-  max?: number;
-  activeSolves: number;
-  solverWorkers?: number;
-} {
-  return pool.stats();
-}
-
 export function stopCaptchaPool(): void {
   pool.stopBackgroundRefill();
   shutdownCaptchaSolver();
@@ -719,8 +703,4 @@ export function startCaptchaPoolRefill(cfg: CaptchaConfig): void {
 export async function prefillCaptchaPool(cfg: CaptchaConfig, count?: number): Promise<void> {
   if (!cfg.enabled || !cfg.prefix || !cfg.sceneId) return;
   await pool.prefill(cfg, count);
-}
-
-export function urgentCaptchaRefill(): void {
-  pool.requestUrgentRefill();
 }

@@ -1448,10 +1448,12 @@ private fun friendlyWindowType(type: String): String = when (type) {
 }
 
 /**
- * coding 窗口行。窗口名按重置升序的位次 + horizon 校验（5 小时 → 每周 → 月度）——
- * 实弹钉死（2026-09-30，max 档）：三窗口重置分别在 4h30m / 3d18h / 14d，正好落三个
- * 位次，且 5h/每周是 TOKENS_LIMIT 行（按 type 贴标签必然错位）。条画剩余占比
- * （percentage 缺位时 5 小时/每周退回时间进度条纹条）；值 = 剩 remaining 或 剩 P%。
+ * coding 窗口行。窗口名按 type + horizon 判别（位次标签已废 —— 实弹 2026-10-12
+ * 对拍官方面板"剩余额度"卡：三窗口按重置升序是 5 小时 TOKENS_LIMIT / MCP 工具
+ * 调用 TIME_LIMIT / 每周 TOKENS_LIMIT，位次标签把工具调用行贴成"每周"、每周行
+ * 贴成"月度"，整体错位一格）。工具调用是 MCP 余量、与 LLM 用量无关，先剔除不
+ * 展示。已知边缘：每周窗口生命末期（≤6h）会被贴成 5 小时，跨重置自愈。条画剩余
+ * 占比（percentage 缺位时 5 小时/每周退回时间进度条纹条）；值 = 剩 remaining 或 剩 P%。
  */
 private fun codingRows(coding: JSONObject?, nowMs: Long): List<QuotaRowUi> {
     val limits = coding?.optJSONArray("limits") ?: return emptyList()
@@ -1469,17 +1471,21 @@ private fun codingRows(coding: JSONObject?, nowMs: Long): List<QuotaRowUi> {
                 ),
             )
         }
-    }.sortedWith(compareBy { it.resetMs ?: Long.MAX_VALUE })
-    val chosen = parsed.take(3)
+    }
+    // TIME_LIMIT = MCP 工具调用窗口（官方面板"工具调用"卡），与 LLM 调用无关。
+    val chosen = parsed
+        .filter { it.type != "TIME_LIMIT" }
+        .sortedWith(compareBy { it.resetMs ?: Long.MAX_VALUE })
+        .take(3)
     if (chosen.isEmpty()) return emptyList()
-    return chosen.mapIndexed { i, l ->
+    return chosen.map { l ->
         val horizon = l.resetMs?.let { it - nowMs }
         val label = when {
-            i == 0 && horizon != null && horizon <= 6 * 3600_000L -> LABEL_5H
-            i == 1 && horizon != null && horizon <= 8 * 86_400_000L -> LABEL_WEEK
-            i == 2 && horizon != null && horizon <= 45 * 86_400_000L -> "月度"
             horizon == null -> friendlyWindowType(l.type)
-            horizon in 0..(45 * 86_400_000L) -> "月度"
+            horizon < 0 -> "周期"
+            horizon <= 6 * 3600_000L -> LABEL_5H
+            horizon <= 8 * 86_400_000L -> LABEL_WEEK
+            horizon <= 45 * 86_400_000L -> "月度"
             else -> "周期"
         }
         // percentage = 已用占比（实弹自洽信号；total/number 是脏值，不伪造 X/Y）

@@ -9,7 +9,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.net.ServerSocket
-import java.util.concurrent.ConcurrentLinkedDeque
 
 class NodeRunner(private val context: Context) {
 
@@ -30,26 +29,15 @@ class NodeRunner(private val context: Context) {
         callbackPort = ports.second
     }
 
-    private val logLines: ConcurrentLinkedDeque<String> = ConcurrentLinkedDeque()
-
     suspend fun ensureAssetsExtracted() = withContext(Dispatchers.IO) {
-        val targetDir = File(context.filesDir, "server_bundle")
-        val assetManager = context.assets
-        val filesToExtract = listOf(
-            "server_bundle/server.cjs",
-            "server_bundle/config.example.yaml",
-            "server_bundle/webui.txt",
-            "server_bundle/zcode_system.json",
-        )
-        targetDir.mkdirs()
-        for (assetPath in filesToExtract) {
-            val outFile = File(context.filesDir, assetPath)
-            outFile.parentFile?.mkdirs()
-            assetManager.open(assetPath).use { input ->
-                FileOutputStream(outFile).use { output -> input.copyTo(output) }
-            }
-            Log.i(TAG, "extracted $assetPath (${outFile.length()} bytes)")
+        // Web UI, system prompt and config template are inlined into this bundle.
+        val assetPath = "server_bundle/server.cjs"
+        val outFile = File(context.filesDir, assetPath)
+        outFile.parentFile?.mkdirs()
+        context.assets.open(assetPath).use { input ->
+            FileOutputStream(outFile).use { output -> input.copyTo(output) }
         }
+        Log.i(TAG, "extracted $assetPath (${outFile.length()} bytes)")
     }
 
     suspend fun start() = withContext(Dispatchers.IO) {
@@ -110,7 +98,7 @@ class NodeRunner(private val context: Context) {
             BufferedReader(InputStreamReader(p.inputStream, Charsets.UTF_8)).use { reader ->
                 while (true) {
                     val line = reader.readLine() ?: break
-                    appendLog(line)
+                    Log.i("Node", line)
                 }
             }
             val exit = try { p.exitValue() } catch (_: IllegalThreadStateException) { -1 }
@@ -118,22 +106,21 @@ class NodeRunner(private val context: Context) {
         }, "node-stdout").start()
     }
 
-    fun snapshotLogs(): List<String> = logLines.toList()
-
-    fun isAlive(): Boolean = process?.isAlive == true
+    fun isAlive(): Boolean {
+        val current = process ?: return false
+        // Process.isAlive() needs API 26; exitValue() also works on minSdk 24.
+        return try {
+            current.exitValue()
+            false
+        } catch (_: IllegalThreadStateException) {
+            true
+        }
+    }
 
     fun stop() {
         stopRequested = true
         process?.destroy()
         process = null
-    }
-
-    private fun appendLog(line: String) {
-        Log.i("Node", line)
-        logLines.addLast(line)
-        while (logLines.size > LOG_CAPACITY) {
-            logLines.pollFirst()
-        }
     }
 
     private fun allocateOrReusePorts(): Pair<Int, Int> {
@@ -192,7 +179,6 @@ class NodeRunner(private val context: Context) {
 
     companion object {
         private const val TAG = "NodeRunner"
-        private const val LOG_CAPACITY = 500
         private val DEFAULT_CONFIG = """
             server:
               host: "127.0.0.1"

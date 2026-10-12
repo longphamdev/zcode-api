@@ -152,7 +152,7 @@ function buildClient(opts: AsyncHandlerOptions, credentials: OffPeakCredentials)
   });
 }
 
-async function takeTicketOr502(client: OffPeakClient, taskId: string, opts: AsyncHandlerOptions, signal: AbortSignal | undefined): Promise<{ ok: true; ticket: TakeTicketResult } | { ok: false; response: Response }> {
+async function takeTicketOr502(client: OffPeakClient, taskId: string, signal: AbortSignal | undefined): Promise<{ ok: true; ticket: TakeTicketResult } | { ok: false; response: Response }> {
   try {
     const ticket = await client.takeTicket(taskId, signal);
     return { ok: true, ticket };
@@ -230,7 +230,7 @@ export async function handleAsyncMessages(req: Request, opts: AsyncHandlerOption
   // Now we're safe to take a ticket
   const client = buildClient(opts, cred.credentials);
   const taskId = generateTaskId();
-  const ticket = await takeTicketOr502(client, taskId, opts, req.signal);
+  const ticket = await takeTicketOr502(client, taskId, req.signal);
   if (!ticket.ok) return ticket.response;
 
   const { stream, outcome } = buildBridge(opts, client, cred.credentials, upstreamBodyText, ticket.ticket, taskId, req);
@@ -280,7 +280,7 @@ export async function handleAsyncChat(req: Request, opts: AsyncHandlerOptions): 
 
   const client = buildClient(opts, cred.credentials);
   const taskId = generateTaskId();
-  const ticket = await takeTicketOr502(client, taskId, opts, req.signal);
+  const ticket = await takeTicketOr502(client, taskId, req.signal);
   if (!ticket.ok) return ticket.response;
 
   const { stream: rawStream, outcome } = buildBridge(opts, client, cred.credentials, upstreamBodyText, ticket.ticket, taskId, req);

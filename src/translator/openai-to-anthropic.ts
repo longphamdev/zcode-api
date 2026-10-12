@@ -441,7 +441,7 @@ export function translateResponseAnthropicToOpenAI(
   const content = textBlocks.map((b) => (b as any).text).join("") || null;
   const reasoningContent = thinkingBlocks.map((b) => (b as any).thinking ?? "").join("") || undefined;
   const toolCalls = toolUseBlocks.length > 0
-    ? toolUseBlocks.map((b, i) => ({
+    ? toolUseBlocks.map((b) => ({
         id: (b as any).id,
         type: "function" as const,
         function: {

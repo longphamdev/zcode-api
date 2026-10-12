@@ -12,7 +12,7 @@ import { getCaptchaToken } from "../proxy/captcha.js";
 import { loadCredential } from "../auth/store.js";
 
 /** `${process.platform}-${process.arch}` — mirrors the client's `TH()`. */
-export function claimPlatform(): string {
+function claimPlatform(): string {
   return `${process.platform}-${process.arch}`;
 }
 

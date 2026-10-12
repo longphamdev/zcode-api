@@ -136,7 +136,7 @@ describe("ClientSigningManager.sign", () => {
     const fixture = await buildHandshakeFixture();
     const fetched: string[] = [];
     const manager = new ClientSigningManager({
-      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+      fetchImpl: (async (input: RequestInfo | URL) => {
         const url = String(input instanceof Request ? input.url : input);
         fetched.push(url);
         if (url === HANDSHAKE_URL) {
@@ -206,7 +206,6 @@ describe("ClientSigningManager.sign", () => {
   });
 
   it("fails open when the handshake endpoint errors", async () => {
-    const calls: MockCalls = { handshakes: [] };
     const manager = new ClientSigningManager({
       fetchImpl: (async () => {
         throw new Error("handshake unreachable");

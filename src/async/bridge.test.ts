@@ -21,8 +21,6 @@ function makeMockClient(behaviour: {
   initialTicketState?: TicketState;
   queueProgression?: TicketState[];   // states returned on successive batchStatus calls for the initial ticket
   retakeState?: TicketState;           // state for tickets taken after retry
-  settleCalls?: string[];              // populated as a side effect
-  takeTicketCalls?: string[];          // populated as a side effect
 }): OffPeakClient & { settleCalls: string[]; takeTicketCalls: string[] } {
   const settleCalls: string[] = [];
   const takeTicketCalls: string[] = [];
@@ -56,8 +54,6 @@ function makeMockClient(behaviour: {
       settleCalls.push(ticketId);
     },
   };
-  if (behaviour.settleCalls) Object.assign(behaviour.settleCalls, settleCalls);
-  if (behaviour.takeTicketCalls) Object.assign(behaviour.takeTicketCalls, takeTicketCalls);
   return client;
 }
 
@@ -166,6 +162,67 @@ describe("runAsyncBridge — happy paths", () => {
     expect(text).toContain(": keepalive\n\n");
     expect(text).toContain("message_stop");
     expect(client.settleCalls).toEqual(["t-init"]);
+  });
+});
+
+describe("runAsyncBridge — SSE frame boundaries", () => {
+  function bridgeFor(chunks: string[]) {
+    const client = makeMockClient({ initialTicketState: "ready" });
+    return {
+      client,
+      ...runAsyncBridge({
+        client,
+        credentials: CRED,
+        origin: "https://zcode.z.ai",
+        identity: TEST_IDENTITY,
+        llmRequestBody: '{"model":"x"}',
+        initialTicket: { ticketId: "t-init", state: "ready", registeredAt: Date.now() },
+        taskId: "task-1",
+        pollIntervalMs: 50,
+        keepAliveIntervalMs: 30,
+        maxRetries: 0,
+        maxWaitMs: 0,
+        fetchImpl: async () => makeAnthropicSseResponse(chunks),
+      }),
+    };
+  }
+
+  for (const eol of ["\n", "\r\n", "\r"]) {
+    it(`preserves ${JSON.stringify(eol)} frames split between every character`, async () => {
+      const frame = `event: content_block_delta${eol}data: {"type":"content_block_delta","delta":{"text":"你好"}}${eol}${eol}`;
+      const { stream, outcome } = bridgeFor([...frame]);
+      expect(await new Response(stream).text()).toBe(frame);
+      expect((await outcome).terminalPhase).toBe("done");
+    });
+  }
+
+  it("accepts a large transport chunk containing many small complete frames", async () => {
+    const frame = `data: {"text":"${"x".repeat(256)}"}\n\n`;
+    const chunk = frame.repeat(4096);
+    const { stream, outcome } = bridgeFor([chunk]);
+    expect(await new Response(stream).text()).toBe(chunk);
+    expect((await outcome).terminalPhase).toBe("done");
+  });
+
+  it("measures the incomplete-frame limit in UTF-8 bytes", async () => {
+    const { stream, outcome } = bridgeFor([`data: ${"中".repeat(400_000)}`]);
+    expect(await new Response(stream).text()).toContain("exceeded 1 MiB");
+    expect((await outcome).terminalPhase).toBe("error");
+  });
+
+  it("rejects an oversized complete frame before forwarding it", async () => {
+    const { stream, outcome } = bridgeFor([`data: ${"x".repeat(1_048_576)}\n\n`]);
+    const text = await new Response(stream).text();
+    expect(text).toContain("exceeded 1 MiB");
+    expect(text.length).toBeLessThan(500);
+    expect((await outcome).terminalPhase).toBe("error");
+  });
+
+  it("discards an incomplete event at EOF after forwarding complete events", async () => {
+    const frame = 'event: ping\ndata: {"type":"ping"}\n\n';
+    const { stream, outcome } = bridgeFor([frame, 'data: {"partial":true}']);
+    expect(await new Response(stream).text()).toBe(frame);
+    expect((await outcome).terminalPhase).toBe("done");
   });
 });
 
@@ -354,6 +411,67 @@ describe("runAsyncBridge — non-expired upstream errors", () => {
 });
 
 describe("runAsyncBridge — abort handling", () => {
+  for (const cancellation of ["signal", "consumer"] as const) {
+    for (const phase of ["queued", "ready"] as const) {
+      it(`${cancellation} cancellation interrupts a stalled ${phase} upstream`, async () => {
+        const controller = new AbortController();
+        const client = makeMockClient({ initialTicketState: phase });
+        let notifyStarted!: () => void;
+        const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+        let upstreamCancelled = false;
+        let upstreamSignal: AbortSignal | undefined;
+        client.batchStatus = async (_ids, signal) => {
+          upstreamSignal = signal;
+          notifyStarted();
+          return new Promise((_, reject) => {
+            signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+          });
+        };
+        const { stream, outcome } = runAsyncBridge({
+          client,
+          credentials: CRED,
+          origin: "https://zcode.z.ai",
+          identity: TEST_IDENTITY,
+          llmRequestBody: '{"model":"x"}',
+          initialTicket: { ticketId: "t-init", state: phase, registeredAt: Date.now() },
+          taskId: "task-1",
+          pollIntervalMs: 60_000,
+          keepAliveIntervalMs: 60_000,
+          maxRetries: 3,
+          maxWaitMs: 0,
+          clientSignal: controller.signal,
+          fetchImpl: async (_url, init) => {
+            upstreamSignal = init?.signal ?? undefined;
+            return new Response(new ReadableStream<Uint8Array>({
+              pull() { notifyStarted(); },
+              cancel() { upstreamCancelled = true; },
+            }));
+          },
+        });
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await started;
+          const cancellationDone = cancellation === "consumer" ? stream.cancel() : controller.abort();
+          const result = await Promise.race([
+            outcome,
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(() => reject(new Error("abort did not settle the bridge")), 1000);
+            }),
+          ]);
+          await cancellationDone;
+          expect(result.terminalPhase).toBe("abort");
+          expect(upstreamSignal?.aborted).toBe(true);
+          if (phase === "ready") expect(upstreamCancelled).toBe(true);
+          expect(client.settleCalls).toEqual(["t-init"]);
+          expect(client.takeTicketCalls).toEqual([]);
+        } finally {
+          clearTimeout(timeout);
+          controller.abort();
+        }
+      });
+    }
+  }
+
   it("client abort during WAIT: settle fires once, stream closes", async () => {
     const controller = new AbortController();
     const client = makeMockClient({
@@ -440,6 +558,7 @@ describe("runAsyncBridge — abort handling", () => {
 
     expect(client.settleCalls).toContain("t-init");
     expect(o.terminalPhase).toBe("abort");
+    expect(upstreamReadCancelled).toBe(true);
   });
 });
 

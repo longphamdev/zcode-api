@@ -11,7 +11,7 @@
  */
 import raw from "./official-catalogue.json" with { type: "json" };
 
-export interface OfficialMcpServerDef {
+interface OfficialMcpServerDef {
   /** mcpServers key from the plugin's .mcp.json — the /mcp/{key} route name. */
   key: string;
   /** Gateway route identifier (path segment after /api/v1/mcp/server/). */
@@ -100,9 +100,3 @@ export const OFFICIAL_MCP_CATALOGUE: OfficialMcpCatalogue = {
   defaultUpstreamOrigin: expectString((raw as { defaultUpstreamOrigin?: unknown }).defaultUpstreamOrigin, "defaultUpstreamOrigin"),
   servers,
 };
-
-const byKey = new Map(servers.map((s) => [s.key, s]));
-
-export function lookupOfficialMcpServer(key: string): OfficialMcpServerDef | undefined {
-  return byKey.get(key);
-}

@@ -233,4 +233,105 @@ describe("client session resolver", () => {
     expect(empty.source).toBe("none");
     expect(empty.sessionId).toBeUndefined();
   });
+
+  it("reuses the same session when a tool round appends three messages", () => {
+    const resolver = createClientSessionResolver();
+    const firstBody = JSON.stringify({
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "Hi" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "search" }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+      ],
+    });
+    // parallel tool results split across two user messages → 3-message append
+    const nextBody = JSON.stringify({
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "Hi" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "search" }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "read" }, { type: "tool_use", id: "t3", name: "grep" }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: "a" }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t3", content: "b" }] },
+      ],
+    });
+
+    const first = resolver.resolve(makeReq(firstBody), firstBody, "anthropic", "glm-4.6", CFG);
+    const next = resolver.resolve(makeReq(nextBody), nextBody, "anthropic", "glm-4.6", CFG);
+
+    expect(next.source).toBe("lineage");
+    expect(next.sessionId).toBe(first.sessionId);
+    expect(next.confidence).toBeGreaterThanOrEqual(0.85);
+  });
+
+  it("mints a fresh session after the lineage TTL expires", () => {
+    let clock = 1_000_000;
+    const resolver = createClientSessionResolver(() => clock);
+    const body = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] });
+
+    const first = resolver.resolve(makeReq(body), body, "anthropic", "glm-4.6", CFG);
+    clock += CFG.ttlSeconds * 1000 + 1;
+    const second = resolver.resolve(makeReq(body), body, "anthropic", "glm-4.6", CFG);
+
+    expect(second.source).toBe("lineage");
+    expect(second.sessionId).not.toBe(first.sessionId);
+  });
+
+  it("keeps node-level affinity after a session is LRU-evicted within TTL", () => {
+    const smallCfg = { ...CFG, maxSessions: 1 };
+    const resolver = createClientSessionResolver();
+    const bodyA = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "A" }] });
+    const bodyB = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "B" }] });
+    const bodyA2 = JSON.stringify({
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "A" }, { role: "assistant", content: "hey" }, { role: "user", content: "more" }],
+    });
+
+    const a = resolver.resolve(makeReq(bodyA), bodyA, "anthropic", "glm-4.6", smallCfg);
+    resolver.resolve(makeReq(bodyB), bodyB, "anthropic", "glm-4.6", smallCfg);
+    const aNext = resolver.resolve(makeReq(bodyA2), bodyA2, "anthropic", "glm-4.6", smallCfg);
+
+    expect(aNext.source).toBe("lineage");
+    expect(aNext.sessionId).toBe(a.sessionId);
+  });
+
+  it("does not reuse an expired lineage node after another node in its session is refreshed", () => {
+    let clock = 0;
+    const resolver = createClientSessionResolver(() => clock);
+    const cfg = { ...CFG, ttlSeconds: 5 };
+    const aFirst = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "A" }] });
+    const aNext = JSON.stringify({
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "A" },
+        { role: "assistant", content: "answer A" },
+        { role: "user", content: "continue A" },
+      ],
+    });
+    const bFirst = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "B" }] });
+    const bNext = JSON.stringify({
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "B" },
+        { role: "assistant", content: "answer B" },
+        { role: "user", content: "continue B" },
+      ],
+    });
+
+    resolver.resolve(makeReq(aFirst), aFirst, "anthropic", "glm-4.6", cfg);
+    clock = 1_000;
+    const b = resolver.resolve(makeReq(bFirst), bFirst, "anthropic", "glm-4.6", cfg);
+    clock = 2_000;
+    resolver.resolve(makeReq(aNext), aNext, "anthropic", "glm-4.6", cfg);
+    // Refresh A's newer node. Its earlier node stays at the front of the node
+    // map, ahead of B's node, so it must not make B's timestamp look fresh.
+    clock = 6_000;
+    resolver.resolve(makeReq(aNext), aNext, "anthropic", "glm-4.6", cfg);
+
+    clock = 7_000;
+    const afterExpiry = resolver.resolve(makeReq(bNext), bNext, "anthropic", "glm-4.6", cfg);
+
+    expect(afterExpiry.sessionId).not.toBe(b.sessionId);
+  });
 });

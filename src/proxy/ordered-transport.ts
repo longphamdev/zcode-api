@@ -1,7 +1,7 @@
 import { connect as connectTcp, type Socket } from "node:net";
 import { connect as connectTls, type TLSSocket } from "node:tls";
 
-export type OrderedHeaderPair = [string, string];
+type OrderedHeaderPair = [string, string];
 
 export interface OrderedUpstreamRequest {
   url: string;

@@ -1,6 +1,5 @@
 package com.zcode.proxy
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -9,6 +8,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -86,7 +86,7 @@ class ServerService : Service() {
     }
 
     private fun startForeground(contentText: String = "Running") {
-        val notif = Notification.Builder(this, CHANNEL_ID)
+        val notif = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("ZCode Proxy")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.stat_sys_download)

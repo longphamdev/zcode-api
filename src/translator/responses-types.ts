@@ -19,7 +19,7 @@
 // ─────────────────────────────────────────────
 
 /** Reasoning configuration on a Responses request. */
-export interface ResponsesReasoning {
+interface ResponsesReasoning {
   effort?: "minimal" | "low" | "medium" | "high";
   summary?: "auto" | "concise" | "detailed" | "none";
 }
@@ -103,7 +103,7 @@ export interface ResponsesUsage {
   output_tokens_details?: { reasoning_tokens?: number };
 }
 
-export interface ResponsesIncompleteDetails {
+interface ResponsesIncompleteDetails {
   reason?: string;
 }
 

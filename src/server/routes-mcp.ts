@@ -31,7 +31,7 @@ export interface McpRouteOptions {
   fetchImpl?: typeof fetch;
 }
 
-export type McpAuthStatus =
+type McpAuthStatus =
   | { ok: true; auth: OfficialMcpAuth }
   | { ok: false; reason: McpCredentialReason | "not_logged_in" | "plan_unsupported"; message: string };
 

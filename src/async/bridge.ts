@@ -23,6 +23,7 @@ import { isTicketExpired, isTicketReady } from "./types.js";
 import { keepaliveFrame } from "./keepalive.js";
 import { buildIdentityHeaders } from "../proxy/identity.js";
 import type { ProxyIdentity } from "../config/types.js";
+import { SSE_FRAME_SPLIT } from "../translator/sse-translator.js";
 
 const EXPIRED_MARKER = "off-peak-ticket-expired";
 
@@ -44,7 +45,7 @@ export interface BridgeOptions {
   onTransition?: (info: BridgeTransition) => void;
 }
 
-export interface BridgeTransition {
+interface BridgeTransition {
   phase: "wait" | "ready" | "expired" | "done" | "abort" | "error";
   attempt: number;
   ticketId: string;
@@ -73,6 +74,15 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
   }
 
   let aborted = false;
+  const abortController = new AbortController();
+  const signal = abortController.signal;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  function abort(): void {
+    aborted = true;
+    abortController.abort();
+    // A pending read must wake even when the transport does not observe the signal.
+    void activeReader?.cancel().catch(() => {});
+  }
   const settledTickets = new Set<string>();
   function settleOnce(ticketId: string): void {
     if (settledTickets.has(ticketId)) return;
@@ -135,10 +145,10 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
         // remainder and report a deadline overrun (NOT "expired" — an early
         // `expired` here used to send the caller into the retake loop against
         // the same deadline until maxRetries burned out).
-        await sleep(Math.max(0, deadlineAt - Date.now()), opts.clientSignal);
+        await sleep(Math.max(0, deadlineAt - Date.now()), signal);
         return { state: "expired" as TicketState, maxWaitExceeded: true };
       }
-      await sleep(delay, opts.clientSignal);
+      await sleep(delay, signal);
     }
   }
 
@@ -155,14 +165,14 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
     const retryDelayMs = Math.min(opts.pollIntervalMs, 2000);
     let lastErr: unknown;
     for (let attempt = 1; attempt <= POLL_RETRY_LIMIT; attempt++) {
-      if (aborted || opts.clientSignal?.aborted) throw lastErr ?? new Error("client aborted during poll");
+      if (aborted) throw lastErr ?? new Error("client aborted during poll");
       try {
-        return await opts.client.batchStatus([ticketId], opts.clientSignal);
+        return await opts.client.batchStatus([ticketId], signal);
       } catch (err) {
         lastErr = err;
         // Client disconnected mid-poll — retrying would delay the abort path.
-        if (aborted || opts.clientSignal?.aborted) throw err;
-        if (attempt < POLL_RETRY_LIMIT) await sleep(retryDelayMs, opts.clientSignal);
+        if (aborted) throw err;
+        if (attempt < POLL_RETRY_LIMIT) await sleep(retryDelayMs, signal);
       }
     }
     throw lastErr;
@@ -184,7 +194,7 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
       method: "POST",
       headers,
       body: opts.llmRequestBody,
-      signal: opts.clientSignal,
+      signal,
     });
 
     if (!resp.ok) {
@@ -201,8 +211,8 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
     async start(controller) {
       // External signal → local aborted flag. Both paths (consumer cancel + signal abort) converge here.
       if (opts.clientSignal) {
-        if (opts.clientSignal.aborted) aborted = true;
-        else opts.clientSignal.addEventListener("abort", () => { aborted = true; }, { once: true });
+        if (opts.clientSignal.aborted) abort();
+        else opts.clientSignal.addEventListener("abort", abort, { once: true });
       }
 
       // Keepalive runs ONLY during WAIT/retry phases; stopped before LLM streaming to
@@ -273,7 +283,7 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
                 return;
               }
               try {
-                currentTicket = await opts.client.takeTicket(opts.taskId, opts.clientSignal);
+                currentTicket = await opts.client.takeTicket(opts.taskId, signal);
               } catch (takeErr) {
                 emitTerminalError(controller, `async retake failed: ${(takeErr as Error).message}`, "api_error");
                 resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
@@ -315,7 +325,7 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
                 return;
               }
               try {
-                currentTicket = await opts.client.takeTicket(opts.taskId, opts.clientSignal);
+                currentTicket = await opts.client.takeTicket(opts.taskId, signal);
               } catch (takeErr) {
                 emitTerminalError(controller, `async retake failed: ${(takeErr as Error).message}`, "api_error");
                 resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
@@ -336,15 +346,16 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
           // DESIGN (fixes R3-2/R3-3/R4-1/R4-3 + bounds memory R4-5):
           //   - One TextDecoder for the whole streaming phase (handles partial
           //     multibyte UTF-8 correctly across chunk boundaries).
-          //   - Accumulate decoded text until a complete SSE frame (`\n\n` boundary).
+          //   - Accumulate decoded text until a complete SSE frame (LF/CRLF/CR).
+          //     Keep raw line endings: normalizing per chunk corrupts split CRLFs.
           //   - Scan the COMPLETE frame for the expired marker before forwarding.
           //     This catches markers split across any number of network chunks.
           //   - Forward via `encoder.encode(frame)` — re-encoding Unicode codepoints
           //     through UTF-16→UTF-8 is lossless for valid input, and avoids the
           //     raw-vs-decoded byte mismatch that previously dropped pre-commit
           //     chunks when the boundary spanned chunks.
-          //   - Cap `pending` at MAX_PENDING_FRAME_BYTES to prevent a malicious
-          //     upstream from exhausting memory by streaming without `\n\n`.
+          //   - Cap each frame at MAX_PENDING_FRAME_BYTES, measured as UTF-8.
+          //     A transport chunk can legitimately contain many smaller frames.
           //
           // State machine:
           //   Pre-commit (no frame forwarded yet): marker found → transparent retry.
@@ -356,6 +367,7 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
           let committed = false;
           if (resp.body) {
             const reader = resp.body.getReader();
+            activeReader = reader;
             const streamDecoder = new TextDecoder();
             let pending = "";
             const MAX_PENDING_FRAME_BYTES = 1 * 1024 * 1024;
@@ -368,42 +380,38 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
                 }
                 const { done, value } = await reader.read();
                 if (done) {
-                  // SSE spec: discard pending data at EOF if it lacks a terminating
-                  // blank line (incomplete event). Only flush if marker-free AND
-                  // properly terminated.
+                  // Complete frames were already consumed below. The remaining
+                  // tail is unterminated and must not be forwarded at EOF.
                   if (pending.length > 0 && !aborted && !midStreamExpiredPreCommit && !midStreamExpiredPostCommit) {
                     if (pending.includes(EXPIRED_MARKER)) {
                       if (!committed) midStreamExpiredPreCommit = true;
                       else midStreamExpiredPostCommit = true;
-                    } else if (pending.endsWith("\n\n")) {
-                      // Properly terminated final frame — safe to forward.
-                      try { controller.enqueue(encoder.encode(pending)); } catch {}
                     }
-                    // else: unterminated event at EOF — discard per SSE spec.
                     pending = "";
                   }
                   break;
                 }
-                if (aborted) break;
-                pending += streamDecoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-
-                // Bounded buffer: if pending exceeds the cap without a frame boundary,
-                // the upstream is malformed or malicious — terminate.
-                if (pending.length > MAX_PENDING_FRAME_BYTES) {
+                if (aborted) {
                   await reader.cancel().catch(() => {});
-                  emitTerminalError(controller, "async upstream SSE frame exceeded 1 MiB boundary", "api_error");
-                  settleOnce(currentTicket.ticketId);
-                  resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
-                  return;
+                  break;
                 }
+                pending += streamDecoder.decode(value, { stream: true });
 
                 // Process all complete frames in `pending`.
                 let frameBoundaryFound = false;
                 while (true) {
-                  const idx = pending.indexOf("\n\n");
-                  if (idx === -1) break;
-                  const frame = pending.slice(0, idx + 2);
-                  pending = pending.slice(idx + 2);
+                  const boundary = SSE_FRAME_SPLIT.exec(pending);
+                  const end = boundary ? boundary.index + boundary[0].length : pending.length;
+                  const frame = pending.slice(0, end);
+                  if (Buffer.byteLength(frame, "utf8") > MAX_PENDING_FRAME_BYTES) {
+                    await reader.cancel().catch(() => {});
+                    emitTerminalError(controller, "async upstream SSE frame exceeded 1 MiB boundary", "api_error");
+                    settleOnce(currentTicket.ticketId);
+                    resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+                    return;
+                  }
+                  if (!boundary) break;
+                  pending = pending.slice(end);
 
                   if (frame.includes(EXPIRED_MARKER)) {
                     if (!committed) {
@@ -429,6 +437,7 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
               // Flush decoder (no stream flag) to release internal partial-byte state.
               streamDecoder.decode();
             } finally {
+              activeReader = undefined;
               reader.releaseLock?.();
             }
           }
@@ -443,7 +452,7 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
               return;
             }
             try {
-              currentTicket = await opts.client.takeTicket(opts.taskId, opts.clientSignal);
+              currentTicket = await opts.client.takeTicket(opts.taskId, signal);
             } catch (takeErr) {
               emitTerminalError(controller, `async retake failed: ${(takeErr as Error).message}`, "api_error");
               resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
@@ -479,8 +488,9 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
           emitTerminalError(controller, `async bridge internal error: ${(err as Error).message}`, "api_error");
         }
         settleOnce(currentTicket.ticketId);
-        resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+        resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: aborted ? "abort" : "error" });
       } finally {
+        opts.clientSignal?.removeEventListener("abort", abort);
         stopKeepalive();
         try {
           controller.close();
@@ -498,7 +508,7 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
     },
 
     cancel() {
-      aborted = true;
+      abort();
     },
   });
 

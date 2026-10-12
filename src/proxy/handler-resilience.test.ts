@@ -46,8 +46,6 @@ const TEST_CONFIG: ProxyConfig = {
   logging: { level: "info" },
 };
 
-const GATEWAY_URL = "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages";
-
 const ANTHROPIC_OK = JSON.stringify({
   id: "msg_resilience",
   type: "message",

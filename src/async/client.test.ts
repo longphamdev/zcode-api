@@ -11,7 +11,7 @@
  *   - batchStatus truncation at 100 tickets
  *   - credential header composition (jwt + apiKey + optional bigmodel-* headers)
  */
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock } from "bun:test";
 import { createOffPeakClient } from "./client.js";
 import { OffPeakServerError } from "./types.js";
 import type { OffPeakCredentials } from "./types.js";
@@ -60,10 +60,6 @@ function captureReq(req: Request) {
     contentType: req.headers.get("content-type"),
   };
 }
-
-beforeEach(() => {
-  // Clear any leftover abort listeners between tests.
-});
 
 describe("createOffPeakClient — header composition", () => {
   it("sends Authorization + X-Coding-Plan-Api-Key on every request", async () => {
@@ -487,5 +483,6 @@ describe("error handling", () => {
       expect(e).toBeInstanceOf(OffPeakServerError);
       expect((e as OffPeakServerError).message).toMatch(/abort/i);
     }
+    expect(called).toBe(false);
   });
 });

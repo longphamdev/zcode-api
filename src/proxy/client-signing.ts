@@ -296,7 +296,7 @@ export class ClientSigningManager {
 
     let privateKey: CryptoKey;
     try {
-      privateKey = await this.ensurePrivateKey(state, stateKey, parsedCred, parsed.origin);
+      privateKey = await this.ensurePrivateKey(state, parsedCred, parsed.origin);
     } catch {
       this.noteOnce(stateKey, "signing handshake failed — sending unsigned");
       this.invalidateState(stateKey);
@@ -409,7 +409,6 @@ export class ClientSigningManager {
 
   private async ensurePrivateKey(
     state: SignerState,
-    stateKey: string,
     parsedCred: ParsedCredential,
     origin: string,
   ): Promise<CryptoKey> {

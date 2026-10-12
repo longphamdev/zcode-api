@@ -13,7 +13,7 @@ import {
   type AsyncHandlerOptions,
 } from "../async/handler.js";
 
-export { handleAsyncMessages, handleAsyncChat, handleAsyncHealth, type AsyncHandlerOptions };
+export type { AsyncHandlerOptions };
 
 export async function handleAsyncMessagesRoute(req: Request, opts: AsyncHandlerOptions): Promise<Response> {
   return handleAsyncMessages(req, opts);

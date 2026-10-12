@@ -2,7 +2,7 @@
  * Tests for upstream request builder and proxy handler.
  * @see .omo/plans/zcode-proxy.md Task 6
  */
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { createServer } from "node:net";
 import { buildUpstreamRequest, buildUpstreamHeaderPairs, buildUpstreamURL, buildAuthHeaders } from "./upstream.js";
@@ -452,28 +452,26 @@ describe("proxyRequest", () => {
   logging: { level: "info" },
   };
 
-  it("uses ordered transport for session-aware start-plan requests only outside injected fetch tests", () => {
-    const startPlanConfig: ProxyConfig = { ...testConfig, plan: "start-plan" };
-
-    expect(shouldUseOrderedTransport(startPlanConfig, {
+  it("uses ordered transport for session-aware requests only outside injected fetch tests", () => {
+    expect(shouldUseOrderedTransport({
       source: "lineage",
       action: "observe",
       confidence: 0.95,
       upstreamSessionId: "11111111-1111-4111-8111-111111111111",
     }, false)).toBe(false);
-    expect(shouldUseOrderedTransport(startPlanConfig, {
+    expect(shouldUseOrderedTransport({
       source: "lineage",
       action: "enforce",
       confidence: 0.95,
       upstreamSessionId: "11111111-1111-4111-8111-111111111111",
     }, false)).toBe(true);
-    expect(shouldUseOrderedTransport(startPlanConfig, {
+    expect(shouldUseOrderedTransport({
       source: "explicit",
       action: "observe",
       confidence: 1,
       upstreamSessionId: "sess_thread_1",
     }, false)).toBe(true);
-    expect(shouldUseOrderedTransport(startPlanConfig, {
+    expect(shouldUseOrderedTransport({
       source: "explicit",
       action: "observe",
       confidence: 1,

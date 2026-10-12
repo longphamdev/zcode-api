@@ -10,16 +10,15 @@
  *      Comments are the only queue-wait liveness signal; dropping them defeats
  *      the bridge design.
  *   2. Convert Anthropic `event: error` events to OpenAI
- *      `data: {"error":...}` + terminal `[DONE]`. The existing translator
- *      silently drops Anthropic errors, which would mask permanent bridge
- *      failures as a clean `[DONE]`.
+ *      `data: {"error":...}` + terminal `[DONE]`, so clients receive the
+ *      bridge failure in-band instead of just a rejected stream read.
  *
  * Anti-pattern: NEVER create a fresh translator per event. State (messageId,
  * toolCallIndex, finishReasonSent, usage) must persist across the whole stream
  * or downstream clients see inconsistent IDs, missing tool arguments, and
  * duplicate finish reasons.
  */
-import { initState, parseSSEChunk, translateEvent, SSE_FRAME_SPLIT, type TranslationState, type ParsedSSE } from "../translator/sse-translator.js";
+import { initState, parseSSEChunk, translateEvent, SSE_FRAME_SPLIT, type TranslationState } from "../translator/sse-translator.js";
 
 export function anthropicSseToOpenaiSseWithKeepalive(
   upstream: ReadableStream<Uint8Array>,
@@ -30,9 +29,11 @@ export function anthropicSseToOpenaiSseWithKeepalive(
   const state: TranslationState = initState(model);
   let doneSent = false;
   let errored = false;
+  let cancelled = false;
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
 
   function emit(out: string): void {
-    if (errored) return;
+    if (errored || cancelled) return;
     try {
       controller0.enqueue(encoder.encode(out));
     } catch {
@@ -47,10 +48,11 @@ export function anthropicSseToOpenaiSseWithKeepalive(
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controller0 = controller;
-      const reader = upstream.getReader();
+      reader = upstream.getReader();
       let buffer = "";
 
       reader.read().then(function pump({ done, value }): Promise<unknown> | undefined {
+        if (cancelled) return;
         if (done) {
           // Flush trailing buffer
           if (buffer.trim()) processBlock(buffer, state);
@@ -65,13 +67,15 @@ export function anthropicSseToOpenaiSseWithKeepalive(
         for (const block of blocks) {
           processBlock(block, state);
           if (errored) {
+            void reader.cancel().catch(() => {});
             try { controller.close(); } catch {}
             return;
           }
         }
         return reader.read().then(pump);
       }).catch((err) => {
-        if (!errored) {
+        void reader.cancel(err).catch(() => {});
+        if (!errored && !cancelled) {
           const errPayload = JSON.stringify({ error: { message: `async stream error: ${(err as Error).message}`, type: "server_error" } });
           emit(`data: ${errPayload}\n\n`);
           emitDone();
@@ -80,6 +84,10 @@ export function anthropicSseToOpenaiSseWithKeepalive(
       }).finally(() => {
         reader.releaseLock?.();
       });
+    },
+    cancel(reason) {
+      cancelled = true;
+      return reader.cancel(reason);
     },
   });
 
@@ -93,11 +101,9 @@ export function anthropicSseToOpenaiSseWithKeepalive(
       return;
     }
 
-    // Detect Anthropic error event before parseSSEChunk would silently drop it
-    // (parseSSEChunk only returns events with data; error events have data too,
-    // but the existing translateEvent doesn't handle `type:"error"`).
+    // Map the error envelope before the shared translator throws it.
     if (trimmed.startsWith("event: error") || trimmed.startsWith("event:error")) {
-      const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
+      const dataLine = block.split(/\r\n|\r|\n/).find((l) => l.startsWith("data:"));
       let anthropicMsg = "unknown error";
       let anthropicType = "api_error";
       if (dataLine) {
@@ -130,6 +136,3 @@ export function anthropicSseToOpenaiSseWithKeepalive(
     emit("data: [DONE]\n\n");
   }
 }
-
-// Re-export for tests
-export type { ParsedSSE, TranslationState };

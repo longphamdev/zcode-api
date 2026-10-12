@@ -16,12 +16,10 @@
 import { shutdownCaptchaSolver } from "./captcha-solver.js";
 import {
   configureCaptchaPool,
-  getCaptchaPoolStats,
   prefillCaptchaPool,
   takeCaptchaToken,
   startCaptchaPoolRefill,
   stopCaptchaPool,
-  urgentCaptchaRefill,
   type CaptchaConfig,
 } from "./captcha-pool.js";
 
@@ -108,19 +106,6 @@ export async function startCaptchaPool(appVersion: string): Promise<void> {
   configureCaptchaPool({ poolSizeMin: min, poolSizeMax: max });
   startCaptchaPoolRefill(cfg as CaptchaConfig);
   await prefillCaptchaPool(cfg as CaptchaConfig, min);
-}
-
-/** Request an urgent refill burst (e.g. after a challenge/retry). */
-export function urgentCaptcha(): void {
-  urgentCaptchaRefill();
-}
-
-export function captchaPoolStats(): { ready: number; target: number; activeSolves: number } {
-  return getCaptchaPoolStats();
-}
-
-export function configureCaptchaSolving(opts: Parameters<typeof configureCaptchaPool>[0]): void {
-  configureCaptchaPool(opts);
 }
 
 export const RETRY_HEADERS = { PARAM: CAPTCHA_HEADER, REGION: REGION_HEADER };

@@ -21,7 +21,7 @@ interface ClaimGateway {
   claim(planId: string, captcha: { verifyParam: string; region?: string }): Promise<ClaimOutcome>;
 }
 
-export interface ClaimSchedulerConfig {
+interface ClaimSchedulerConfig {
   /** Claim this plan_id; empty = highest-priority preview. */
   planId?: string;
   pollIntervalMs: number;

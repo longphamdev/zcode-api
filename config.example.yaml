@@ -88,11 +88,9 @@ responses:
 # GLM MCP hosted-tool integration — NOT currently wired into production.
 # These keys are parsed but have no effect: hosted tools (`mcp`,
 # `web_search_preview`, ...) are silently stripped by the Responses
-# translator, and the MCP client subsystem (src/mcp) is retained for a
-# future function-injection design. Endpoints are derived from `provider`:
-#   zai      → https://api.z.ai/api/mcp/{tool}/mcp
-#   bigmodel → https://open.bigmodel.cn/api/mcp/{tool}/mcp
-# Auth reuses the logged-in upstream credential — no extra key needed.
+# translator. The GLM open-platform MCP client that once consumed these
+# keys has been removed — src/mcp now only hosts the plugin gateway relay
+# documented below.
 mcp:
   enabled: true
   # (planned) Intercept `web_search`/`web_search_preview` hosted tools via
@@ -110,10 +108,11 @@ mcp:
   # identity-only auth (JSON-RPC 3101), so start-plan requests fail with 400
   # `mcp_plan_unsupported`.
   # The server table ships with the build (scripts/regen-mcp-catalogue.ts).
-  # Note: `mcp.enabled` above gates only the (unwired) GLM hosted-tool plane —
-  # this relay is controlled independently by `gateway.enabled`. Since the
-  # relay spends your paid data entitlements, setting auth.proxyApiKey is
-  # strongly recommended (CORS headers are only emitted when a key is set).
+  # Note: `mcp.enabled` above is parsed but gates nothing since the GLM
+  # hosted-tool client was removed — this relay is controlled independently
+  # by `gateway.enabled`. Since the relay spends your paid data entitlements,
+  # setting auth.proxyApiKey is strongly recommended (CORS headers are only
+  # emitted when a key is set).
   # Env overrides: ZCODE_MCP_GATEWAY, ZCODE_MCP_GATEWAY_ORIGIN.
   gateway:
     enabled: true
@@ -159,7 +158,10 @@ async:
 #
 # IMPORTANT: requires a logged-in credential (claim uses the JWT from
 # `auth login`), and identity.appVersion must be >= the campaign's minimum
-# client version (default 3.11.2) or the server rejects with `ineligible`.
+# client version or the server rejects with `ineligible` — an app_version
+# below the floor can also surface as a silently empty preview list
+# (measured floor 3.14.0 for the 2026-09 campaign; the default appVersion
+# "3.14.0" satisfies it).
 #
 # Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
 # ZCODE_CLAIM_POLL_INTERVAL_MS.

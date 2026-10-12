@@ -22,10 +22,10 @@ import type * as CaptchaExports from "./captcha.js";
 export type CaptchaModuleLike = Pick<typeof CaptchaExports, "detectCaptchaChallenge" | "getCaptchaToken" | "RETRY_HEADERS">;
 
 /** Magic strings of the in-body challenge, for both JSON spacing styles. */
-export const IN_BODY_CHALLENGE_MARKERS = ['"code":3007', '"code": 3007'] as const;
+const IN_BODY_CHALLENGE_MARKERS = ['"code":3007', '"code": 3007'] as const;
 
 /** Bound on how many raw (possibly compressed) body bytes a challenge peek reads. */
-export const MAX_CHALLENGE_PEEK_BYTES = 64 * 1024;
+const MAX_CHALLENGE_PEEK_BYTES = 64 * 1024;
 
 /** Bound on decompressed sniff output — error bodies are small; more is waste. */
 const MAX_SNIFF_INFLATED_BYTES = 256 * 1024;

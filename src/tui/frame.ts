@@ -13,7 +13,7 @@
  */
 import { displayWidth, truncateToWidth } from "./width.js";
 
-export type Seg = { t: string; c?: string };
+type Seg = { t: string; c?: string };
 
 /** What a mouse click on a button should do. `key` reuses the key bindings. */
 export type ClickAction =
@@ -44,7 +44,7 @@ export function findRegion(regions: readonly ClickRegion[], row: number, col: nu
 }
 
 /** One per-model balance window shown as a row in the Quota card. */
-export interface QuotaBalanceRow {
+interface QuotaBalanceRow {
   showName: string;
   remainingUnits: number;
   totalUnits: number;
@@ -54,7 +54,7 @@ export interface QuotaBalanceRow {
 }
 
 /** One coding-plan usage window (monitor plane `limits[]` entry). */
-export interface QuotaCodingRow {
+interface QuotaCodingRow {
   /** Server-defined window type; `TIME_LIMIT`/`TOKENS_LIMIT` are the count/token windows. */
   type: string;
   remaining?: number;
@@ -343,18 +343,22 @@ function friendlyWindowType(type: string): string {
 }
 
 /**
- * 窗口语义名：按重置升序的位次 + horizon 校验（5h → 每周 → 月度）。
- * 实弹钉死（2026-09-30，max 档）：三窗口重置分别在 4h30m / 3d18h / 14d，
- * 正好落三个位次 —— 永不裸显 TIME_LIMIT/TOKENS_LIMIT。位次与 horizon 不符
- * 时诚实降级为周期/类型名，不硬贴语义。
+ * 窗口语义名：type + horizon 判别，永不按重置升序位次贴标签。位次方案已被
+ * 实弹证伪（2026-10-12，max 档，对拍官方面板"剩余额度"卡）：三窗口按重置
+ * 升序是 5h TOKENS_LIMIT / MCP 工具调用 TIME_LIMIT / 每周 TOKENS_LIMIT ——
+ * 位次标签把工具调用行贴成"每周"、每周行贴成"月度"，整体错位一格。
+ * MCP 工具调用窗口（TIME_LIMIT）由调用方先行剔除，不进本函数；已知边缘：
+ * 每周窗口生命末期（最后 ≤6h）会被贴成"5 小时"，跨过重置即自愈 —— 比位次
+ * 方案整体平移好。无重置时间/越界时诚实降级为周期/类型名，不硬贴语义。
  */
-function codingWindowLabel(type: string, nextResetTime: number | undefined, pos: number, nowMs: number): string {
+function codingWindowLabel(type: string, nextResetTime: number | undefined, nowMs: number): string {
   const horizon = nextResetTime !== undefined ? toEpochMs(nextResetTime) - nowMs : undefined;
-  if (pos === 0 && horizon !== undefined && horizon <= 6 * 3600e3) return "5 小时";
-  if (pos === 1 && horizon !== undefined && horizon <= 8 * 86400e3) return "每周";
-  if (pos === 2 && horizon !== undefined && horizon <= 45 * 86400e3) return "月度";
   if (horizon === undefined) return friendlyWindowType(type);
-  return horizon >= 0 && horizon <= 45 * 86400e3 ? "月度" : "周期";
+  if (horizon < 0) return "周期";
+  if (horizon <= 6 * 3600e3) return "5 小时";
+  if (horizon <= 8 * 86400e3) return "每周";
+  if (horizon <= 45 * 86400e3) return "月度";
+  return "周期";
 }
 
 /** At most this many per-model balance rows — the card must stay bounded so the Logs card keeps room on short terminals. */
@@ -473,6 +477,9 @@ export function buildFrame(s: FrameState): Frame {
       // Live data (2026-09-30, max tier): upstream `total`/`number` are junk
       // (1/5 on real rows) while `percentage` is self-consistent — the bar is
       // the remaining share derived from it, never an X/Y fabrication.
+      // `TIME_LIMIT` rows are the MCP tool-call window (live 2026-10-12:
+      // remaining=3836 / percentage=4 = the official panel's "工具调用" card) —
+      // MCP 余量与 LLM 用量无关，不进 Coding 行。
       const coding = s.quota.coding?.rows ?? [];
       type QuotaTableRow = { label: string; segs: Seg[] };
       const unitNote = (u: string | undefined): Seg[] =>
@@ -480,9 +487,11 @@ export function buildFrame(s: FrameState): Frame {
       const nowMs = Date.now();
       const remainingFrac = (pct: number | undefined): number | undefined =>
         pct !== undefined && pct >= 0 && pct <= 100 ? 1 - pct / 100 : undefined;
-      const sortedCoding = [...coding].sort(
-        (a, b) => (a.nextResetTime ?? Number.POSITIVE_INFINITY) - (b.nextResetTime ?? Number.POSITIVE_INFINITY),
-      );
+      const sortedCoding = [...coding]
+        .filter((c) => c.type !== "TIME_LIMIT")
+        .sort(
+          (a, b) => (a.nextResetTime ?? Number.POSITIVE_INFINITY) - (b.nextResetTime ?? Number.POSITIVE_INFINITY),
+        );
       const rows: QuotaTableRow[] = [
         ...s.quota.balances.map((b, i): QuotaTableRow => {
           const exp = b.expiresAt ? fmtExpiry(b.expiresAt) : "";
@@ -516,7 +525,7 @@ export function buildFrame(s: FrameState): Frame {
           return {
             label: i === 0 ? "Coding" : "",
             segs: [
-              { t: padName(truncateToWidth(codingWindowLabel(c.type, c.nextResetTime, i, nowMs), 13)), c: CYAN },
+              { t: padName(truncateToWidth(codingWindowLabel(c.type, c.nextResetTime, nowMs), 13)), c: CYAN },
               { t: "  " },
               ...quotaBar(frac, barColor),
               { t: "  " },
@@ -537,7 +546,11 @@ export function buildFrame(s: FrameState): Frame {
       }
     }
 
-    const totalRows = s.quota.balances.length + (s.quota.coding?.rows.length ?? 0);
+    // Hidden-row count tracks what this card actually renders: TIME_LIMIT
+    // (MCP tool-call) rows are filtered out above and must not count here.
+    const totalRows =
+      s.quota.balances.length +
+      (s.quota.coding?.rows.filter((c) => c.type !== "TIME_LIMIT").length ?? 0);
     const hiddenModels = Math.max(0, totalRows - quotaRows);
     const refreshRow = composeRow(w, lines.length, "", [
       { t: " Refresh ", c: BTN_GRAY, action: { kind: "key", key: "r" } },

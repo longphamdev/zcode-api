@@ -53,9 +53,9 @@ cd Android-APP
 
 - `Android-APP/` — Gradle project; everything Android-specific lives here.
 - `Android-APP/app/src/main/java/com/zcode/proxy/` — Kotlin shell.
-- `Android-APP/app/src/main/assets/server_bundle/` — tracked sidecar assets
-  (`config.example.yaml`, `webui.txt`, `zcode_system.json`); `server.cjs` is
-  gitignored build output — regenerate via `bun run build:android-bundle` +
+- `Android-APP/app/src/main/assets/server_bundle/` — generated `server.cjs`;
+  the web UI, system prompt and config template are inlined into the bundle.
+  It is gitignored build output — regenerate via `bun run build:android-bundle` +
   copy `dist/android/server.cjs` into it before building (Gradle's
   `checkServerBundle` preBuild task fails with a hint if it is missing).
 - `Android-APP/app/src/main/jniLibs/arm64-v8a/` — committed Node.js binary

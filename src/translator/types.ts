@@ -169,7 +169,7 @@ export interface OpenAIModelList {
 // ─────────────────────────────────────────────
 
 /** Anthropic image/video source: inline base64 payload or a remote URL. */
-export type AnthropicImageSource =
+type AnthropicImageSource =
   | { type: "base64"; media_type: string; data: string }
   | { type: "url"; url: string };
 
@@ -179,7 +179,7 @@ export type AnthropicImageSource =
  * the official ZCode client emits for `application/pdf` / `text/plain` files
  * (`_reverse` bundle 3.14.0, Anthropic request builder).
  */
-export type AnthropicDocumentSource =
+type AnthropicDocumentSource =
   | { type: "base64"; media_type: string; data: string }
   | { type: "text"; media_type: string; data: string }
   | { type: "url"; url: string };

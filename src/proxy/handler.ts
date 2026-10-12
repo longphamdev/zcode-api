@@ -218,7 +218,7 @@ export async function proxyRequest(
     }
   }
 
-  const useOrderedTransport = shouldUseOrderedTransport(config, clientSession, hasCustomFetchImpl);
+  const useOrderedTransport = shouldUseOrderedTransport(clientSession, hasCustomFetchImpl);
   let upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, captchaHeaders, clientSession);
   if (highspeedCard && highspeedAuth) {
     highspeedOrigPairs = upstreamHeaderPairs;
@@ -488,7 +488,7 @@ export async function proxyRequest(
   return passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq));
 }
 
-export function shouldUseOrderedTransport(config: ProxyConfig, clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {
+export function shouldUseOrderedTransport(clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {
   if (hasCustomFetchImpl) return false;
   return clientSession?.action === "enforce" || clientSession?.source === "explicit";
 }
@@ -518,7 +518,7 @@ export function capOrderedAcceptEncoding(
 }
 
 /** Max attempts (initial + 2 retries) for transient CONNECT-level failures. */
-export const MAX_CONNECT_ATTEMPTS = 3;
+const MAX_CONNECT_ATTEMPTS = 3;
 
 /**
  * Connect-level retry ladder shared by the chat hot path and /v1/responses.

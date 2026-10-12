@@ -60,7 +60,7 @@ export function parseServeArgs(args: string[]): ServeArgs {
   return { configPath, debug };
 }
 
-export function main(): void {
+function main(): void {
   // Fire-and-forget is race-safe: the dynamic import resolves in a microtask,
   // before the listener's event-loop callback can admit a request.
   void ensureNodeFetchNoTimeouts();

@@ -15,7 +15,6 @@ import {
   createUpdateCheckQueue,
   detectContainerRuntime,
   fetchLatestRelease,
-  isContainerRuntime,
   isNewerVersion,
   isSkippedVersion,
   parseVersion,
@@ -145,11 +144,9 @@ describe("detectContainerRuntime", () => {
     expect(detectContainerRuntime({ container: "systemd-nspawn" }, () => false)).toBe("unknown");
   });
 
-  it("is null on a bare host, and isContainerRuntime follows it", () => {
+  it("is null on a bare host", () => {
     expect(detectContainerRuntime({}, () => false)).toBeNull();
     expect(detectContainerRuntime({ container: "   " }, () => false)).toBeNull();
-    expect(isContainerRuntime({}, (p) => p === "/.dockerenv")).toBe(true);
-    expect(isContainerRuntime({}, () => false)).toBe(false);
   });
 });
 

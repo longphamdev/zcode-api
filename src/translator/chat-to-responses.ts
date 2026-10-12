@@ -32,7 +32,6 @@ import type {
 import type {
   ResponsesResponse,
   ResponsesOutputItem,
-  ResponsesContentPart,
   ResponsesStreamEvent,
   ResponsesUsage,
 } from "./responses-types.js";
