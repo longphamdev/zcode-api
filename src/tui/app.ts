@@ -424,6 +424,13 @@ export async function runTui(args: ServeArgs): Promise<void> {
   let activeOauth: { client: OAuthFlowClient; provider: ProviderId } | null = null;
 
   async function startLogin(opts: { paste?: boolean } = {}): Promise<void> {
+    // Stop-first guard (logout/switching discipline): a login completing
+    // mid-run hot-swaps the credential into the LIVE proxy (settleLogin),
+    // silently switching the account serving traffic.
+    if (state.serverStatus === "running" || state.serverStatus === "starting") {
+      setToast("stop the proxy before logging in (press s)", "err");
+      return;
+    }
     if (state.loginInFlight) {
       setToast("login already in progress", "info");
       return;
