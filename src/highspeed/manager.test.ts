@@ -283,6 +283,35 @@ describe("HighspeedManager", () => {
     expect(fetches).toBeGreaterThanOrEqual(2);
   });
 
+  it("redraws with the current account's auth after a cross-account card rejection", async () => {
+    const clock = { now: 1_000_000 };
+    const calls: DrawCall[] = [];
+    const authA: HighspeedAuth = { jwt: "jwt-account-a", codingPlanAuth: "keyA.secret", family: "zai" };
+    const authB: HighspeedAuth = { jwt: "jwt-account-b", codingPlanAuth: "keyB.secret", family: "bigmodel" };
+    const manager = makeManager((async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown>, headers: new Headers(init?.headers) });
+      return drawResponse(hitCard(clock.now));
+    }) as unknown as typeof fetch, clock);
+
+    // account A ignites the loop and holds the card
+    manager.onRequest("glm-5.3", SESSION_TASK, authA);
+    await settle();
+    expect(manager.activeCard()?.cardId).toBe("hsc_test_1");
+
+    // credential switch (proxy restart keeps the manager alive): B's requests
+    // early-return while the card is held — `latest` must still move to B
+    manager.onRequest("glm-5.3", SESSION_TASK, authB);
+    await settle();
+    expect(calls.length).toBe(1); // held card suppresses drawing
+
+    // upstream rejects B's use of A's card → selectionFallback redraw
+    manager.dropCard("upstream_rejected");
+    expect(await until(() => calls.length >= 2)).toBeTrue();
+    expect(calls[1]!.headers.get("authorization")).toBe("Bearer jwt-account-b");
+    expect(calls[1]!.headers.get("x-bigmodel-authorization")).toBe("Bearer keyB.secret");
+    expect(calls[1]!.body.provider).toBe("builtin:bigmodel-coding-plan");
+  });
+
   it("skips drawing without a JWT and matches only configured model prefixes", () => {
     let fetches = 0;
     const manager = makeManager((async () => {
