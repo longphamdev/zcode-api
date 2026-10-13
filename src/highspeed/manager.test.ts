@@ -144,7 +144,7 @@ describe("HighspeedManager", () => {
     }) as unknown as typeof fetch, clock, { onEvent: (m) => events.push(m) });
 
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
-    await until(() => fetches >= 2);
+    expect(await until(() => fetches >= 2)).toBeTrue();
     clock.now += 5 * 60_000 + 1; // idle window closed
     expect(await until(() => events.some((m) => m.includes("idle-stopped")))).toBeTrue();
     const fetchesAtStop = fetches;
@@ -159,7 +159,7 @@ describe("HighspeedManager", () => {
 
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
     await settle();
-    expect(manager.activeCard()).toBeDefined();
+    expect(manager.activeCard()?.cardId).toBe("hsc_test_1");
 
     // card expires, loop had stopped; 10 idle minutes pass
     clock.now += 295_000;
@@ -167,28 +167,28 @@ describe("HighspeedManager", () => {
     clock.now += 10 * 60_000;
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
     await settle();
-    expect(manager.activeCard()).toBeDefined(); // re-ignited and drew again
+    expect(manager.activeCard()?.cardId).toBe("hsc_test_1"); // re-ignited and drew again
   });
 
   it("keeps redrawing after the card expires mid-idle-window", async () => {
     const clock = { now: 1_000_000 };
-    let missesThenHit = 0;
+    let draws = 0;
     const manager = makeManager((async () => {
-      missesThenHit++;
-      return missesThenHit <= 4
+      draws++;
+      return draws <= 4
         ? drawResponse(null)
         : drawResponse(hitCard(clock.now));
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
-    await settle();
-    expect(manager.activeCard()).toBeDefined();
+    expect(await until(() => manager.activeCard()?.cardId === "hsc_test_1")).toBeTrue(); // hit on the 5th draw
+    const drawsAtFirstHit = draws;
 
     clock.now += 295_000; // 5s left — under the minimum-remaining guard
     expect(manager.activeCard()).toBeNull();
-    manager.onRequest("glm-5.3", SESSION_TASK, AUTH); // re-ignite inside idle window
-    await settle();
-    expect(manager.activeCard()).toBeDefined();
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH); // re-ignite inside idle window (sub-min card must not block)
+    expect(await until(() => draws > drawsAtFirstHit && manager.activeCard()?.cardId === "hsc_test_1")).toBeTrue();
+    expect(draws).toBeGreaterThan(drawsAtFirstHit); // fresh draws actually fired past the first hit
   });
 
   it("backs off 30s on HTTP 429, then resumes the heartbeat", async () => {
@@ -200,7 +200,7 @@ describe("HighspeedManager", () => {
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
-    await until(() => fetches >= 2);
+    await settle();
     const atTwo = fetches;
     clock.now += 20_000; // inside the 30s backoff
     await settle();
@@ -219,7 +219,7 @@ describe("HighspeedManager", () => {
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.2", SESSION_TASK, AUTH);
-    await until(() => fetches >= 2);
+    await settle();
     const atTwo = fetches;
     // Stay inside the idle window across both clock jumps so the gate under
     // test is the negative cache, not the idle self-extinguish.

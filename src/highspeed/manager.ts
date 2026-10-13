@@ -142,7 +142,10 @@ export class HighspeedManager {
     if (!this.isEligibleModel(model)) return;
     const now = this.now();
     this.expireCard(now);
-    if (this.card) return;
+    // an unusable card (< CARD_MIN_REMAINING_MS) must not block re-ignition —
+    // requests during those last seconds go out uncarded anyway, and holding
+    // the slot would stall the loop until full expiry
+    if (this.card && this.card.expiresAt - now >= CARD_MIN_REMAINING_MS) return;
     this.latest = { model, taskId: sessionTaskId ?? randomUUID(), auth };
     this.loopUntil = now + IDLE_MS;
     this.ensureLoop();
@@ -200,7 +203,9 @@ export class HighspeedManager {
   private tick(): void {
     const now = this.now();
     this.expireCard(now);
-    if (this.card) {
+    // same sub-min-remaining rule as onRequest: an unusable card must not
+    // stop the loop — the replacement draw fires while the old one winds down
+    if (this.card && this.card.expiresAt - now >= CARD_MIN_REMAINING_MS) {
       this.stopTimer();
       return;
     }
@@ -358,6 +363,7 @@ export function getDefaultHighspeedManager(config: {
   const key = `${config.highspeed.origin}\n${config.highspeed.models.join(",")}\n${config.identity.deviceMid}`;
   if (!defaultManager || key !== defaultManagerKey) {
     defaultManager?.stop();
+    if (defaultManager) liveManagers.delete(defaultManager);
     defaultManager = new HighspeedManager({
       origin: config.highspeed.origin,
       models: config.highspeed.models,

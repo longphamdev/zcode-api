@@ -219,6 +219,8 @@ export async function handleResponses(
       url: upstreamReq.url,
       headerPairs: pairs,
       credential: credentialString(cred),
+      oauthAccessToken: cred.oauthAccessToken,
+      provider: cred.provider,
       appVersion: opts.config.identity.appVersion,
       debug: debug ? (message) => console.log(`[responses] ${message}`) : undefined,
       send: (finalPairs) => {
