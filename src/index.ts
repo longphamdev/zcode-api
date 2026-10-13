@@ -30,6 +30,7 @@ import {
   type PanelSettings,
 } from "./server/panel.js";
 import { checkForUpdate } from "./update/check.js";
+import { shutdownAllHighspeed } from "./highspeed/manager.js";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -474,6 +475,12 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
         /* pool never started */
       }
       captchaModule = null;
+    }
+    try {
+      shutdownAllHighspeed(); // heartbeats are unref'd but stopped explicitly on shutdown
+      cleared.push("highspeed");
+    } catch {
+      /* loop never ignited */
     }
     if (cleared.length > 0) console.log(`shutdown: cleared ${cleared.join(" + ")} timers`);
     if (serverRef.current) {

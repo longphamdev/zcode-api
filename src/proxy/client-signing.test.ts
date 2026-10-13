@@ -38,7 +38,7 @@ interface HandshakeFixture {
   cipherB64: string;
 }
 
-async function buildHandshakeFixture(): Promise<HandshakeFixture> {
+async function buildHandshakeFixture(secret = API_KEY_SECRET, apiKeyId = API_KEY_ID): Promise<HandshakeFixture> {
   const keyPair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]) as CryptoKeyPair;
   const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", keyPair.privateKey));
   const publicKeyRaw = new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey));
@@ -48,11 +48,11 @@ async function buildHandshakeFixture(): Promise<HandshakeFixture> {
   for (const b of pkcs8) pkcs8Binary += String.fromCharCode(b);
   const plainBytes = new TextEncoder().encode(btoa(pkcs8Binary));
 
-  const aesKeyBits = hkdf(API_KEY_SECRET, "ed25519_priv");
+  const aesKeyBits = hkdf(secret, "ed25519_priv");
   const aesKey = await crypto.subtle.importKey("raw", new Uint8Array(aesKeyBits), "AES-GCM", false, ["encrypt"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const encrypted = new Uint8Array(await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(API_KEY_ID), tagLength: 128 },
+    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(apiKeyId), tagLength: 128 },
     aesKey,
     plainBytes,
   ));
@@ -275,7 +275,13 @@ describe("sendWithClientSigning", () => {
       appVersion: "3.8.1",
       send: async (pairs) => {
         sends.push(pairs);
-        return sends.length === 1 ? verify401() : new Response("ok", { status: 200 });
+        if (sends.length > 1) return new Response("ok", { status: 200 });
+        // Yield real time before the 401: the retry re-sign must land in a
+        // later millisecond than the first, or the X-Client-Ts inequality
+        // below races (Date.now() is ms-granular; all-microtask mocks can
+        // otherwise complete both signs within the same ms).
+        await new Promise((r) => setTimeout(r, 2));
+        return verify401();
       },
     });
     expect(resp.status).toBe(200);
@@ -354,5 +360,106 @@ describe("poW nonce/format details", () => {
     const a = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     const b = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     expect(pair(a, "X-Client-Nonce")).not.toBe(pair(b, "X-Client-Nonce"));
+  });
+});
+
+// ── 3.15.1 project-access-token plane (bigmodel OAuth, `FSr` dual form) ──
+
+function b64url(obj: unknown): string {
+  return Buffer.from(JSON.stringify(obj)).toString("base64url");
+}
+function makeProjectJwt(apiKey: string, expSeconds: number): string {
+  return `${b64url({ alg: "HS256", typ: "JWT", sign_type: "SIGN" })}.${b64url({ token_use: "project_access", api_key: apiKey, exp: expSeconds })}.sig`;
+}
+const OAUTH = "oauth-es512-token";
+const JWT_CRED = makeProjectJwt("testkey", Math.floor(Date.now() / 1000) + 3600);
+const JWT_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions";
+
+describe("project-access JWT signing form (bigmodel OAuth)", () => {
+  it("parses the JWT form: apiKeyId from the api_key claim, handshake body field accessToken, Bearer auth", async () => {
+    // privateCipher must be encrypted under the JWT (the signing secret), AAD = api_key claim
+    const fixture = await buildHandshakeFixture(JWT_CRED, "testkey");
+    const calls: MockCalls = { handshakes: [] };
+    const manager = new ClientSigningManager({
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url === JWT_URL) throw new Error("LLM request must not leak into signing fetch");
+        if (url.endsWith("/api/paas/c1f3a7e2/v2/client")) {
+          calls.handshakes.push({
+            url,
+            body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+            auth: new Headers(init?.headers).get("authorization") ?? "",
+          });
+          return new Response(JSON.stringify({ code: 200, data: { privateCipher: fixture.cipherB64 } }), { status: 200 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }) as unknown as typeof fetch,
+    });
+
+    const signed = await manager.sign(JWT_URL, BASE_PAIRS, { credential: JWT_CRED, appVersion: "3.8.1" });
+    expect(pair(signed, "X-Client-Sig")).toBeDefined();
+    const hs = calls.handshakes[0]!;
+    // FSr semantics: body field switches to accessToken, auth = Bearer JWT
+    expect(Object.keys(hs.body)).toContain("accessToken");
+    expect(hs.body.accessToken).toBe(JWT_CRED);
+    expect(hs.auth).toBe(`Bearer ${JWT_CRED}`);
+    expect(hs.body.nonce).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("mints a project JWT via getCustomerInfo + access_tokens (bare vs Bearer auth split), then signs", async () => {
+    const mintedJwt = makeProjectJwt("testkey", Math.floor(Date.now() / 1000) + 3600);
+    const fixture = await buildHandshakeFixture(mintedJwt, "testkey");
+    const calls: MockCalls = { handshakes: [] };
+    const mintUrls: string[] = [];
+    const mintAuths: string[] = [];
+    const manager = new ClientSigningManager({
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const auth = new Headers(init?.headers).get("authorization") ?? "";
+        if (url.endsWith("/api/biz/customer/getCustomerInfo")) {
+          mintUrls.push(url); mintAuths.push(auth);
+          // bare token (no Bearer) on bigmodel getCustomerInfo
+          expect(auth).toBe(OAUTH);
+          return new Response(JSON.stringify({ code: 200, data: { organizations: [{ organizationId: "org-1", projects: [{ projectId: "proj-1", projectType: "1" }] }] } }), { status: 200 });
+        }
+        if (url.includes("/api_keys/testkey/access_tokens")) {
+          mintUrls.push(url); mintAuths.push(auth);
+          // Bearer form on access_tokens
+          expect(auth).toBe(`Bearer ${OAUTH}`);
+          expect(JSON.parse(String(init?.body))).toEqual({ clientType: "zcode", clientVersion: "3.15.1" });
+          return new Response(JSON.stringify({ code: 200, data: { accessToken: mintedJwt } }), { status: 200 });
+        }
+        if (url.endsWith("/api/paas/c1f3a7e2/v2/client")) {
+          calls.handshakes.push({ url, body: JSON.parse(String(init?.body)) as Record<string, unknown>, auth: new Headers(init?.headers).get("authorization") ?? "" });
+          return new Response(JSON.stringify({ code: 200, data: { privateCipher: fixture.cipherB64 } }), { status: 200 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }) as unknown as typeof fetch,
+    });
+
+    const signed = await manager.sign(JWT_URL, BASE_PAIRS, {
+      credential: CRED, appVersion: "3.8.1", oauthAccessToken: OAUTH, provider: "bigmodel",
+    });
+    console.log("MINTS:", JSON.stringify(mintUrls));
+    expect(pair(signed, "X-Client-Sig")).toBeDefined();
+    expect(mintUrls.some((u) => u.includes("/api_keys/testkey/access_tokens"))).toBeTrue();
+    // minted JWT form handshake: accessToken body field
+    expect(Object.keys(calls.handshakes[0]!.body)).toContain("accessToken");
+  });
+
+  it("negative-caches mint failures (one mint attempt per cooldown window)", async () => {
+    let mints = 0;
+    const manager = new ClientSigningManager({
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url.includes("/access_tokens")) { mints++; return new Response(JSON.stringify({ code: 404 }), { status: 200 }); }
+        if (url.includes("getCustomerInfo")) return new Response(JSON.stringify({ code: 200, data: { organizations: [{ organizationId: "org-1", projects: [{ projectId: "p1" }] }] } }), { status: 200 });
+        throw new Error(`unexpected fetch: ${url}`);
+      }) as unknown as typeof fetch,
+    });
+    const cred = { credential: CRED, appVersion: "3.8.1", oauthAccessToken: OAUTH, provider: "bigmodel" as const };
+    await manager.sign(JWT_URL, BASE_PAIRS, cred);
+    await manager.sign(JWT_URL, BASE_PAIRS, cred);
+    expect(mints).toBe(1); // negative cache: no re-mint inside the window
   });
 });

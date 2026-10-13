@@ -168,6 +168,9 @@ export class KeyResolver {
       if (secret) fullKey = `${apiKey}.${secret}`;
     } catch { /* use apiKey only */ }
 
-    return { apiKey: fullKey, provider: "bigmodel", userId };
+    // 3.15.1 project-access-token plane: the raw OAuth token mints the signing
+    // JWT (`…/access_tokens`); without it signing falls back to the apiKey
+    // form and fails open on the bigmodel handshake.
+    return { apiKey: fullKey, provider: "bigmodel", userId, oauthAccessToken: accessToken };
   }
 }

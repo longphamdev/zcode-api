@@ -164,8 +164,10 @@ describe("proxyRequest highspeed wiring", () => {
     expect(upstreamCalls[1]!.headers.get("x-api-key")).toBe(CRED);
     expect(upstreamCalls[1]!.headers.get("authorization")).toBe(`Bearer ${CRED}`);
     expect(JSON.parse(upstreamCalls[1]!.body).model).toBe("glm-5.1");
-    // card dropped: subsequent requests go uncarded until a fresh draw
-    expect(manager.activeCard()).toBeNull();
+    // card dropped; the active session re-ignites the loop and the always-hit
+    // draw mock hands back a fresh card (2026-10-12 max-rate loop contract)
+    await new Promise((r) => setTimeout(r, 5));
+    expect(manager.activeCard()?.cardId).toBe("hsc_wiring_1");
   });
 
   it("keeps card headers on connect-retry rebuilds (attempt ≥ 2 rebuilds from the swapped pairs)", async () => {

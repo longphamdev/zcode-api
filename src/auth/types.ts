@@ -19,6 +19,14 @@ export interface Credential {
   userId?: string;
   /** JWT token for start-plan (zcode.z.ai). Present when login captured the ZCode plan token. */
   jwt?: string;
+  /**
+   * Raw provider OAuth access token (bigmodel). Required by the 3.15.1
+   * project-access-token plane: getCustomerInfo (bare) and
+   * `…/api_keys/{id}/access_tokens` (Bearer) mint the signing JWT
+   * (`project_access`, 5h). Absent for API-key imports and pre-patch logins
+   * — signing then falls back to the apiKey form and fails open.
+   */
+  oauthAccessToken?: string;
 }
 
 /**

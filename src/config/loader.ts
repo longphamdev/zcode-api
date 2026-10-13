@@ -31,7 +31,7 @@ const ENV = {
 
 /** Mirrors the ZCode desktop release (`_reverse/NOTEPAD.md`); bump per client
  *  release or User-Agent/X-ZCode-App-Version become distinguishable. */
-export const DEFAULT_APP_VERSION = "3.14.0";
+export const DEFAULT_APP_VERSION = "3.15.1";
 
 const DEFAULTS = {
   PORT: 8080,

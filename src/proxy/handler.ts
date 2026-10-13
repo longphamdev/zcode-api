@@ -269,6 +269,8 @@ export async function proxyRequest(
       url: req.url,
       headerPairs: pairs,
       credential: credentialString(cred),
+      oauthAccessToken: cred.oauthAccessToken,
+      provider: cred.provider,
       appVersion: config.identity.appVersion,
       debug: debug ? (message) => debugLine(reqId, message) : undefined,
       send: (finalPairs) => {
