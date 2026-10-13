@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, afterEach } from "bun:test";
 import {
   HighspeedManager,
   applyHighspeedCardHeaders,
@@ -14,34 +14,57 @@ const SESSION_TASK = "11111111-2222-3333-4444-555555555555";
 
 interface DrawCall { url: string; body: Record<string, unknown>; headers: Headers; }
 
-function drawResponse(card: Record<string, unknown> | null, nextDrawAt: number): Response {
-  return new Response(JSON.stringify({ code: 0, msg: "success", data: { card, next_draw_at: nextDrawAt } }), { status: 200 });
+function drawResponse(card: Record<string, unknown> | null, nextDrawAt?: number): Response {
+  return new Response(JSON.stringify({ code: 0, msg: "success", data: { card, next_draw_at: nextDrawAt ?? 0 } }), { status: 200 });
 }
 
 function hitCard(now: number, model = "glm-5.3-highspeed"): Record<string, unknown> {
   return { card_id: "hsc_test_1", task_id: SESSION_TASK, provider: "builtin:zai-coding-plan", model, issued_at: now, expires_at: now + 300_000 };
 }
 
-function makeManager(fetchImpl: typeof fetch, clock: { now: number }) {
-  return new HighspeedManager({
+/** Live managers registry — afterEach stops every heartbeat timer. */
+const live: HighspeedManager[] = [];
+afterEach(() => {
+  for (const m of live.splice(0)) m.stop();
+});
+
+function makeManager(
+  fetchImpl: typeof fetch,
+  clock: { now: number },
+  opts: { retryMs?: number; onEvent?: (message: string) => void } = {},
+): HighspeedManager {
+  const manager = new HighspeedManager({
     origin: "https://zcode.z.ai",
     models: ["glm-5.3", "glm-5.2", "glm-5.1"],
     fetchImpl,
     now: () => clock.now,
+    retryMs: opts.retryMs ?? 2,
+    onEvent: opts.onEvent,
   });
+  live.push(manager);
+  return manager;
 }
 
 async function settle(): Promise<void> {
   await new Promise((r) => setTimeout(r, 5));
 }
 
+/** Poll until cond() holds or ~1s elapses (real-timer tests). */
+async function until(cond: () => boolean): Promise<boolean> {
+  for (let i = 0; i < 200; i++) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return cond();
+}
+
 describe("HighspeedManager", () => {
-  it("draws on eligible request, holds the card, and reuses it without redrawing", async () => {
+  it("draws on the first eligible request and holds the single card slot", async () => {
     const clock = { now: 1_000_000 };
     const calls: DrawCall[] = [];
     const manager = makeManager((async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown>, headers: new Headers(init?.headers) });
-      return drawResponse(hitCard(clock.now), clock.now + 120_000);
+      return drawResponse(hitCard(clock.now));
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
@@ -64,9 +87,42 @@ describe("HighspeedManager", () => {
     expect(calls[0]!.body.task_id).toBe(SESSION_TASK);
     expect(calls[0]!.body.provider).toBe("builtin:zai-coding-plan");
     expect(calls[0]!.body.model).toBe("glm-5.1");
+    // deviceMid omitted when not provided (makeManager passes none)
+    expect(calls[0]!.headers.get("x-device-mid")).toBeNull();
   });
 
-  it("treats a miss as cooldown: no redraw until server next_draw_at", async () => {
+  it("sends X-Device-Mid on draws when provided (activity-gate 3001 fix, live 2026-10-12)", async () => {
+    const clock = { now: 1_000_000 };
+    const calls: DrawCall[] = [];
+    const manager = new HighspeedManager({
+      origin: "https://zcode.z.ai",
+      models: ["glm-5.3"],
+      deviceMid: "  e6e1ef31-b69a-496b-8428-ae909abc8904  ",
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown>, headers: new Headers(init?.headers) });
+        return drawResponse(hitCard(clock.now));
+      }) as unknown as typeof fetch,
+      now: () => clock.now,
+    });
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    await settle();
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.headers.get("x-device-mid")).toBe("e6e1ef31-b69a-496b-8428-ae909abc8904");
+  });
+
+  it("draws synchronously on ignite: the first fetch starts before any await", () => {
+    const clock = { now: 1_000_000 };
+    let fetches = 0;
+    const manager = makeManager((async () => {
+      fetches++;
+      return drawResponse(null);
+    }) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    expect(fetches).toBe(1); // fired within onRequest, not on a timer
+  });
+
+  it("retries at the heartbeat cadence after a miss — server next_draw_at is ignored", async () => {
     const clock = { now: 1_000_000 };
     let fetches = 0;
     const manager = makeManager((async () => {
@@ -75,16 +131,83 @@ describe("HighspeedManager", () => {
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
-    await settle();
-    clock.now += 60_000;
-    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
-    await settle();
-    expect(fetches).toBe(1); // still cooling down
+    expect(await until(() => fetches >= 3)).toBeTrue(); // ≥3 tries without new requests
+  });
 
-    clock.now += 61_000; // past next_draw_at
+  it("stops the loop 5 minutes after the last eligible request (idle self-extinguish)", async () => {
+    const clock = { now: 1_000_000 };
+    let fetches = 0;
+    const events: string[] = [];
+    const manager = makeManager((async () => {
+      fetches++;
+      return drawResponse(null);
+    }) as unknown as typeof fetch, clock, { onEvent: (m) => events.push(m) });
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    await until(() => fetches >= 2);
+    clock.now += 5 * 60_000 + 1; // idle window closed
+    expect(await until(() => events.some((m) => m.includes("idle-stopped")))).toBeTrue();
+    const fetchesAtStop = fetches;
+    clock.now += 60_000;
+    await settle();
+    expect(fetches).toBe(fetchesAtStop); // loop is dead — no more draws
+  });
+
+  it("re-ignites after idle-stop when a new request arrives", async () => {
+    const clock = { now: 1_000_000 };
+    const manager = makeManager((async () => drawResponse(hitCard(clock.now))) as unknown as typeof fetch, clock);
+
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
     await settle();
-    expect(fetches).toBe(2);
+    expect(manager.activeCard()).toBeDefined();
+
+    // card expires, loop had stopped; 10 idle minutes pass
+    clock.now += 295_000;
+    expect(manager.activeCard()).toBeNull();
+    clock.now += 10 * 60_000;
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    await settle();
+    expect(manager.activeCard()).toBeDefined(); // re-ignited and drew again
+  });
+
+  it("keeps redrawing after the card expires mid-idle-window", async () => {
+    const clock = { now: 1_000_000 };
+    let missesThenHit = 0;
+    const manager = makeManager((async () => {
+      missesThenHit++;
+      return missesThenHit <= 4
+        ? drawResponse(null)
+        : drawResponse(hitCard(clock.now));
+    }) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    await settle();
+    expect(manager.activeCard()).toBeDefined();
+
+    clock.now += 295_000; // 5s left — under the minimum-remaining guard
+    expect(manager.activeCard()).toBeNull();
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH); // re-ignite inside idle window
+    await settle();
+    expect(manager.activeCard()).toBeDefined();
+  });
+
+  it("backs off 30s on HTTP 429, then resumes the heartbeat", async () => {
+    const clock = { now: 1_000_000 };
+    let fetches = 0;
+    const manager = makeManager((async () => {
+      fetches++;
+      return new Response("", { status: 429 });
+    }) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
+    await until(() => fetches >= 2);
+    const atTwo = fetches;
+    clock.now += 20_000; // inside the 30s backoff
+    await settle();
+    expect(fetches).toBe(atTwo); // no retries while backing off
+
+    clock.now += 11_000; // past backoff
+    expect(await until(() => fetches > atTwo)).toBeTrue();
   });
 
   it("negative-caches account unavailability (503 / biz 3404) for 10 minutes", async () => {
@@ -96,52 +219,33 @@ describe("HighspeedManager", () => {
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.2", SESSION_TASK, AUTH);
-    await settle();
-    clock.now += 120_000; // past a normal cooldown
+    await until(() => fetches >= 2);
+    const atTwo = fetches;
+    // Stay inside the idle window across both clock jumps so the gate under
+    // test is the negative cache, not the idle self-extinguish.
+    clock.now += 120_000;
     manager.onRequest("glm-5.2", SESSION_TASK, AUTH);
     await settle();
-    expect(fetches).toBe(1); // still negative-cached
+    expect(fetches).toBe(atTwo); // still negative-cached
 
-    clock.now += 10 * 60_000 + 1_000;
+    clock.now += 8 * 60_000 + 1_000; // past 10min negative cache
     manager.onRequest("glm-5.2", SESSION_TASK, AUTH);
-    await settle();
-    expect(fetches).toBe(2);
+    expect(await until(() => fetches > atTwo)).toBeTrue();
   });
 
-  it("backs off 30s on HTTP 429", async () => {
+  it("draws with the latest request's model after a mid-loop model change", async () => {
     const clock = { now: 1_000_000 };
-    let fetches = 0;
-    const manager = makeManager((async () => {
-      fetches++;
-      return new Response("", { status: 429 });
+    const bodies: Record<string, unknown>[] = [];
+    const manager = makeManager((async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return drawResponse(null);
     }) as unknown as typeof fetch, clock);
 
-    manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
-    await settle();
-    clock.now += 20_000;
-    manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
-    await settle();
-    expect(fetches).toBe(1);
-    clock.now += 11_000;
-    manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
-    await settle();
-    expect(fetches).toBe(2);
-  });
-
-  it("expires cards and applies a minimum-remaining window", async () => {
-    const clock = { now: 1_000_000 };
-    const manager = makeManager((async () => drawResponse(hitCard(clock.now), clock.now + 120_000)) as unknown as typeof fetch, clock);
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
-    await settle();
-    expect(manager.activeCard()).toBeDefined();
-
-    clock.now += 295_000; // 5s left on the window
-    expect(manager.activeCard()).toBeNull(); // under the 10s minimum-remaining guard
-
-    clock.now += 10_000; // past expires_at
-    manager.onRequest("glm-5.3", SESSION_TASK, AUTH); // redraw allowed
-    await settle();
-    // second draw fired (fetch mock returns a fresh card each call)
+    manager.onRequest("glm-5.2", SESSION_TASK, AUTH); // newer params win
+    await until(() => bodies.length >= 3);
+    expect(bodies.slice(1).every((b) => b.model === "glm-5.2")).toBeTrue();
+    expect(bodies[0]!.model).toBe("glm-5.3");
   });
 
   it("deduplicates concurrent draws into a single fetch", async () => {
@@ -150,7 +254,7 @@ describe("HighspeedManager", () => {
     const manager = makeManager((async () => {
       fetches++;
       await new Promise((r) => setTimeout(r, 10));
-      return drawResponse(hitCard(clock.now), clock.now + 120_000);
+      return drawResponse(hitCard(clock.now));
     }) as unknown as typeof fetch, clock);
 
     manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
@@ -161,15 +265,32 @@ describe("HighspeedManager", () => {
     expect(fetches).toBe(1);
   });
 
-  it("skips drawing without a JWT and matches only configured model prefixes", async () => {
+  it("drops the card on upstream rejection and redraws immediately", async () => {
+    const clock = { now: 1_000_000 };
     let fetches = 0;
     const manager = makeManager((async () => {
       fetches++;
-      return drawResponse(null, 0);
+      return drawResponse(hitCard(clock.now));
+    }) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    await settle();
+    expect(manager.activeCard()).toBeDefined();
+
+    manager.dropCard("upstream_rejected");
+    await settle();
+    expect(await until(() => manager.activeCard()?.cardId === "hsc_test_1")).toBeTrue();
+    expect(fetches).toBeGreaterThanOrEqual(2);
+  });
+
+  it("skips drawing without a JWT and matches only configured model prefixes", () => {
+    let fetches = 0;
+    const manager = makeManager((async () => {
+      fetches++;
+      return drawResponse(null);
     }) as unknown as typeof fetch, { now: 1_000_000 });
 
     manager.onRequest("glm-5.3", SESSION_TASK, { ...AUTH, jwt: "  " });
-    await settle();
     expect(fetches).toBe(0);
 
     expect(manager.isEligibleModel("glm-5.3")).toBeTrue();
@@ -177,8 +298,25 @@ describe("HighspeedManager", () => {
     expect(manager.isEligibleModel("glm-4.6")).toBeFalse();
     expect(manager.isEligibleModel(undefined)).toBeFalse();
     manager.onRequest("glm-4.6", SESSION_TASK, AUTH);
-    await settle();
     expect(fetches).toBe(0);
+  });
+
+  it("surfaces idle-stop exactly once via onEvent", async () => {
+    const clock = { now: 1_000_000 };
+    let fetches = 0;
+    const events: string[] = [];
+    const manager = makeManager((async () => {
+      fetches++;
+      return drawResponse(null);
+    }) as unknown as typeof fetch, clock, { onEvent: (m) => events.push(m) });
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    await until(() => fetches >= 1);
+    clock.now += 5 * 60_000 + 1;
+    expect(await until(() => events.filter((m) => m.includes("idle-stopped")).length === 1)).toBeTrue();
+    clock.now += 60_000;
+    await settle();
+    expect(events.filter((m) => m.includes("idle-stopped")).length).toBe(1); // no repeat
   });
 });
 

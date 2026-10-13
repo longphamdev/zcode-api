@@ -204,13 +204,15 @@ clientSigning:
 
 # HighSpeed 加速卡 (mirrors the ZCode 3.15.1 HighspeedCardService — Coding Plan
 # subscriber benefit, server-side random draw). Enabled by default, matching the
-# official client (which has no toggle): eligible coding-plan requests lazily
-# trigger POST {origin}/api/v1/highspeed/draw; on a hit, requests inside the
-# card window are rewritten to the card model with the highspeed auth set
-# (X-Highspeed-Card-ID) and stay unsigned, exactly like the official client.
-# Misses/cooldowns honor server next_draw_at; accounts outside the rollout
-# (503/3404) are negative-cached 10min. task_id reuses the local client-session
-# affinity inference. Env override: ZCODE_HIGHSPEED_ENABLED=false.
+# official client (which has no toggle): the first eligible coding-plan request
+# ignites a background draw loop (POST {origin}/api/v1/highspeed/draw at ~1/s —
+# the measured token-bucket refill rate; server next_draw_at is ignored on a
+# miss); on a hit, requests inside the card window are rewritten to the card
+# model with the highspeed auth set (X-Highspeed-Card-ID) and stay unsigned,
+# exactly like the official client. The loop self-extinguishes 5 minutes after
+# the last eligible request; account unavailability (503/3404) is
+# negative-cached 10min, HTTP 429 backs off 30s. task_id reuses the local
+# client-session affinity inference. Env override: ZCODE_HIGHSPEED_ENABLED=false.
 highspeed:
   enabled: true
   origin: "https://zcode.z.ai"
