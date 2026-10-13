@@ -275,7 +275,13 @@ describe("sendWithClientSigning", () => {
       appVersion: "3.8.1",
       send: async (pairs) => {
         sends.push(pairs);
-        return sends.length === 1 ? verify401() : new Response("ok", { status: 200 });
+        if (sends.length > 1) return new Response("ok", { status: 200 });
+        // Yield real time before the 401: the retry re-sign must land in a
+        // later millisecond than the first, or the X-Client-Ts inequality
+        // below races (Date.now() is ms-granular; all-microtask mocks can
+        // otherwise complete both signs within the same ms).
+        await new Promise((r) => setTimeout(r, 2));
+        return verify401();
       },
     });
     expect(resp.status).toBe(200);
