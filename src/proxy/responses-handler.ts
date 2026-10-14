@@ -37,6 +37,17 @@ async function loadCaptcha(): Promise<CaptchaModule> {
 }
 import { getDefaultEndpointRouting, type EndpointRoutingService } from "./endpoint-routing.js";
 import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManager } from "./client-signing.js";
+import { resolveSessionContext } from "./session-context.js";
+import {
+  applyHighspeedCardHeaders,
+  getDefaultHighspeedManager,
+  highspeedAuthFrom,
+  isHighspeedCardRejection,
+  rewriteBodyModel,
+  type HighspeedAuth,
+  type HighspeedCard,
+  type HighspeedManager,
+} from "../highspeed/manager.js";
 import { buildAnthropicMetadataUserId } from "./trace-headers.js";
 import { credentialString } from "../auth/types.js";
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
@@ -79,6 +90,8 @@ export interface ResponsesHandlerOptions {
   endpointRouting?: EndpointRoutingService | null;
   /** Override the process-wide client signing manager (for testing). `null` disables. */
   clientSigning?: ClientSigningManager | null;
+  /** Override the process-wide highspeed card manager (for testing). `null` disables. */
+  highspeed?: HighspeedManager | null;
   /** Override the lazily-imported captcha module (for testing). */
   captcha?: CaptchaModule;
 }
@@ -166,27 +179,49 @@ export async function handleResponses(
   // Responses → Chat → Anthropic translator chain runs unconditionally.
   const startPlan = opts.config.plan === "start-plan";
   const upstreamFormat: "openai" | "anthropic" = "anthropic";
-  let upstreamRequestBody: string;
-  {
-    let anthropicReq: AnthropicMessagesRequest;
-    try {
-      anthropicReq = translateRequestOpenAIToAnthropic(chatRequest);
-    } catch (err) {
-      return errorResponse(400, "translation_failed", `Chat→Anthropic translation failed: ${(err as Error).message}`);
-    }
-    // userId mirrors handler.ts for BOTH plans: the bundle's `E2e` is
-    // provider-kind gated only (never plan-gated), so start-plan carries the
-    // same device/session blob as coding-plan. The /v1/responses path has no
-    // client-session resolution — session_id falls back to "" (a legal `bnt`
-    // output in the bundle).
-    upstreamRequestBody = transformRequestBody(JSON.stringify(anthropicReq), {
-      format: "anthropic",
-      metadataUserId: buildAnthropicMetadataUserId(opts.config.identity.deviceMid, undefined),
-      startPlan,
-      provider: opts.config.provider,
-    }) ?? JSON.stringify(anthropicReq);
+  let anthropicReq: AnthropicMessagesRequest;
+  try {
+    anthropicReq = translateRequestOpenAIToAnthropic(chatRequest);
+  } catch (err) {
+    return errorResponse(400, "translation_failed", `Chat→Anthropic translation failed: ${(err as Error).message}`);
   }
-  const transformedBody = upstreamRequestBody;
+  const anthropicBody = JSON.stringify(anthropicReq);
+  // Session affinity 收口（2026-10-14，与 handler.ts 同构）：在转换后的
+  // anthropic 侧计算，同一逻辑对话与 /v1/messages 得到同构的会话身份——
+  // trace 头、metadata.user_id 与 highspeed task_id 共用该结果。
+  const clientSession = resolveSessionContext({ clientReq, body: anthropicBody, traceBody: rawBody, upstreamFormat: "anthropic", model: req.model, config: opts.config });
+  // userId mirrors handler.ts for BOTH plans: the bundle's `E2e` is
+  // provider-kind gated only (never plan-gated), so start-plan carries the
+  // same device/session blob as coding-plan.
+  const metadataUserId = buildAnthropicMetadataUserId(opts.config.identity.deviceMid, clientSession?.sessionId);
+  let transformedBody = transformRequestBody(anthropicBody, {
+    format: "anthropic",
+    metadataUserId,
+    startPlan,
+    provider: opts.config.provider,
+  }) ?? anthropicBody;
+
+  // ── HighSpeed 加速卡（2026-10-14 接线，与 handler.ts 同构）──
+  // coding-plan + 合格模型：抽卡触发（task_id=upstreamSessionId）；持卡窗口内
+  // 改写模型为卡上模型并换装 JWT 鉴权套装；挂卡请求永不签名（官方静态规则）。
+  const highspeedManager = opts.highspeed !== undefined ? opts.highspeed : getDefaultHighspeedManager(opts.config);
+  let highspeedCard: HighspeedCard | undefined;
+  let highspeedAuth: HighspeedAuth | undefined;
+  let highspeedOrigBody: string | undefined;
+  let highspeedOrigPairs: UpstreamHeaderPair[] | undefined;
+  if (highspeedManager && !startPlan && highspeedManager.isEligibleModel(req.model) && transformedBody) {
+    const hsAuth = highspeedAuthFrom(cred);
+    if (hsAuth) {
+      highspeedAuth = hsAuth;
+      highspeedManager.onRequest(req.model, clientSession?.upstreamSessionId, hsAuth);
+      const card = highspeedManager.activeCardFor(req.model);
+      if (card) {
+        highspeedOrigBody = transformedBody;
+        transformedBody = rewriteBodyModel(transformedBody, card.model);
+        highspeedCard = card;
+      }
+    }
+  }
 
   // ── 6. POST upstream ──
   // start-plan gates every upstream call behind an Aliyun captcha token. The
@@ -203,12 +238,18 @@ export async function handleResponses(
       // Fall through: the 3007 retry below solves on demand.
     }
   }
-  const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, captchaHeaders, undefined);
-  const upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, captchaHeaders, undefined);
+  const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, captchaHeaders, clientSession);
+  let wireHeaders = upstreamHeaders;
+  if (highspeedCard && highspeedAuth) {
+    highspeedOrigPairs = upstreamHeaders;
+    wireHeaders = applyHighspeedCardHeaders(upstreamHeaders, highspeedCard, highspeedAuth);
+  }
+  const upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, captchaHeaders, clientSession);
   if (debug) console.log(`[responses] → POST ${upstreamReq.url}`);
 
   const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(opts.config);
-  const signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config);
+  // 官方 3.15.1 静态规则：highspeed mode 的推理请求永不签名（`TUs` 返回 false）。
+  const signer = highspeedCard ? null : (opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config));
   const dispatch = async (pairs: UpstreamHeaderPair[]): Promise<Response> => {
     const routed = routing ? await routing.resolve(upstreamReq.url, credentialString(cred)) : null;
     const sendUrl = routed?.routed ? routed.url : upstreamReq.url;
@@ -239,11 +280,28 @@ export async function handleResponses(
     // Connect-retry ladder mirrors the chat hot path (handler.ts): 3 attempts,
     // fresh Request per dispatch (built inside `dispatch`), 500ms×attempt
     // backoff, no retry once the client aborted.
-    upstreamResp = await dispatchWithConnectRetry(() => dispatch(upstreamHeaders), {
+    upstreamResp = await dispatchWithConnectRetry(() => dispatch(wireHeaders), {
       isAborted: () => clientReq.signal.aborted,
     });
   } catch (err) {
     return errorResponse(502, "upstream_unreachable", (err as Error).message);
+  }
+
+  // highspeed selectionFallback（官方语义，与 handler.ts 同构）：挂卡请求收到
+  // 401 / biz 3402 → 弃卡 + 原模型 + 常规双头鉴权（恢复签名）重发一次。
+  if (highspeedCard && highspeedAuth && highspeedOrigBody !== undefined && highspeedOrigPairs !== undefined
+    && await isHighspeedCardRejection(upstreamResp)) {
+    console.log("[responses] highspeed card rejected upstream — falling back to session model");
+    highspeedManager?.dropCard("upstream_rejected");
+    transformedBody = highspeedOrigBody;
+    const retryPairs = highspeedOrigPairs;
+    try {
+      upstreamResp = await dispatchWithConnectRetry(() => dispatch(retryPairs), {
+        isAborted: () => clientReq.signal.aborted,
+      });
+    } catch (err) {
+      return errorResponse(502, "upstream_unreachable", (err as Error).message);
+    }
   }
 
   // Captcha challenge retry (mirrors handler.ts via the shared captcha-retry

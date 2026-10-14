@@ -191,7 +191,45 @@ describe("HighspeedManager", () => {
     expect(draws).toBeGreaterThan(drawsAtFirstHit); // fresh draws actually fired past the first hit
   });
 
-  it("backs off 30s on HTTP 429, then resumes the heartbeat", async () => {
+  it("blocks only the rejected model on draw 400 and keeps the account drawable (2026-10-14 flash finding)", async () => {
+    const clock = { now: 1_000_000 };
+    let calls = 0;
+    const manager = makeManager((async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls++;
+      const body = JSON.parse(String(init?.body)) as { model: string };
+      return body.model === "glm-5.3-flash"
+        ? new Response(JSON.stringify({ code: 3001, msg: "parameter error", logid: "x" }), { status: 400 })
+        : drawResponse(hitCard(clock.now));
+    }) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.3-flash", SESSION_TASK, AUTH);
+    await settle();
+    expect(calls).toBe(1); // one probe draw sufficed to learn the rejection
+
+    manager.onRequest("glm-5.3-flash", SESSION_TASK, AUTH); // blocked — no refetch
+    await settle();
+    expect(calls).toBe(1);
+
+    // the account itself is fine: another model draws and hits normally
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    expect(await until(() => manager.activeCard()?.cardId === "hsc_test_1")).toBeTrue();
+    expect(calls).toBe(2);
+  });
+
+  it("never mounts a non-flash card on a flash request (tier guard)", async () => {
+    const clock = { now: 1_000_000 };
+    const manager = makeManager((async () => drawResponse(hitCard(clock.now, "glm-5.3"))) as unknown as typeof fetch, clock);
+
+    manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
+    expect(await until(() => manager.activeCard()?.cardId === "hsc_test_1")).toBeTrue();
+
+    // same tier (non-flash family) → mounts; flash → never (model-rewrite hazard)
+    expect(manager.activeCardFor("glm-5.2")?.cardId).toBe("hsc_test_1");
+    expect(manager.activeCardFor("glm-5.3-flash")).toBeNull();
+    expect(manager.activeCardFor("glm-5.1")).not.toBeNull();
+  });
+
+  it("backs off 5s on HTTP 429, then resumes the heartbeat (2026-10-14 calibrated)", async () => {
     const clock = { now: 1_000_000 };
     let fetches = 0;
     const manager = makeManager((async () => {
@@ -202,11 +240,11 @@ describe("HighspeedManager", () => {
     manager.onRequest("glm-5.1", SESSION_TASK, AUTH);
     await settle();
     const atTwo = fetches;
-    clock.now += 20_000; // inside the 30s backoff
+    clock.now += 2_000; // inside the 5s backoff
     await settle();
     expect(fetches).toBe(atTwo); // no retries while backing off
 
-    clock.now += 11_000; // past backoff
+    clock.now += 4_000; // past backoff
     expect(await until(() => fetches > atTwo)).toBeTrue();
   });
 

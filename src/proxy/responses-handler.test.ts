@@ -2,6 +2,9 @@ import { describe, it, expect } from "bun:test";
 import { handleResponses } from "./responses-handler.js";
 import { ResponseStore } from "../responses/store.js";
 import type { ProxyConfig } from "../config/types.js";
+import { AuthManager } from "../auth/manager.js";
+import { HighspeedManager } from "../highspeed/manager.js";
+import { ClientSigningManager } from "./client-signing.js";
 import type * as CaptchaExports from "./captcha.js";
 
 type CaptchaModule = typeof CaptchaExports;
@@ -471,5 +474,139 @@ describe("handleResponses resilience (CL-08)", () => {
     expect(resp.status).toBe(503);
     const body = await resp.json();
     expect(body.error.type).toBe("captcha_solver_failed");
+  });
+});
+
+// ── HighSpeed 加速卡接线（2026-10-14）+ session affinity 收口 ──
+
+const ENFORCE_CONFIG: ProxyConfig = {
+  ...CONFIG,
+  clientIdentity: { mode: "enforce", ttlSeconds: 900, maxSessions: 1024 },
+};
+
+function oauthJwtAuth(): AuthManager {
+  const auth = new AuthManager();
+  auth.setOAuthCredential({ apiKey: "testkey", secret: "testsecret", provider: "zai", jwt: "test-zcode-jwt" });
+  return auth;
+}
+
+/** Manager pre-loaded with an active card (draw mock always hits). */
+async function cardHoldingManager(): Promise<HighspeedManager> {
+  const now = Date.now();
+  const manager = new HighspeedManager({
+    origin: "https://zcode.z.ai",
+    models: ["glm-5.3", "glm-5.2", "glm-5.1"],
+    fetchImpl: (async () => new Response(JSON.stringify({
+      code: 0, msg: "success",
+      data: {
+        card: { card_id: "hsc_resp_1", task_id: "t-1", provider: "builtin:zai-coding-plan", model: "glm-5.3-highspeed", issued_at: now, expires_at: now + 300_000 },
+        next_draw_at: now + 120_000,
+      },
+    }), { status: 200 })) as unknown as typeof fetch,
+  });
+  manager.onRequest("glm-5.2", "t-1", { jwt: "test-zcode-jwt", codingPlanAuth: "testkey.testsecret", family: "zai" });
+  await new Promise((r) => setTimeout(r, 5));
+  expect(manager.activeCard()?.cardId).toBe("hsc_resp_1");
+  return manager;
+}
+
+describe("handleResponses highspeed wiring", () => {
+  it("mounts the card: model rewritten, JWT auth set, card headers, never signed", async () => {
+    const manager = await cardHoldingManager();
+    const signingFetches: string[] = [];
+    const calls: { headers: Headers; body: string }[] = [];
+    const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), {
+      config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null,
+      clientSigning: new ClientSigningManager({
+        fetchImpl: (async (input: RequestInfo | URL) => {
+          signingFetches.push(String(input instanceof Request ? input.url : input));
+          throw new Error(`unexpected signing fetch: ${String(input)}`);
+        }) as unknown as typeof fetch,
+      }),
+      highspeed: manager,
+      fetchImpl: (async (request: Request) => {
+        calls.push({ headers: request.headers, body: await request.clone().text() });
+        return new Response(anthropicMsg("answer"));
+      }) as typeof fetch,
+    });
+    expect(response.status).toBe(200);
+    expect(calls.length).toBe(1);
+    expect(JSON.parse(calls[0]!.body).model).toBe("glm-5.3-highspeed");
+    expect(calls[0]!.headers.get("x-api-key")).toBe("test-zcode-jwt");
+    expect(calls[0]!.headers.get("authorization")).toBe("Bearer test-zcode-jwt");
+    expect(calls[0]!.headers.get("x-bigmodel-authorization")).toBe("Bearer testkey.testsecret");
+    expect(calls[0]!.headers.get("bigmodel-target-type")).toBe("PERSONAL");
+    expect(calls[0]!.headers.get("x-highspeed-card-id")).toBe("hsc_resp_1");
+    // official static rule: highspeed-mode requests are never signed
+    expect(signingFetches.length).toBe(0);
+    expect(calls[0]!.headers.get("x-client-sig")).toBeNull();
+  });
+
+  it("falls back to the session model and normal auth after a card rejection (401)", async () => {
+    const manager = await cardHoldingManager();
+    const calls: { headers: Headers; body: string }[] = [];
+    const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), {
+      config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null, clientSigning: null, highspeed: manager,
+      fetchImpl: (async (request: Request) => {
+        calls.push({ headers: request.headers, body: await request.clone().text() });
+        return calls.length === 1
+          ? new Response(JSON.stringify({ msg: "VERIFY_SIGNATURE_INVALID" }), { status: 401 })
+          : new Response(anthropicMsg("answer"));
+      }) as typeof fetch,
+    });
+    expect(response.status).toBe(200);
+    expect(calls.length).toBe(2);
+    // first: carded
+    expect(calls[0]!.headers.get("x-highspeed-card-id")).toBe("hsc_resp_1");
+    expect(JSON.parse(calls[0]!.body).model).toBe("glm-5.3-highspeed");
+    // fallback: original model, normal coding-plan dual auth, no card header
+    expect(calls[1]!.headers.get("x-highspeed-card-id")).toBeNull();
+    expect(calls[1]!.headers.get("x-api-key")).toBe("testkey.testsecret");
+    expect(calls[1]!.headers.get("authorization")).toBe("Bearer testkey.testsecret");
+    expect(JSON.parse(calls[1]!.body).model).toBe("glm-5.2");
+    // card dropped; the redraw hands back a fresh card (max-rate loop contract)
+    await new Promise((r) => setTimeout(r, 5));
+    expect(manager.activeCard()?.cardId).toBe("hsc_resp_1");
+  });
+
+  it("leaves requests untouched when the model is not eligible", async () => {
+    const manager = await cardHoldingManager();
+    const calls: { headers: Headers; body: string }[] = [];
+    const response = await handleResponses(makeReq({ model: "glm-4.6", input: "hello" }), {
+      config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null, clientSigning: null, highspeed: manager,
+      fetchImpl: (async (request: Request) => {
+        calls.push({ headers: request.headers, body: await request.clone().text() });
+        return new Response(anthropicMsg("answer"));
+      }) as typeof fetch,
+    });
+    expect(response.status).toBe(200);
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.headers.get("x-highspeed-card-id")).toBeNull();
+    expect(calls[0]!.headers.get("x-api-key")).toBe("testkey.testsecret");
+    expect(JSON.parse(calls[0]!.body).model).toBe("glm-4.6");
+  });
+});
+
+describe("handleResponses session affinity (2026-10-14 收口)", () => {
+  it("explicit x-session-id reaches trace headers and metadata.user_id (mirrors /v1/messages)", async () => {
+    let sent: Request | undefined;
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-session-id": "sess_test123" },
+      body: JSON.stringify({ model: "glm-5.2", input: "hello" }),
+    }), {
+      config: ENFORCE_CONFIG, auth, endpointRouting: null, clientSigning: null,
+      fetchImpl: (async (request: Request) => {
+        sent = request;
+        return new Response(anthropicMsg("answer"));
+      }) as typeof fetch,
+    });
+    expect(response.status).toBe(200);
+    expect(sent).toBeDefined();
+    expect(sent!.headers.get("x-session-id")).toBe("test123");
+    const body = JSON.parse(await sent!.clone().text()) as { metadata?: { user_id?: string } };
+    const userId = JSON.parse(body.metadata!.user_id!) as { device_id?: string; account_uuid: string; session_id: string };
+    expect(userId.session_id).toBe("test123");
+    expect(userId.account_uuid).toBe("");
   });
 });

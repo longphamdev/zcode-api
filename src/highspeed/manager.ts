@@ -20,7 +20,8 @@
  * - task_id 复用 client-session affinity 推断（`upstreamSessionId`），无会话时
  *   每次抽卡用随机 UUID；持卡窗口内所有合格请求共享该卡（官方仅卡所属任务）。
  * - 503/biz 3404（账号未灰度，2026-10-10 实弹稳态）负缓存 10min，避免 12.6s
- *   级联延迟反复触发；429 退避 30s；传输失败退避 60s。心跳定时器 unref——
+ *   级联延迟反复触发；429 退避 5s（2026-10-14 实测校准：可持续上限 ≈1/s，偶发
+ *   429 只值秒级暂停）；传输失败退避 60s。心跳定时器 unref——
  *   永不自持进程（对齐 update-check 惯例，#58 的 docker-stop 教训）。
  */
 import { randomUUID } from "node:crypto";
@@ -29,15 +30,20 @@ import type { Credential } from "../auth/types.js";
 import { credentialString } from "../auth/types.js";
 
 const DRAW_PATH = "/api/v1/highspeed/draw";
-const DRAW_TIMEOUT_MS = 5_000;
+/** Measured admitted-draw tail reaches ~5.6s (2026-10-14 probe); official transport timeout is 20s. */
+const DRAW_TIMEOUT_MS = 10_000;
 /** Heartbeat cadence of the draw loop ≈ measured token-bucket refill (1/s). */
 const DRAW_RETRY_MS = 1_000;
 /** Stop drawing this long after the last eligible request (idle self-extinguish). */
 const IDLE_MS = 5 * 60_000;
 /** Negative cache after account-level unavailability (503 / biz 3404). */
 const UNAVAILABLE_MS = 10 * 60_000;
-/** Backoff after an HTTP 429 (measured token bucket ≈ capacity 8, refill 1/s). */
-const RATE_LIMIT_BACKOFF_MS = 30_000;
+/**
+ * Backoff after an HTTP 429 (2026-10-14 live probe: the sustainable ceiling is
+ * ≈1 draw/s and even ~1/s trips sporadic 429s; the bucket refills at ~1s
+ * level, so a long pause only burns draw chances during active traffic).
+ */
+const RATE_LIMIT_BACKOFF_MS = 5_000;
 /** Cooldown after transport failure (network / timeout). */
 const TRANSPORT_FAILURE_MS = 60_000;
 /** Skip applying a card with less than this left on its window. */
@@ -94,6 +100,14 @@ export class HighspeedManager {
 
   private card: HighspeedCard | null = null;
   private unavailableUntil = 0;
+  /**
+   * Models the draw endpoint rejected at parameter level (live 2026-10-14:
+   * `glm-5.3-flash` → HTTP 400 biz 3001 "parameter error" while `glm-5.3`
+   * passes on the same account). Per-model, deliberately NOT the account-level
+   * negative cache — a rejected model must not silence draws for the rest of
+   * the catalogue.
+   */
+  private readonly drawBlockedUntil = new Map<string, number>();
   /** Earliest next draw attempt (429 / transport backoff gate). */
   private nextAttemptAt = 0;
   /** Loop deadline = last eligible request + IDLE_MS. */
@@ -141,6 +155,12 @@ export class HighspeedManager {
   onRequest(model: string, sessionTaskId: string | undefined, auth: HighspeedAuth): void {
     if (!this.isEligibleModel(model)) return;
     const now = this.now();
+    // draw 端点参数级拒绝的模型不再点燃（每次 TTL 窗口省一次 400 探测）
+    const blockedUntil = this.drawBlockedUntil.get(model.trim().toLowerCase());
+    if (blockedUntil !== undefined) {
+      if (now < blockedUntil) return;
+      this.drawBlockedUntil.delete(model.trim().toLowerCase());
+    }
     this.expireCard(now);
     // Refresh latest before the held-card early return below: the process-wide
     // manager outlives proxy restarts and credential switches, so a held card
@@ -163,6 +183,19 @@ export class HighspeedManager {
     if (!this.card) return null;
     if (this.card.expiresAt - this.now() < CARD_MIN_REMAINING_MS) return null;
     return this.card;
+  }
+
+  /**
+   * Active card usable for THIS request model. A card carries the model it was
+   * drawn for and mounting rewrites the request to card.model — so a flash
+   * request must never take a non-flash card (that would silently change the
+   * model tier; the draw endpoint rejects flash outright, live 2026-10-14).
+   */
+  activeCardFor(model: string): HighspeedCard | null {
+    const card = this.activeCard();
+    if (!card) return null;
+    const flash = (m: string): boolean => m.toLowerCase().includes("flash");
+    return flash(model) === flash(card.model) ? card : null;
   }
 
   /** Drop the card after an upstream rejection (401 / biz 3402) — official selectionFallback. */
@@ -228,6 +261,16 @@ export class HighspeedManager {
     if (!latest || !latest.auth.jwt.trim()) {
       this.stopTimer();
       return;
+    }
+    // 同 onRequest 的模型闸：被 draw 端点参数级拒绝的模型不再发 fetch，
+    // 空转等 latest 换模型（新请求）或空闲窗口关闭（idle-stop）。
+    const latestBlockedUntil = this.drawBlockedUntil.get(latest.model.trim().toLowerCase());
+    if (latestBlockedUntil !== undefined) {
+      if (this.now() < latestBlockedUntil) {
+        this.arm();
+        return;
+      }
+      this.drawBlockedUntil.delete(latest.model.trim().toLowerCase());
     }
     const promise = this.draw(latest.model, latest.taskId, latest.auth)
       .catch(() => {
@@ -299,17 +342,30 @@ export class HighspeedManager {
     }
 
     const now = this.now();
+    const wireCode = typeof body?.code === "number" ? body.code : null;
+    const wireMsg = typeof body?.msg === "string" ? body.msg.slice(0, 60) : "";
     if (status === 429) {
       this.nextAttemptAt = now + RATE_LIMIT_BACKOFF_MS;
-      this.noteOnce("429", "highspeed draw rate-limited (429) — backing off 30s");
+      this.noteOnce("429", "highspeed draw rate-limited (429) — backing off 5s");
       return;
     }
     if (status !== 200 || !body) {
-      this.unavailableUntil = now + UNAVAILABLE_MS;
-      this.noteOnce(`http${status}`, `highspeed draw unavailable (HTTP ${status}) — negative-cached 10min`);
+      if (status === 400) {
+        // Parameter-level rejection — the ACCOUNT is fine (same account, same
+        // recipe: glm-5.3 draws 200-miss where glm-5.3-flash 400s, live
+        // 2026-10-14). Block only this model; never the account-level cache.
+        this.drawBlockedUntil.set(model.trim().toLowerCase(), now + UNAVAILABLE_MS);
+        this.noteOnce(
+          `draw400-${model}`,
+          `draw rejected (HTTP 400${wireCode !== null ? ` code=${wireCode}` : ""}${wireMsg ? ` ${wireMsg}` : ""}) — model ${model} ineligible for draw, skipping it`,
+        );
+      } else {
+        this.unavailableUntil = now + UNAVAILABLE_MS;
+        this.noteOnce(`http${status}`, `highspeed draw unavailable (HTTP ${status}${wireCode !== null ? ` code=${wireCode}` : ""}${wireMsg ? ` ${wireMsg}` : ""}) — negative-cached 10min`);
+      }
       return;
     }
-    const code = typeof body.code === "number" ? body.code : null;
+    const code = wireCode;
     if (code !== 0) {
       // 3404 = account-level "highspeed temporarily unavailable" (live 2026-10-10).
       // Any other business code is treated the same: negative-cache, never spin.

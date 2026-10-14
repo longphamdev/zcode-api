@@ -197,12 +197,12 @@ export async function proxyRequest(
     if (auth) {
       highspeedAuth = auth;
       highspeedManager.onRequest(meta.model, clientSession?.upstreamSessionId, auth);
-      const card = highspeedManager.activeCard();
+      const card = highspeedManager.activeCardFor(meta.model);
       if (card) {
         highspeedOrigBody = transformedBody;
         transformedBody = rewriteBodyModel(transformedBody, card.model);
         highspeedCard = card;
-        if (debug) debugLine(reqId, `highspeed card applied (${card.cardId.slice(0, 12)}… model=${card.model}, window ${Math.round((card.expiresAt - Date.now()) / 1000)}s)`);
+        console.log(`${reqId} highspeed card applied (model=${card.model}, card ${card.cardId.slice(0, 12)}…, window ${Math.round((card.expiresAt - Date.now()) / 1000)}s)`);
       }
     }
   }
