@@ -156,3 +156,43 @@ describe("translateRequestAnthropicToOpenAI: video / document blocks", () => {
     });
   });
 });
+
+describe("translateRequestAnthropicToOpenAI: disable_parallel_tool_use", () => {
+  it("maps tool_choice.disable_parallel_tool_use:true → top-level parallel_tool_calls:false (issue #65 mirror)", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      max_tokens: 100,
+      tools: [{ name: "fn", input_schema: { type: "object", properties: {} } }],
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    expect(result.tool_choice).toBe("auto");
+    expect(result.parallel_tool_calls).toBe(false);
+  });
+
+  it("omits parallel_tool_calls when disable_parallel_tool_use is absent or false", () => {
+    for (const tool_choice of [{ type: "auto" as const }, { type: "any" as const, disable_parallel_tool_use: false }]) {
+      const req: AnthropicMessagesRequest = {
+        model: "glm-4.6",
+        messages: [{ role: "user", content: "Hi" }],
+        max_tokens: 100,
+        tools: [{ name: "fn", input_schema: { type: "object", properties: {} } }],
+        tool_choice,
+      };
+      const result = translateRequestAnthropicToOpenAI(req);
+      expect(result.parallel_tool_calls).toBeUndefined();
+    }
+  });
+
+  it("omits parallel_tool_calls without tools even if disable_parallel_tool_use is set", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      max_tokens: 100,
+      tool_choice: { type: "auto", disable_parallel_tool_use: true },
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    expect(result.parallel_tool_calls).toBeUndefined();
+  });
+});

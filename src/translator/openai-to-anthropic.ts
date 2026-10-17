@@ -68,6 +68,17 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
     const translated = translateToolChoice(req.tool_choice);
     if (translated) result.tool_choice = translated;
   }
+  // OpenAI's `parallel_tool_calls:false` lives inside Anthropic's `tool_choice`
+  // as `disable_parallel_tool_use` — there is no top-level equivalent. Dropping
+  // it lets the model emit parallel tool_use blocks that sequential-execution
+  // clients cannot process (issue #65). Only meaningful when tools survive
+  // translation; `true`/omitted is the upstream default and is not serialized.
+  if (result.tools?.length && req.parallel_tool_calls === false) {
+    result.tool_choice = {
+      ...(result.tool_choice ?? { type: "auto" as const }),
+      disable_parallel_tool_use: true,
+    };
+  }
 
   return result;
 }

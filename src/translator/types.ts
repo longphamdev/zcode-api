@@ -213,7 +213,8 @@ export interface AnthropicMessagesRequest {
   stop_sequences?: string[];
   metadata?: { user_id?: string };
   tools?: AnthropicToolDefinition[];
-  tool_choice?: { type: "auto" | "any" | "tool"; name?: string };
+  /** `disable_parallel_tool_use` is the Anthropic-side home of OpenAI's `parallel_tool_calls:false` — there is no top-level flag. */
+  tool_choice?: { type: "auto" | "any" | "tool"; name?: string; disable_parallel_tool_use?: boolean };
   thinking?: AnthropicThinkingConfig;
   /** GLM-5.3+ reasoning-effort channel; the Anthropic upstream ignores `reasoning_effort`. */
   output_config?: AnthropicOutputConfig;

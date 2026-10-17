@@ -77,15 +77,24 @@ export function translateRequestAnthropicToOpenAI(req: AnthropicMessagesRequest)
     if (translated !== undefined) result.tool_choice = translated;
   }
 
+  // Mirror of the O→A direction: Anthropic hides the parallel-tools switch
+  // inside `tool_choice.disable_parallel_tool_use`; OpenAI surfaces it as the
+  // top-level `parallel_tool_calls`. Only meaningful when tools survive.
+  if (result.tools?.length && req.tool_choice?.disable_parallel_tool_use === true) {
+    result.parallel_tool_calls = false;
+  }
+
   return result;
 }
 
 /**
  * Map an Anthropic `tool_choice` to the OpenAI Chat Completions form.
  *
- * Anthropic: `{type:"auto"|"any"|"tool", name?}` (a top-level string is also
- * accepted by the API). There is no `none` — suppressing tools is done by
- * omitting the `tools` array entirely.
+ * Anthropic: `{type:"auto"|"any"|"tool", name?, disable_parallel_tool_use?}` (a
+ * top-level string is also accepted by the API). There is no `none` —
+ * suppressing tools is done by omitting the `tools` array entirely.
+ * `disable_parallel_tool_use` is handled by the caller (top-level
+ * `parallel_tool_calls`, only when tools are attached).
  * OpenAI:    `"auto" | "required"` or `{type:"function", function:{name}}`.
  * Note: Anthropic `any` (force some tool) maps to OpenAI `required`.
  */

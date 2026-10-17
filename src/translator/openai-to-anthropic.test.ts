@@ -167,6 +167,52 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(result.tools).toBeUndefined();
   });
 
+  it("parallel_tool_calls:false synthesizes tool_choice {type:'auto',disable_parallel_tool_use:true} (issue #65)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ type: "function", function: { name: "fn" } }],
+      parallel_tool_calls: false,
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
+  });
+
+  it("parallel_tool_calls:false merges into an explicit tool_choice", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ type: "function", function: { name: "fn" } }],
+      tool_choice: "required",
+      parallel_tool_calls: false,
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toEqual({ type: "any", disable_parallel_tool_use: true });
+  });
+
+  it("parallel_tool_calls:false is not emitted without tools (Anthropic rejects tool_choice with empty tools)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      parallel_tool_calls: false,
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toBeUndefined();
+  });
+
+  it("parallel_tool_calls:true or omitted does not serialize disable_parallel_tool_use (upstream default)", () => {
+    for (const parallel_tool_calls of [true, undefined]) {
+      const req: OpenAIChatRequest = {
+        model: "glm-4.6",
+        messages: [{ role: "user", content: "Hi" }],
+        tools: [{ type: "function", function: { name: "fn" } }],
+        ...(parallel_tool_calls !== undefined ? { parallel_tool_calls } : {}),
+      };
+      const result = translateRequestOpenAIToAnthropic(req);
+      expect(result.tool_choice).toBeUndefined();
+    }
+  });
+
   it("translates assistant message with tool_calls into assistant content with tool_use blocks", () => {
     const req: OpenAIChatRequest = {
       model: "glm-4.6",
