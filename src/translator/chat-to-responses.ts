@@ -79,7 +79,7 @@ export function chatCompletionsToResponses(
   return {
     id,
     object: "response",
-    created_at: Date.now(),
+    created_at: Math.floor(Date.now() / 1000),
     model: model || resp.model || "",
     status,
     output,
@@ -233,7 +233,7 @@ function chatUsageToResponsesUsage(u: OpenAIUsage): ResponsesUsage {
     output_tokens: u.completion_tokens ?? 0,
     total_tokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
     ...(u.prompt_tokens_details?.cached_tokens ? { input_tokens_details: { cached_tokens: u.prompt_tokens_details.cached_tokens } } : {}),
-    ...(u.output_tokens_details?.reasoning_tokens ? { output_tokens_details: { reasoning_tokens: u.output_tokens_details.reasoning_tokens } } : {}),
+    ...(u.completion_tokens_details?.reasoning_tokens !== undefined ? { output_tokens_details: { reasoning_tokens: u.completion_tokens_details.reasoning_tokens } } : {}),
   };
 }
 
@@ -249,8 +249,8 @@ function chatUsageToResponsesUsage(u: OpenAIUsage): ResponsesUsage {
  *   - message item + `output_text` content part opened lazily on first content delta.
  *   - tool calls tracked by upstream index; each emits output_item.added →
  *     function_call_arguments.delta(s) → arguments.done + output_item.done.
- *   - On `finish_reason`, emit the terminal events for every open item, then
- *     `response.completed` carrying the full reconstructed `output[]`.
+ *   - Record `finish_reason`; the caller finalizes after the stream so trailing
+ *     usage is retained, then emit item terminal events and completed/incomplete.
  */
 export interface ResponsesStreamState {
   responseId: string;
@@ -294,7 +294,7 @@ export function newResponsesStreamState(
   return {
     responseId: opts.responseId ?? generateResponsesId(),
     model,
-    createdAt: Date.now(),
+    createdAt: Math.floor(Date.now() / 1000),
     sequenceNumber: 0,
     createdSent: false,
     completedSent: false,
@@ -477,9 +477,9 @@ function toolArgsDeltaEvent(
     call_id: entry.id,
     name: entry.name,
   };
-  return seq(state, isCustom
+  return isCustom
     ? { type: "response.custom_tool_call_input.delta", ...base }
-    : { type: "response.function_call_arguments.delta", ...base });
+    : { type: "response.function_call_arguments.delta", ...base };
 }
 
 /**

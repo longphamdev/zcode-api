@@ -7,7 +7,6 @@
  * (since PR #34, 2026-08-29 — start-plan's old OpenAI gateway is retired);
  * OpenAI clients are translated before this builder is called.
  *
- * @see .omo/plans/zcode-proxy.md Task 6
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
@@ -42,33 +41,6 @@ const ANTHROPIC_VERSION = "2023-06-01";
 const ANTHROPIC_SDK_UA = "ai-sdk/anthropic/3.0.81";
 
 const STARTPLAN_ANTHROPIC_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
-
-const STRIP_HEADERS = new Set([
-  "host",
-  "authorization",
-  "x-api-key",
-  "anthropic-version",
-  "content-length",
-  "connection",
-  "proxy-authorization",
-  "proxy-authenticate",
-  "transfer-encoding",
-  "x-request-id",
-  "x-zcode-trace-id",
-  "x-zcode-session-type",
-  "x-query-id",
-  "x-session-id",
-  // V4 signing headers are proxy-generated only; inbound copies must never
-  // reach the upstream (spoofed values would either fail verification or
-  // silently disable proxy signing via the existing-header guard).
-  "x-client-ts",
-  "x-client-version",
-  "x-client-sig",
-  "x-client-nonce",
-  "x-app-id",
-  "x-client-pow",
-  "x-client-sign-verified",
-]);
 
 /**
  * Build the upstream URL based on format + plan + provider.
@@ -184,7 +156,8 @@ function collectPassthroughHeaders(req: Request): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of req.headers.entries()) {
     const lower = key.toLowerCase();
-    if (STRIP_HEADERS.has(lower)) continue;
+    // Explicit allowlist: client auth, routing auth, trace and V4 signing
+    // headers are never forwarded. Their trusted values are rebuilt below.
     if (lower === "anthropic-beta") {
       result[lower] = value;
     }

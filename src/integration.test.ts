@@ -1,6 +1,5 @@
 /**
  * Integration tests — end-to-end proxy tests with mock upstream.
- * @see .omo/plans/zcode-proxy.md Task 13
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";

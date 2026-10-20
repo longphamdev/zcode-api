@@ -1,6 +1,5 @@
 /**
  * Encrypted file-based credential store.
- * @see .omo/plans/zcode-proxy.md Task 14
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";

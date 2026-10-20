@@ -8,6 +8,10 @@ import {
 } from "./chat-to-responses.js";
 import type { OpenAIChatResponse, OpenAIStreamChunk } from "./types.js";
 
+function chunk(overrides: Partial<OpenAIStreamChunk> = {}): OpenAIStreamChunk {
+  return { id: "1", object: "chat.completion.chunk", created: 1, model: "glm-5.2", choices: [], ...overrides };
+}
+
 function chatResp(overrides: Partial<OpenAIChatResponse> = {}): OpenAIChatResponse {
   return {
     id: "chatcmpl-1",
@@ -20,6 +24,31 @@ function chatResp(overrides: Partial<OpenAIChatResponse> = {}): OpenAIChatRespon
 }
 
 describe("chatCompletionsToResponses (batch)", () => {
+  it("uses Unix seconds and preserves standard Chat reasoning usage in batch and stream", () => {
+    const before = Math.floor(Date.now() / 1000);
+    const usage = { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9,
+      completion_tokens_details: { reasoning_tokens: 3 } };
+    const batch = chatCompletionsToResponses(chatResp({ usage }), "glm-5.2");
+    const state = newResponsesStreamState("glm-5.2");
+    chatChunkToResponsesEvents(chunk({ usage, choices: [] }), state);
+    const terminal = finalizeResponsesStream(state).find(e => e.type === "response.completed")!;
+    expect(terminal.type).toBe("response.completed");
+    if (terminal.type !== "response.completed") throw new Error("missing completion");
+    for (const response of [batch, terminal.response]) {
+      expect(response.created_at).toBeGreaterThanOrEqual(before);
+      expect(response.created_at).toBeLessThanOrEqual(Math.floor(Date.now() / 1000));
+      expect(response.usage?.output_tokens_details?.reasoning_tokens).toBe(3);
+    }
+  });
+
+  it("assigns consecutive sequence numbers to tool argument events", () => {
+    const state = newResponsesStreamState("glm-5.2");
+    const events = chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: {
+      tool_calls: [{ index: 0, id: "call_1", function: { name: "f", arguments: "{}" } }],
+    } }] }), state);
+    events.push(...finalizeResponsesStream(state));
+    expect(events.map(e => e.sequence_number)).toEqual(events.map((_, i) => i));
+  });
   it("translates a text-only response", () => {
     const r = chatCompletionsToResponses(chatResp(), "glm-5.2");
     expect(r.status).toBe("completed");
@@ -154,9 +183,6 @@ describe("extractCustomToolInput", () => {
 });
 
 describe("streaming", () => {
-  function chunk(overrides: Partial<OpenAIStreamChunk> = {}): OpenAIStreamChunk {
-    return { id: "1", object: "chat.completion.chunk", created: 1, model: "glm-5.2", choices: [], ...overrides };
-  }
 
   it("emits full text lifecycle in order with monotonic sequence numbers", () => {
     const state = newResponsesStreamState("glm-5.2");

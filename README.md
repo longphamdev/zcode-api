@@ -151,7 +151,7 @@ docker run -d --name zcode-proxy -p 8080:8080 \
   ghcr.io/tridefender/zcode-proxy:latest
 ```
 
-镜像多架构（amd64 / arm64），以 `bun` 用户运行。compose 写法：
+镜像多架构（amd64 / arm64），以 `bun` 用户运行。多阶段构建后的运行层仅带应用 bundle 和验证码 worker，不带 `node_modules`、源码、测试或额外构建工具，保留完整功能；体积对比和本地构建方法见 [Docker 镜像说明](docs/docker-image.md)。compose 写法：
 
 ```yaml
 services:
@@ -282,3 +282,7 @@ bun run dev         # 开发模式启动面板
 ## License
 
 MIT
+
+## 协议与维护说明
+
+三端的支持范围、降级行为及不支持的字段见 [兼容矩阵](docs/compatibility.md)；源码对拍、修复和未验证项见 [2026-10-20 审计](docs/audit-2026-10-20.md)。Responses hosted 搜索工具不会在服务端执行。

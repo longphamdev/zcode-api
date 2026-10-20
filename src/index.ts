@@ -1,6 +1,5 @@
 /**
  * Entry point — load config, create auth manager, start proxy server.
- * @see .omo/plans/zcode-proxy.md Task 7
  */
 import { loadConfig } from "./config/loader.js";
 import { AuthManager } from "./auth/manager.js";
@@ -37,7 +36,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { ensureNodeFetchNoTimeouts } from "./runtime/node-fetch-compat.js";
 
-export const VERSION = "4.8.2";
+export const VERSION = "4.8.1";
 
 if (require.main === module) main();
 

@@ -17,8 +17,8 @@
  *     back (see `chat-to-responses.ts`). Ambiguous collisions are rejected.
  *   - `tool_search` downgrades to a same-named `function` proxy with
  *     `execution:"client"` semantics (Codex routes by item type, not just name).
- *   - `web_search` / `web_search_preview` are stripped here; the Responses
- *     handler intercepts them via GLM MCP (see `proxy/responses-handler.ts`).
+ *   - `web_search` / `web_search_preview` are stripped here; no server-side
+ *     search interception is implemented.
  *   - `file_search` / `code_interpreter` / `computer_use_preview` /
  *     `image_generation` / `mcp` (hosted) are stripped silently.
  *   - When all convertible tools are gone, `tool_choice` AND
@@ -50,7 +50,7 @@ export interface ResponsesToChatResult {
   customToolNames: Set<string>;
   /** Flattened namespace tool names → {namespace, name} — used to restore `namespace` on the response. */
   namespaceMap: Map<string, { namespace: string; name: string }>;
-  /** True when the request declared a `web_search` hosted tool (handler intercepts it). */
+  /** True when the request declared a `web_search` hosted tool (currently stripped, not executed). */
   hasWebSearch: boolean;
   /** True when the request declared `type:"tool_search"` (response must emit `tool_search_call` items). */
   hasToolSearch: boolean;
@@ -442,7 +442,7 @@ function collectTools(
   }
 
   if (isWebSearchTool(tool)) {
-    // Stripped here; handler intercepts via GLM MCP.
+    // Stripped here; no server-side hosted search execution is wired.
     signal("web_search");
     return;
   }

@@ -183,4 +183,102 @@ describe("EndpointRoutingService", () => {
     const resolved = await svc.resolve(ZAI_ANTHROPIC);
     expect(resolved.routed).toBeFalse();
   });
+
+  describe("zcodeAuthorizationHeader (3.16.2 X-ZCode-Authorization)", () => {
+    const FLAG = "X-ZCode-Authorization";
+
+    function flaggedConfig(to: string, marker: unknown = FLAG): string {
+      return JSON.stringify({
+        code: 0,
+        data: { proxyEndpoint: { mapping: [{ from: ZAI_ANTHROPIC, to, zcodeAuthorizationHeader: marker }] } },
+      });
+    }
+
+    it("returns X-ZCode-Authorization: Bearer <jwt> for a flagged ultra entry", async () => {
+      const svc = new EndpointRoutingService({ identity, fetchImpl: okConfigFetch(flaggedConfig(ZAI_ULTRA)) });
+      const resolved = await svc.resolve(ZAI_ANTHROPIC, "keyid.keysecret", "raw.jwt.value");
+      expect(resolved.routed).toBeTrue();
+      expect(resolved.url).toBe(ZAI_ULTRA);
+      expect(resolved.headers).toEqual({ "X-ZCode-Authorization": "Bearer raw.jwt.value" });
+    });
+
+    it("keeps an already-Bearer-prefixed jwt verbatim (case-insensitive check)", async () => {
+      const svc = new EndpointRoutingService({ identity, fetchImpl: okConfigFetch(flaggedConfig(ZAI_ULTRA)) });
+      const resolved = await svc.resolve(ZAI_ANTHROPIC, undefined, "bearer tok");
+      expect(resolved.headers).toEqual({ "X-ZCode-Authorization": "bearer tok" });
+    });
+
+    it("omits the header (fail-open, routing still applies) without a jwt", async () => {
+      const svc = new EndpointRoutingService({ identity, fetchImpl: okConfigFetch(flaggedConfig(ZAI_ULTRA)) });
+      const resolved = await svc.resolve(ZAI_ANTHROPIC, "keyid.keysecret");
+      expect(resolved.routed).toBeTrue();
+      expect(resolved.headers).toBeUndefined();
+    });
+
+    it("omits the header for a non-printable jwt", async () => {
+      const svc = new EndpointRoutingService({ identity, fetchImpl: okConfigFetch(flaggedConfig(ZAI_ULTRA)) });
+      const resolved = await svc.resolve(ZAI_ANTHROPIC, undefined, "jwt\nwith-newline");
+      expect(resolved.routed).toBeTrue();
+      expect(resolved.headers).toBeUndefined();
+    });
+
+    it("accepts a lowercase marker value and ultra subpath targets", async () => {
+      const svc = new EndpointRoutingService({
+        identity,
+        fetchImpl: okConfigFetch(flaggedConfig("https://zcode.z.ai/api/v1/ultra/anthropic/v1/messages/", "x-zcode-authorization")),
+      });
+      const resolved = await svc.resolve(ZAI_ANTHROPIC, undefined, "jwt");
+      expect(resolved.routed).toBeTrue();
+      expect(resolved.headers).toEqual({ "X-ZCode-Authorization": "Bearer jwt" });
+    });
+
+    it("rejects the whole snapshot when the marker names a different header", async () => {
+      const svc = new EndpointRoutingService({ identity, fetchImpl: okConfigFetch(flaggedConfig(ZAI_ULTRA, "X-Custom-Auth")) });
+      expect((await svc.resolve(ZAI_ANTHROPIC)).routed).toBeFalse();
+    });
+
+    it("rejects the whole snapshot when the marker is not a string", async () => {
+      const svc = new EndpointRoutingService({ identity, fetchImpl: okConfigFetch(flaggedConfig(ZAI_ULTRA, 1)) });
+      expect((await svc.resolve(ZAI_ANTHROPIC)).routed).toBeFalse();
+    });
+
+    it("rejects the whole snapshot when the flagged target leaves the ultra paths", async () => {
+      const svc = new EndpointRoutingService({
+        identity,
+        fetchImpl: okConfigFetch(flaggedConfig("https://zcode.z.ai/api/v1/other/anthropic/v1/messages")),
+      });
+      expect((await svc.resolve(ZAI_ANTHROPIC)).routed).toBeFalse();
+    });
+
+    it("rejects the whole snapshot when the flagged target is cross-origin", async () => {
+      const svc = new EndpointRoutingService({
+        identity,
+        fetchImpl: okConfigFetch(flaggedConfig("https://evil.example/api/v1/ultra/anthropic/v1/messages")),
+      });
+      expect((await svc.resolve(ZAI_ANTHROPIC)).routed).toBeFalse();
+    });
+
+    it("does not look ultra-like through a shared prefix (/api/v1/ultra-zai is not /api/v1/ultra/*)", async () => {
+      // /api/v1/ultra-zai is in the allowlist itself; a sibling like
+      // /api/v1/ultra-other must NOT pass the /api/v1/ultra prefix test.
+      const svc = new EndpointRoutingService({
+        identity,
+        fetchImpl: okConfigFetch(flaggedConfig("https://zcode.z.ai/api/v1/ultra-other/v1/messages")),
+      });
+      expect((await svc.resolve(ZAI_ANTHROPIC)).routed).toBeFalse();
+    });
+
+    it("unflagged entries never carry headers", async () => {
+      const svc = new EndpointRoutingService({
+        identity,
+        fetchImpl: okConfigFetch(JSON.stringify({
+          code: 0,
+          data: { proxyEndpoint: { mapping: [{ from: ZAI_ANTHROPIC, to: ZAI_ULTRA, zcodeAuthorizationHeader: "" }] } },
+        })),
+      });
+      const resolved = await svc.resolve(ZAI_ANTHROPIC, undefined, "jwt");
+      expect(resolved.routed).toBeTrue();
+      expect(resolved.headers).toBeUndefined();
+    });
+  });
 });

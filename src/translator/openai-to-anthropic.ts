@@ -1,6 +1,5 @@
 /**
  * OpenAI → Anthropic request translator and Anthropic → OpenAI response translator.
- * @see .omo/plans/zcode-proxy.md Task 11
  */
 import type {
   OpenAIChatRequest,
@@ -32,8 +31,8 @@ const DEFAULT_MAX_TOKENS = 4096;
 
 /** Translate an OpenAI chat request into an Anthropic messages request. */
 export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): AnthropicMessagesRequest {
-  const systemMessages = req.messages.filter((m) => m.role === "system");
-  const nonSystemMessages = req.messages.filter((m) => m.role !== "system");
+  const systemMessages = req.messages.filter((m) => m.role === "system" || m.role === "developer");
+  const nonSystemMessages = req.messages.filter((m) => m.role !== "system" && m.role !== "developer");
 
   const system = systemMessages.length > 0
     ? systemMessages.map((m) => extractText(m)).join("\n\n")
@@ -44,7 +43,7 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   const result: AnthropicMessagesRequest = {
     model: req.model,
     messages: anthropicMessages,
-    max_tokens: req.max_tokens ?? resolveDefaultMaxTokens(req.model),
+    max_tokens: req.max_completion_tokens ?? req.max_tokens ?? resolveDefaultMaxTokens(req.model),
   };
 
   if (system) result.system = system;

@@ -1,6 +1,5 @@
 /**
  * YAML config loader with env-var overrides and validation.
- * @see .omo/plans/zcode-proxy.md Task 2
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
@@ -29,8 +28,7 @@ const ENV = {
   MCP_GATEWAY_ORIGIN: "ZCODE_MCP_GATEWAY_ORIGIN",
 } as const;
 
-/** Mirrors the ZCode desktop release (`_reverse/NOTEPAD.md`); bump per client
- *  release or User-Agent/X-ZCode-App-Version become distinguishable. */
+/** Pinned wire fingerprint; snapshot version is tracked separately in _reverse/MANIFEST.md. */
 export const DEFAULT_APP_VERSION = "3.15.1";
 
 const DEFAULTS = {

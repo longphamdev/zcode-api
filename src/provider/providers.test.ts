@@ -1,6 +1,5 @@
 /**
  * Tests for provider definitions and model catalog.
- * @see .omo/plans/zcode-proxy.md Task 3
  */
 import { describe, it, expect } from "bun:test";
 import { getProvider, ZAI_PROVIDER, BIGMODEL_PROVIDER } from "./providers.js";

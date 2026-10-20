@@ -1,10 +1,12 @@
 # ZCode 内置提示词
 
-从 ZCode 客户端 `app.asar` (`out/host/index.js` + `_reverse/zcode.cjs`) 提取。
+> 2026-10-20 维护说明：下文保留带版本日期的历史提取记录，不能把 3.11.2 压缩符号用于当前 3.16.2 bundle。实际出线以 src/proxy/zcode_system.json、system-prompt.ts 与测试为准；源快照见 _reverse/MANIFEST.md。
+
+从 ZCode 客户端 `app.asar` (`out/host/index.js` + `_reverse/glm/zcode.cjs`) 提取。
 
 ZCode 的 system prompt 由多个模块化 section 组合注入，按 `injectionTarget` 分为 `system` 和 `meta_user` 两类，按 `cacheHint` 分为 `stable` 和 `dynamic`。
 
-> **2026-09-11 刷新（对齐 ZCode 3.11.2 CLI bundle）**：本文档已按 `_reverse/zcode.cjs`（3.11.2）
+> **2026-09-11 刷新（对齐 ZCode 3.11.2 CLI bundle）**：本文档已按 `_reverse/glm/zcode.cjs`（3.11.2）
 > 的 `ContextBuilder`（`Hre`）逐符号核对更新。注意两点：
 > 1. **§4 Task Behavior / §5 Risky Actions / §6 Communication Style 是 2026-06-20 提取时的旧版
 >    残留（3.3.x era），现客户端已整体移除** —— 2026-09-11 对本机安装的 3.11.2 全量验证：三个

@@ -27,6 +27,7 @@ const DUMP_PATH = process.env.ZCODE_DUMP_UPSTREAM;
 /** Header names whose values must be masked before dumping. */
 const SENSITIVE_HEADERS = new Set([
   "authorization",
+  "x-zcode-authorization",
   "x-api-key",
   "proxy-authorization",
   "proxy-api-key",

@@ -70,6 +70,11 @@ function makeReq(body: unknown): Request {
 }
 
 describe("handleResponses", () => {
+  it.each([null, [], 1, true])("rejects non-object JSON bodies: %j", async (body) => {
+    const response = await handleResponses(makeReq(body), { config: CONFIG, auth });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.type).toBe("invalid_request");
+  });
   it("sends easy input messages to the Anthropic upstream", async () => {
     let sent = "";
     const response = await handleResponses(makeReq({ model: "glm-5.2", input: [{ role: "user", content: "easy question" }] }), {
@@ -511,6 +516,31 @@ async function cardHoldingManager(): Promise<HighspeedManager> {
 }
 
 describe("handleResponses highspeed wiring", () => {
+  it("restores the signing manager after a rejected unsigned card request", async () => {
+    const manager = await cardHoldingManager();
+    let signingCalls = 0;
+    let requests = 0;
+    const signer = new ClientSigningManager({ fetchImpl: (async () => {
+      signingCalls++;
+      return new Response("unavailable", { status: 503 });
+    }) as unknown as typeof fetch });
+    try {
+      const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+        config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null, clientSigning: signer, highspeed: manager,
+        fetchImpl: (async () => {
+          requests++;
+          if (requests === 1) {
+            expect(signingCalls).toBe(0);
+            return new Response("expired", { status: 401 });
+          }
+          expect(signingCalls).toBeGreaterThan(0);
+          return new Response(anthropicMsg("recovered"));
+        }) as unknown as typeof fetch,
+      });
+      expect(response.status).toBe(200);
+      expect(requests).toBe(2);
+    } finally { manager.stop(); }
+  });
   it("mounts the card: model rewritten, JWT auth set, card headers, never signed", async () => {
     const manager = await cardHoldingManager();
     const signingFetches: string[] = [];
@@ -588,6 +618,33 @@ describe("handleResponses highspeed wiring", () => {
 });
 
 describe("handleResponses session affinity (2026-10-14 收口)", () => {
+  it("preserves explicit trace context through captcha retry", async () => {
+    const seen: Headers[] = [];
+    const request = makeReq({ model: "glm-5.2", input: "hi" });
+    request.headers.set("x-request-id", "request-retry");
+    request.headers.set("x-zcode-trace-id", "trace-retry");
+    const response = await handleResponses(request, {
+      config: { ...ENFORCE_CONFIG, plan: "start-plan" }, auth,
+      endpointRouting: null, clientSigning: null, highspeed: null,
+      captcha: {
+        RETRY_HEADERS: { PARAM: "x-aliyun-captcha-verify-param", REGION: "x-aliyun-captcha-verify-region" },
+        getCaptchaToken: async () => ({ verifyParam: "test-token", region: "cn" }),
+        detectCaptchaChallenge: () => null,
+      } as unknown as CaptchaModule,
+      fetchImpl: (async (req: Request) => {
+        seen.push(req.headers);
+        return seen.length === 1
+          ? new Response(JSON.stringify({ code: 3007 }), { status: 400 })
+          : new Response(anthropicMsg("recovered"));
+      }) as typeof fetch,
+    });
+    expect(response.status).toBe(200);
+    expect(seen).toHaveLength(2);
+    for (const headers of seen) {
+      expect(headers.get("x-request-id")).toBe("request-retry");
+      expect(headers.get("x-zcode-trace-id")).toBe("trace-retry");
+    }
+  });
   it("explicit x-session-id reaches trace headers and metadata.user_id (mirrors /v1/messages)", async () => {
     let sent: Request | undefined;
     const response = await handleResponses(new Request("http://localhost/v1/responses", {

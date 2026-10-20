@@ -3,15 +3,15 @@
  *
  * The Responses API is OpenAI's stateful successor to Chat Completions, used by
  * Codex CLI and the OpenAI Agents SDK. The proxy translates it bidirectionally
- * against the GLM Chat Completions upstream so non-OpenAI clients (Codex) can
- * drive GLM models directly.
+ * through Chat Completions to the GLM Anthropic upstream so Responses clients
+ * can drive GLM models directly.
  *
  * Reference: https://platform.openai.com/docs/api-reference/responses
  *
  * Scope (P1.0): request body, batch response, and streaming SSE events covering
  * text / reasoning / function_call / web_search_call outputs. The streaming
  * event set mirrors what Codex CLI consumes (verified against the Vercel AI SDK
- * Responses provider in `_reverse/zcode.cjs` L1814 and sub2api's bridge).
+ * Responses provider in the historical client bundle and sub2api's bridge).
  */
 
 // ─────────────────────────────────────────────
@@ -163,7 +163,7 @@ export type ResponsesStreamEvent =
 // Helpers
 // ─────────────────────────────────────────────
 
-/** Generate a Responses-style id: `resp_<22 url-safe chars>`. */
+/** Generate a Responses-style id: `resp_<32 hex chars>`. */
 export function generateResponsesId(prefix = "resp_"): string {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
@@ -171,12 +171,12 @@ export function generateResponsesId(prefix = "resp_"): string {
   return `${prefix}${hex}`;
 }
 
-/** Generate a per-output-item id: `item_<22 hex>`. Used by the response translator. */
+/** Generate a per-output-item id: `item_<32 hex>`. Used by the response translator. */
 export function generateItemId(): string {
   return generateResponsesId("item_");
 }
 
-/** Generate a call_id: `call_<22 hex>`. Used for tool calls. */
+/** Generate a call_id: `call_<32 hex>`. Used for tool calls. */
 export function generateCallId(): string {
   return generateResponsesId("call_");
 }
@@ -190,7 +190,7 @@ export function isHostedTool(t: ResponsesTool): boolean {
     || t.type === "mcp";
 }
 
-/** Type guard: a web-search hosted tool — we route this to GLM MCP (intercepted). */
+/** Type guard: a web-search hosted tool — currently stripped without execution. */
 export function isWebSearchTool(t: ResponsesTool): boolean {
   return t.type === "web_search" || t.type === "web_search_preview";
 }

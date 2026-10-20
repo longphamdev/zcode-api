@@ -1,6 +1,5 @@
 /**
  * Tests for server routing and proxy API key auth.
- * @see .omo/plans/zcode-proxy.md Task 7
  */
 import { describe, it, expect } from "bun:test";
 import { createFetchHandler } from "./server.js";

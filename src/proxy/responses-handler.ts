@@ -121,6 +121,9 @@ export async function handleResponses(
   } catch (err) {
     return errorResponse(400, "invalid_request", `request body is not valid JSON: ${(err as Error).message}`);
   }
+  if (!req || typeof req !== "object" || Array.isArray(req)) {
+    return errorResponse(400, "invalid_request", "request body must be an object");
+  }
   if (typeof req.input !== "string" && !Array.isArray(req.input)) {
     return errorResponse(400, "invalid_request", "`input` must be a string or an array");
   }
@@ -249,10 +252,13 @@ export async function handleResponses(
 
   const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(opts.config);
   // 官方 3.15.1 静态规则：highspeed mode 的推理请求永不签名（`TUs` 返回 false）。
-  const signer = highspeedCard ? null : (opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config));
+  let signer = highspeedCard ? null : (opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config));
   const dispatch = async (pairs: UpstreamHeaderPair[]): Promise<Response> => {
-    const routed = routing ? await routing.resolve(upstreamReq.url, credentialString(cred)) : null;
+    const routed = routing ? await routing.resolve(upstreamReq.url, credentialString(cred), cred.jwt) : null;
     const sendUrl = routed?.routed ? routed.url : upstreamReq.url;
+    const routingHeaderPairs = routed?.headers
+      ? (Object.entries(routed.headers) as UpstreamHeaderPair[])
+      : undefined;
     if (debug && routed?.routed) console.log(`[responses] endpoint routing: ${upstreamReq.url} -> ${sendUrl}`);
     // signing decisions run against the PRE-routing provider URL (mirrors the
     // client, whose signer wraps the routing transport)
@@ -265,12 +271,16 @@ export async function handleResponses(
       appVersion: opts.config.identity.appVersion,
       debug: debug ? (message) => console.log(`[responses] ${message}`) : undefined,
       send: (finalPairs) => {
+        // 3.16.2 X-ZCode-Authorization rides after the signature block (the
+        // client's routing wrapper sits inside its signing wrapper) — last on
+        // the wire, same as handler.ts.
+        const outboundPairs = routingHeaderPairs ? [...finalPairs, ...routingHeaderPairs] : finalPairs;
         const req = new Request(sendUrl, {
           method: "POST",
-          headers: Object.fromEntries(finalPairs),
+          headers: Object.fromEntries(outboundPairs),
           body: transformedBody ?? undefined,
         });
-        return fetchImpl(req, { method: "POST", headers: Object.fromEntries(finalPairs), body: transformedBody ?? undefined, signal: clientReq.signal });
+        return fetchImpl(req, { method: "POST", headers: Object.fromEntries(outboundPairs), body: transformedBody ?? undefined, signal: clientReq.signal });
       },
     });
   };
@@ -294,6 +304,7 @@ export async function handleResponses(
     console.log("[responses] highspeed card rejected upstream — falling back to session model");
     highspeedManager?.dropCard("upstream_rejected");
     transformedBody = highspeedOrigBody;
+    signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config);
     const retryPairs = highspeedOrigPairs;
     try {
       upstreamResp = await dispatchWithConnectRetry(() => dispatch(retryPairs), {
@@ -318,7 +329,7 @@ export async function handleResponses(
         challengedResp: upstreamResp,
         debug: debug ? (message) => console.log(`[responses] ${message}`) : undefined,
         solveAndRetry: (retryHeaders) => dispatch(
-          buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, retryHeaders, undefined),
+          buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, retryHeaders, clientSession),
         ),
         mapError: (err, phase) =>
           phase === "solver"

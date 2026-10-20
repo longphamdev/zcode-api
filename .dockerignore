@@ -11,3 +11,8 @@ zcode-proxy-darwin-*
 docs
 _reverse
 .omo
+.codegraph
+Android-APP
+**/AGENTS.md
+**/*.test.ts
+src/proxy/captcha-worker-entry.bundle.js

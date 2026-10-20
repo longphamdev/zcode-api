@@ -6,7 +6,6 @@
  * removing that runtime dependency. Update this list when new GLM models are
  * released or specs change.
  *
- * @see .omo/plans/zcode-proxy.md Task 3
  */
 import type { ModelDef } from "./types.js";
 

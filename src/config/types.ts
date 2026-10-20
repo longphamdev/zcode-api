@@ -1,6 +1,5 @@
 /**
  * Configuration types for zcode-proxy.
- * @see .omo/plans/zcode-proxy.md Task 2
  */
 
 /** Provider endpoint configuration (one per upstream provider). */
@@ -64,7 +63,7 @@ export interface ClientIdentityConfig {
 
 /**
  * Responses-API (`/v1/responses`) configuration. When `enabled`, the proxy
- * translates Codex-style Responses requests to the GLM Chat Completions upstream.
+ * translates Responses requests through Chat Completions to the Anthropic upstream.
  */
 export interface ResponsesConfig {
   /** Enable the `/v1/responses` route. Default `true`. */
@@ -97,15 +96,15 @@ export interface McpGatewayConfig {
   upstreamOrigin: string;
 }
 
-/** GLM MCP hosted-tool configuration. Endpoints are derived from the active provider. */
+/** Legacy hosted-tool switches (unwired) plus the active official MCP gateway. */
 export interface McpConfig {
-  /** Enable MCP interception (web_search) and function-tool injection (web_reader/zread). Default `true`. */
+  /** Legacy compatibility field, currently unwired. Default `true`. */
   enabled: boolean;
-  /** Intercept `web_search` / `web_search_preview` hosted tools via GLM `web_search_prime` MCP. Default `true`. */
+  /** Legacy hosted-search preference; no search executor is wired. Default `true`. */
   webSearch: boolean;
-  /** Inject `webReader` as a function tool the model can call. Default `false` (off by default to limit scope). */
+  /** Legacy reader preference, currently unwired. Default `false`. */
   webReader: boolean;
-  /** Inject the three `zread` tools as function tools. Default `false`. */
+  /** Legacy repository-reader preference, currently unwired. Default `false`. */
   zread: boolean;
   /** Official plugin-MCP gateway relay (`/mcp/*`). Separate plane from the
    *  GLM hosted-tool fields above (those remain unwired). */

@@ -1,6 +1,5 @@
 /**
  * Tests for encrypted credential store.
- * @see .omo/plans/zcode-proxy.md Task 14
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { saveCredential, loadCredential, clearCredential, getStorePath } from "./store.js";

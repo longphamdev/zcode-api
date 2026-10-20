@@ -1,6 +1,5 @@
 /**
  * Tests for config loader.
- * @see .omo/plans/zcode-proxy.md Task 2
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";

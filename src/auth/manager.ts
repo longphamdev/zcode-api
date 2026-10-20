@@ -1,6 +1,5 @@
 /**
  * Auth manager — resolves the upstream credential from the OAuth login flow.
- * @see .omo/plans/zcode-proxy.md Task 4
  */
 import type { Credential } from "./types.js";
 

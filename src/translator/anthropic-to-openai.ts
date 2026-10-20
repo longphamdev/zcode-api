@@ -1,6 +1,5 @@
 /**
  * Anthropic → OpenAI request translator and OpenAI → Anthropic response translator.
- * @see .omo/plans/zcode-proxy.md Task 11
  */
 import type {
   OpenAIChatRequest,
@@ -50,8 +49,8 @@ export function translateRequestAnthropicToOpenAI(req: AnthropicMessagesRequest)
   }
 
   // GLM-5.3+ Anthropic clients set reasoning effort via `output_config.effort`
-  // (the Anthropic upstream ignores `reasoning_effort`); the OpenAI-format
-  // upstream on start-plan reads `reasoning_effort` instead, so carry it over.
+  // (the Anthropic upstream ignores `reasoning_effort`). This reverse-format
+  // helper preserves it; production start-plan now uses Anthropic upstream.
   //
   // Scoped to the GLM-5.3 family, which is the only one that defines
   // `output_config`. Carrying it over unconditionally would let a client that

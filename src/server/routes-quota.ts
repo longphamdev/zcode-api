@@ -8,7 +8,7 @@
  *  - coding plane: `GET {coding origin}/api/monitor/usage/quota/limit` with the
  *    stored coding-plan API key in `authorization` (bundle `wK`/`Z_`+`md`) —
  *    the windowed usage limits of individual coding plans (`data.limits[]`,
- *    `TIME_LIMIT` rows preferred by the official `Xj` picker).
+ *    TOKENS_LIMIT = prompt windows; TIME_LIMIT = tool-call window).
  *
  * The billing gateway requires a stable `X-Device-Mid`, so the config identity
  * is forwarded unchanged.

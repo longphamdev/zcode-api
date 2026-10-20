@@ -1,6 +1,5 @@
 /**
  * Tests for OpenAI ↔ Anthropic translators.
- * @see .omo/plans/zcode-proxy.md Task 11
  */
 import { describe, it, expect } from "bun:test";
 import {
@@ -23,6 +22,20 @@ import type {
 } from "./types.js";
 
 describe("translateRequestOpenAIToAnthropic", () => {
+  it("preserves developer instructions and prefers the current completion limit", () => {
+    const result = translateRequestOpenAIToAnthropic({
+      model: "glm-4.6", max_tokens: 20, max_completion_tokens: 100, thinking: { type: "disabled" },
+      messages: [
+        { role: "system", content: "base" },
+        { role: "developer", content: [{ type: "text", text: "policy" }] },
+        { role: "user", content: "hello" },
+      ],
+    });
+    expect(result.system).toBe("base\n\npolicy");
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]!.role).toBe("user");
+    expect(result.max_tokens).toBe(100);
+  });
   it("extracts system message to top-level system field", () => {
     const req: OpenAIChatRequest = {
       model: "glm-4.6",

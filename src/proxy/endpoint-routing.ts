@@ -22,6 +22,19 @@ const FAILURE_COOLDOWN_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 3_000;
 const MAX_MAPPING_ENTRIES = 256;
 
+/**
+ * 3.16.2 `zcodeAuthorizationHeader` (bundle `sso`/`DGs`/`OGs`): the server may
+ * flag a mapping entry to have the zcode JWT attached as
+ * `X-ZCode-Authorization: Bearer <jwt>` on rewritten requests. The field VALUE
+ * is a marker — it must equal the header name itself (case-insensitive), not a
+ * credential — and the target must stay on the official ultra paths, otherwise
+ * the whole config refresh is rejected (`agent_configs_unsafe_zcode_authorization_target`,
+ * fail-closed on config / fail-open on request, exactly like the client).
+ */
+const ZCODE_AUTHORIZATION_HEADER = "X-ZCode-Authorization";
+const ZCODE_AUTHORIZATION_MARKER = "x-zcode-authorization";
+const ZCODE_AUTHORIZATION_PATHS = ["/api/v1/ultra", "/api/v1/ultra-zai"];
+
 export interface EndpointRoutingOptions {
   /** Origin of the agent-configs endpoint. */
   origin?: string;
@@ -39,11 +52,23 @@ export interface EndpointRoutingOptions {
 export interface RoutedUrl {
   routed: boolean;
   url: string;
+  /**
+   * Extra headers the server asked for via the mapping entry's
+   * `zcodeAuthorizationHeader` flag (3.16.2). Present only when the matched
+   * entry is flagged AND a printable zcode JWT was supplied — absent
+   * otherwise (fail-open: routing still applies).
+   */
+  headers?: Record<string, string>;
+}
+
+interface RoutingTarget {
+  url: string;
+  includeZCodeAuthorization: boolean;
 }
 
 interface RoutingSnapshot {
   expiresAt: number;
-  mapping: Map<string, string>;
+  mapping: Map<string, RoutingTarget>;
 }
 
 function normalizePath(pathname: string): string {
@@ -65,8 +90,32 @@ function parseMappingUrl(value: unknown, field: "from" | "to"): URL {
   return parsed;
 }
 
+// bundle `OGs`=isAllowedIdentityTarget: origin must equal the config origin and
+// the normalized pathname must be an official ultra path (exact or subpath).
+function isAllowedZCodeAuthorizationTarget(target: URL, endpointOrigin: string): boolean {
+  if (target.origin !== endpointOrigin) return false;
+  const path = normalizePath(target.pathname);
+  return ZCODE_AUTHORIZATION_PATHS.some((p) => path === p || path.startsWith(`${p}/`));
+}
+
+// bundle `Mpt`=normalizePrintableHeaderValue: trimmed, fully printable ASCII or null.
+function normalizePrintableHeaderValue(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || !/^[\x20-\x7e]+$/u.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+// bundle `readZCodeAuthorization`: printable gate + Bearer normalization,
+// fail-open (no header when the JWT is missing/unreadable).
+function buildZCodeAuthorizationHeaders(zcodeJwt: string | undefined): Record<string, string> | undefined {
+  const value = normalizePrintableHeaderValue(zcodeJwt);
+  if (!value) return undefined;
+  return { [ZCODE_AUTHORIZATION_HEADER]: /^Bearer\s/i.test(value) ? value : `Bearer ${value}` };
+}
+
 export class EndpointRoutingService {
   private readonly configUrl: string;
+  private readonly endpointOrigin: string;
   private readonly identity: ProxyIdentity;
   private readonly credential?: () => string | undefined;
   private readonly fetchImpl: typeof fetch;
@@ -81,6 +130,7 @@ export class EndpointRoutingService {
 
   constructor(opts: EndpointRoutingOptions) {
     this.configUrl = `${(opts.origin?.trim() || DEFAULT_ORIGIN).replace(/\/+$/u, "")}${CONFIG_PATH}`;
+    this.endpointOrigin = new URL(this.configUrl).origin;
     this.identity = opts.identity;
     this.credential = opts.credential;
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -101,8 +151,11 @@ export class EndpointRoutingService {
    * resolves to `{ routed: false, url }` so the caller keeps the original URL.
    * The optional `credential` (coding-plan key) is attached as `x-api-key` on
    * a mapping refresh fetch, mirroring the client's `sourceHeaders`.
+   * `zcodeJwt` (the `zcodejwttoken` slot) feeds the 3.16.2
+   * `X-ZCode-Authorization` injection on flagged entries — omitted silently
+   * when absent (the un-logged-in client behaves the same).
    */
-  async resolve(url: string, credential?: string): Promise<RoutedUrl> {
+  async resolve(url: string, credential?: string, zcodeJwt?: string): Promise<RoutedUrl> {
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -116,9 +169,10 @@ export class EndpointRoutingService {
     }
     const target = this.snapshot?.mapping.get(routingKey(parsed));
     if (!target) return { routed: false, url };
-    const rewritten = new URL(target);
+    const rewritten = new URL(target.url);
     rewritten.search = parsed.search;
-    return { routed: true, url: rewritten.href };
+    const headers = target.includeZCodeAuthorization ? buildZCodeAuthorizationHeaders(zcodeJwt) : undefined;
+    return headers ? { routed: true, url: rewritten.href, headers } : { routed: true, url: rewritten.href };
   }
 
   private async ensureFresh(credential?: string): Promise<void> {
@@ -167,14 +221,24 @@ export class EndpointRoutingService {
       const list = Array.isArray(entries) ? entries : [];
       if (list.length > MAX_MAPPING_ENTRIES) throw new Error("agent_configs_too_many_mappings");
 
-      const mapping = new Map<string, string>();
+      const mapping = new Map<string, RoutingTarget>();
       for (const entry of list) {
-        const raw = entry as { from?: unknown; to?: unknown };
+        const raw = entry as { from?: unknown; to?: unknown; zcodeAuthorizationHeader?: unknown };
         const from = parseMappingUrl(raw.from, "from");
         const to = parseMappingUrl(raw.to, "to");
+        if (raw.zcodeAuthorizationHeader !== undefined && typeof raw.zcodeAuthorizationHeader !== "string") {
+          throw new Error("agent_configs_invalid_zcode_authorization_header");
+        }
+        const marker = raw.zcodeAuthorizationHeader?.trim() ?? "";
+        const includeZCodeAuthorization = marker.length > 0;
+        if (includeZCodeAuthorization
+          && (marker.toLowerCase() !== ZCODE_AUTHORIZATION_MARKER
+            || !isAllowedZCodeAuthorizationTarget(to, this.endpointOrigin))) {
+          throw new Error("agent_configs_unsafe_zcode_authorization_target");
+        }
         const key = routingKey(from);
         if (mapping.has(key)) throw new Error("agent_configs_duplicate_from");
-        mapping.set(key, to.href);
+        mapping.set(key, { url: to.href, includeZCodeAuthorization });
       }
       this.snapshot = { expiresAt: this.now() + this.successTtlMs, mapping };
       this.retryAfter = 0;

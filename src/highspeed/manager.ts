@@ -13,7 +13,7 @@
  * 反代偏差（deliberate deviations，官方为"每消息内联尝试、miss 尊重 next_draw_at"）：
  * - 抽卡为后台最大速率循环：首个合格请求同步点燃（当拍即发第一次 draw），
  *   此后按心跳节拍（≈1s，实测服务端令牌桶容量 8/回填 1/s——即真实最大可持续
- *   速率，更快只会换来 429→30s 退避）持续重试；miss（card=null）**忽略服务端
+ *   速率，更快只会换来 429→5s 退避）持续重试；miss（card=null）**忽略服务端
  *   next_draw_at**，下一个心跳立即重试（2026-10-12 用户决策：抽卡窗口价值在
  *   请求活跃期，等 2min 冷却等于放弃加速）。
  * - 空闲自熄：最后一次合格请求 5min 后循环停止；新请求重新点燃。
@@ -120,9 +120,9 @@ export class HighspeedManager {
   constructor(opts: {
     origin: string;
     models: string[];
-    /** Injected as X-Device-Mid (claim-plane convention) — required on first
-     *  draw access once the activity opens (live 2026-10-12: without it every
-     *  draw gets 400 biz 3001 "parameter error"). */
+    /** Injected as X-Device-Mid (deliberate deviation, activity compatibility).
+     * Historical 3001 observations also included unsupported models (flash);
+     * the code alone does not establish that device identity is missing. */
     deviceMid?: string;
     fetchImpl?: typeof fetch;
     now?: () => number;
@@ -169,11 +169,13 @@ export class HighspeedManager {
     // which must then carry the current account's auth or the redraw burns the
     // old account's token.
     this.latest = { model, taskId: sessionTaskId ?? randomUUID(), auth };
+    // Held-card traffic is still activity: rejection must be able to redraw
+    // within five minutes of this request, not only of the original draw.
+    this.loopUntil = now + IDLE_MS;
     // an unusable card (< CARD_MIN_REMAINING_MS) must not block re-ignition —
     // requests during those last seconds go out uncarded anyway, and holding
     // the slot would stall the loop until full expiry
     if (this.card && this.card.expiresAt - now >= CARD_MIN_REMAINING_MS) return;
-    this.loopUntil = now + IDLE_MS;
     this.ensureLoop();
   }
 
@@ -198,7 +200,7 @@ export class HighspeedManager {
     return flash(model) === flash(card.model) ? card : null;
   }
 
-  /** Drop the card after an upstream rejection (401 / biz 3402) — official selectionFallback. */
+  /** Drop the card after an upstream rejection (401 / biz 3402) — bounded proxy fallback (official selectionFallback also handles general failures). */
   dropCard(reason: string): void {
     if (!this.card) return;
     this.card = null;

@@ -59,6 +59,22 @@ async function until(cond: () => boolean): Promise<boolean> {
 }
 
 describe("HighspeedManager", () => {
+  it("refreshes the idle window during held-card traffic before rejection", async () => {
+    const clock = { now: 1_000_000 };
+    let draws = 0;
+    const manager = makeManager((async () => {
+      draws++;
+      return drawResponse({ ...hitCard(clock.now), expires_at: clock.now + 900_000 });
+    }) as unknown as typeof fetch, clock);
+    manager.onRequest("glm-5.2", SESSION_TASK, AUTH);
+    expect(await until(() => manager.activeCard() !== null)).toBe(true);
+    await settle();
+    clock.now += 301_000;
+    manager.onRequest("glm-5.2", SESSION_TASK, AUTH);
+    expect(draws).toBe(1);
+    manager.dropCard("upstream_rejected");
+    expect(await until(() => draws === 2)).toBe(true);
+  });
   it("draws on the first eligible request and holds the single card slot", async () => {
     const clock = { now: 1_000_000 };
     const calls: DrawCall[] = [];
