@@ -69,7 +69,7 @@
 # macOS / Linux
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
 export ANTHROPIC_AUTH_TOKEN=sk-1234
-export ANTHROPIC_MODEL=glm-4.7
+export ANTHROPIC_MODEL=glm-5.3
 claude
 ```
 
@@ -77,7 +77,7 @@ claude
 # Windows PowerShell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
 $env:ANTHROPIC_AUTH_TOKEN = "sk-1234"
-$env:ANTHROPIC_MODEL = "glm-4.7"
+$env:ANTHROPIC_MODEL = "glm-5.3"
 claude
 ```
 
@@ -110,7 +110,7 @@ env_key = "ZCODE_API_KEY"   # 任意非空值即可，除非你设置了代理�
 |--------|-----|
 | API 地址 (Base URL) | `http://127.0.0.1:8080/v1` |
 | API Key | 你的代理密钥（没设就随便填） |
-| 模型 | `glm-4.7`、`glm-5.3`、`glm-4.6v` 等，见下方模型表 |
+| 模型 | `glm-5.3`、`glm-5.3-flash`、`glm-4.6v` 等，见下方模型表 |
 
 Anthropic 格式的工具（如某些 Claude 客户端）地址填 `http://127.0.0.1:8080`，路径 `/v1/messages` 代理会自动接。
 
@@ -231,19 +231,12 @@ ssh -N -L 8090:127.0.0.1:8090 user@host
 
 ## 🧮 可用模型
 
-代理会把下面这些模型挂在 `/v1/models` 上（模型列表只是展示，其他模型名也会照常转发）：
+列表仅供展示：
 
 | 模型 | 上下文 | 最大输出 |
 |------|--------|----------|
-| `glm-4.5-air` | 131K | 96K |
-| `glm-4.6` | 200K | 131K |
-| `glm-4.6v`（视觉） | 131K | 32K |
-| `glm-4.7` | 200K | 131K |
-| `glm-5` / `glm-5-turbo` | 200K | 64K |
-| `glm-5v-turbo`（视觉） | 200K | 131K |
-| `glm-5.1` | 200K | 64K |
-| `glm-5.2` | 1M | 128K |
-| `glm-5.3` / `glm-5.3-flash` | 1M | 128K |
+| `glm-5.3` | 1M | 128K |
+| `glm-5.3-flash`（视觉） | 1M | 128K |
 
 ## ❓ 常见问题
 

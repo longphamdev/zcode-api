@@ -88,7 +88,7 @@ describe("server routing", () => {
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.object).toBe("list");
-    expect(body.data.length).toBeGreaterThan(0);
+    expect(body.data.map((m: { id: string }) => m.id)).toEqual(["glm-5.3", "glm-5.3-flash"]);
     expect(body.data[0].object).toBe("model");
   });
 
@@ -326,6 +326,7 @@ describe("route handler exports", () => {
         slug: string;
         context_window: number;
         max_tokens?: number;
+        input_modalities: string[];
         supported_reasoning_levels: Array<{ effort: string }>;
         visibility: string;
       }>;
@@ -334,19 +335,20 @@ describe("route handler exports", () => {
     // Rich shape: top-level models[], no data[].
     expect(Array.isArray(body.models)).toBe(true);
     expect(body.data).toBeUndefined();
+    // Only the advertised pair is listed (full pinned catalog stays internal
+    // for the translator; other model ids still forward).
+    expect(body.models.map((m) => m.slug)).toEqual(["glm-5.3", "glm-5.3-flash"]);
     const flash = body.models.find((m) => m.slug === "glm-5.3-flash");
     expect(flash).toBeDefined();
     expect(flash!.context_window).toBe(1_000_000);
     expect(flash!.max_tokens).toBe(128_000);
     expect(flash!.visibility).toBe("list");
+    expect(flash!.input_modalities).toEqual(["text", "image"]);
+    expect(body.models.find((m) => m.slug === "glm-5.3")!.input_modalities).toEqual(["text"]);
     // Reasoning model advertises the Codex-style effort levels the DSH
     // better-basicfun bridge maps onto its selector levels.
     const efforts = flash!.supported_reasoning_levels.map((l) => l.effort);
     expect(efforts).toEqual(["low", "medium", "high", "xhigh"]);
-    // Vision variants advertise image input; non-reasoning ones have no levels.
-    const vModel = body.models.find((m) => m.slug === "glm-4.6v");
-    expect(vModel).toBeDefined();
-    expect(vModel!.supported_reasoning_levels).toEqual([]);
   });
 
   it("handleMessages is a function", () => {

@@ -3,7 +3,7 @@
  */
 import { describe, it, expect } from "bun:test";
 import { getProvider, ZAI_PROVIDER, BIGMODEL_PROVIDER } from "./providers.js";
-import { MODELS } from "./models.js";
+import { MODELS, ADVERTISED_MODELS } from "./models.js";
 
 describe("providers", () => {
   it("getProvider returns Z.AI definition", () => {
@@ -39,10 +39,11 @@ describe("models", () => {
   it("MODELS contains exactly the 11 pinned coding-plan models", () => {
     expect(MODELS).toHaveLength(11);
     const ids = MODELS.map((m) => m.id);
+    // Current-gen defaults lead the advertised list; the rest newest→oldest.
     expect(ids).toEqual([
-      "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7",
-      "glm-5", "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2", "glm-5.3",
-      "glm-5.3-flash",
+      "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5",
+      "glm-5-turbo", "glm-5v-turbo", "glm-4.7", "glm-4.6", "glm-4.6v",
+      "glm-4.5-air",
     ]);
   });
 
@@ -81,11 +82,28 @@ describe("models", () => {
     expect(glm53f!.contextWindow).toBe(1_000_000);
   });
 
+  it("vision flag: flash + v-suffixed models, glm-5.3 text-only", () => {
+    const v = (id: string) => MODELS.find((m) => m.id === id)?.vision;
+    expect(v("glm-5.3-flash")).toBe(true);
+    expect(v("glm-5v-turbo")).toBe(true);
+    expect(v("glm-4.6v")).toBe(true);
+    expect(v("glm-5.3")).toBeUndefined();
+    expect(v("glm-5.2")).toBeUndefined();
+  });
+
   it("includes key GLM models", () => {
     const ids = MODELS.map((m) => m.id);
     expect(ids).toContain("glm-4.6");
     expect(ids).toContain("glm-5.2");
     expect(ids).toContain("glm-5.3");
     expect(ids).toContain("glm-5v-turbo");
+  });
+
+  it("advertises exactly the glm-5.3 pair via ADVERTISED_MODELS", () => {
+    expect(ADVERTISED_MODELS.map((m) => m.id)).toEqual(["glm-5.3", "glm-5.3-flash"]);
+    // Every advertised entry is backed by a full catalog entry (spec parity).
+    for (const m of ADVERTISED_MODELS) {
+      expect(MODELS.find((e) => e.id === m.id)).toBe(m);
+    }
   });
 });

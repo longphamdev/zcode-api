@@ -2,7 +2,7 @@
  * OpenAI-format route handlers: /v1/chat/completions + /v1/models.
  */
 import { proxyRequest, type ProxyHandlerOptions } from "../proxy/handler.js";
-import { MODELS } from "../provider/models.js";
+import { ADVERTISED_MODELS } from "../provider/models.js";
 import type { OpenAIModelList } from "../translator/types.js";
 
 /** Handle POST /v1/chat/completions — forward OpenAI-compatible chat requests upstream. */
@@ -13,7 +13,7 @@ export async function handleChatCompletions(
   return proxyRequest(req, "openai", opts);
 }
 
-/** Handle GET /v1/models — return the model list in OpenAI format. */
+/** Handle GET /v1/models — return the advertised model list in OpenAI format. */
 export function handleListModels(req: Request): Response {
   // CLIProxyAPI-style rich catalog: DSH's better-basicfun synchronizer probes
   // with ?client_version=pi and parses a top-level `models[]` array with
@@ -23,16 +23,16 @@ export function handleListModels(req: Request): Response {
   if (clientVersion === "pi") {
     const body = {
       object: "list",
-      models: MODELS.map((m) => ({
+      models: ADVERTISED_MODELS.map((m) => ({
         slug: m.id,
         display_name: m.name,
         description: m.name,
         context_window: m.contextWindow,
         max_context_window: m.contextWindow,
         ...(m.maxOutputTokens === undefined ? {} : { max_tokens: m.maxOutputTokens }),
-        // Heuristic: vision-capable ZCode models embed "v" in their id (e.g. glm-4.6v).
-        // Revisit if upstream introduces non-vision ids that merely contain "v".
-        input_modalities: m.id.includes("v") ? ["text", "image"] : ["text"],
+        // Vision capability is an explicit catalog flag (glm-5.3-flash takes
+        // images without a "v" in its id; glm-4.6v-style ids also carry it).
+        input_modalities: m.vision ? ["text", "image"] : ["text"],
         supported_reasoning_levels: m.reasoning
           ? [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }]
           : [],
@@ -46,7 +46,7 @@ export function handleListModels(req: Request): Response {
   }
   const list: OpenAIModelList = {
     object: "list",
-    data: MODELS.map((m) => ({
+    data: ADVERTISED_MODELS.map((m) => ({
       id: m.id,
       object: "model" as const,
       owned_by: "zcode-proxy",

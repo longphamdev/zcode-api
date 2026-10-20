@@ -461,15 +461,15 @@
       "use strict";
       var STORE = "zcode_webui_state_v1";
       // Known model catalog (used as a fallback when /v1/models is unreachable,
-      // e.g. before the proxy key has been entered).
+      // e.g. before the proxy key has been entered). Mirrors the advertised
+      // subset in src/provider/models.ts (ADVERTISED_MODEL_IDS).
       var KNOWN_MODELS = [
-        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-5",
-        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2"
+        "glm-5.3", "glm-5.3-flash"
       ];
 
       var DEFAULT_SETTINGS = {
         apiKey: "",
-        model: "glm-4.6",
+        model: "glm-5.3",
         systemPrompt: "",
         temperature: 1.0,
         topP: 0.95,
@@ -776,7 +776,7 @@
         statusDot.className = "status-dot" + (s === "ok" ? " ok" : s === "err" ? " err" : "");
         statusDot.title = s === "ok" ? "Connected" : s === "err" ? "Request failed (check key / proxy)" : "Set proxy API key in settings";
       }
-      function isVisionModel(id) { return /v/i.test(id || ""); }
+      function isVisionModel(id) { return /v|flash/i.test(id || ""); }
       function syncAttachVisibility() { attachBtn.hidden = !isVisionModel(modelSel.value); }
 
       // =========================================================
@@ -1045,7 +1045,7 @@
         if (!text && pendingImages.length === 0) return;
         // Block image input for non-vision models with a clear message.
         if (pendingImages.length && !isVisionModel(state.settings.model)) {
-          toast("This model does not support image input. Select a vision model (name contains 'v', e.g. glm-4.6v).");
+          toast("This model does not support image input. Select a vision model (e.g. glm-5.3-flash).");
           return;
         }
         var c = activeConv(); if (!c) { newConv(); c = activeConv(); }
@@ -1434,7 +1434,7 @@
         composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = ""; });
       });
       composer.addEventListener("drop", function (e) {
-        if (!isVisionModel(modelSel.value)) { toast("Select a vision model (name contains 'v') to attach images."); return; }
+        if (!isVisionModel(modelSel.value)) { toast("Select a vision model (e.g. glm-5.3-flash) to attach images."); return; }
         if (e.dataTransfer && e.dataTransfer.files) readImages(e.dataTransfer.files);
       });
 

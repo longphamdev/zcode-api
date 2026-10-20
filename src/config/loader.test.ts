@@ -120,7 +120,8 @@ logging:
     expect(cfg.server.port).toBe(8080);
     expect(cfg.server.host).toBe("0.0.0.0");
     expect(cfg.provider).toBe("zai");
-    expect(cfg.defaultModel).toBe("glm-4.6");
+    expect(cfg.defaultModel).toBe("glm-5.3");
+    expect(cfg.models).toEqual(["glm-5.3", "glm-5.3-flash"]);
     expect(cfg.logging.level).toBe("info");
     expect(cfg.providers.zai.anthropicBase).toBe("https://api.z.ai/api/anthropic");
     expect(cfg.providers.bigmodel.openaiBase).toBe("https://open.bigmodel.cn/api/coding/paas/v4");

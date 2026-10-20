@@ -25,4 +25,6 @@ export interface ModelDef {
   maxOutputTokens?: number;
   /** Whether the model supports reasoning/thinking mode. */
   reasoning?: boolean;
+  /** Whether the model accepts image input (explicit — no id-shape heuristic). */
+  vision?: boolean;
 }

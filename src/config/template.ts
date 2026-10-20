@@ -38,18 +38,12 @@ providers:
     anthropicBase: "https://open.bigmodel.cn/api/anthropic"
     openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4"
 
-defaultModel: glm-4.6
+# Default model used when a client request omits \`model\`.
+defaultModel: glm-5.3
 
+# Informational model list surfaced in the TUI / startup output; any other
+# model id still forwards upstream (no whitelist enforcement).
 models:
-  - glm-4.5-air
-  - glm-4.6
-  - glm-4.6v
-  - glm-4.7
-  - glm-5
-  - glm-5-turbo
-  - glm-5v-turbo
-  - glm-5.1
-  - glm-5.2
   - glm-5.3
   - glm-5.3-flash
 

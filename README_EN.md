@@ -70,7 +70,7 @@ About the "API Key": if you've set `auth.proxyApiKey` in the config (or the envi
 # macOS / Linux
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
 export ANTHROPIC_AUTH_TOKEN=sk-1234
-export ANTHROPIC_MODEL=glm-4.7
+export ANTHROPIC_MODEL=glm-5.3
 claude
 ```
 
@@ -78,7 +78,7 @@ claude
 # Windows PowerShell
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:8080"
 $env:ANTHROPIC_AUTH_TOKEN = "sk-1234"
-$env:ANTHROPIC_MODEL = "glm-4.7"
+$env:ANTHROPIC_MODEL = "glm-5.3"
 claude
 ```
 
@@ -111,7 +111,7 @@ In your tool's "Custom Provider" section, fill in:
 |--------|-----|
 | API address (Base URL) | `http://127.0.0.1:8080/v1` |
 | API Key | Your proxy key (anything, if unset) |
-| Model | `glm-4.7`, `glm-5.3`, `glm-4.6v`, etc. — see the model table below |
+| Model | `glm-5.3`, `glm-5.3-flash`, `glm-4.6v`, etc. — see the model table below |
 
 Anthropic-format tools (e.g. some Claude clients) should use `http://127.0.0.1:8080` as the address; the proxy handles the `/v1/messages` path automatically.
 
@@ -232,19 +232,12 @@ and open `http://127.0.0.1:8090`. With host networking the proxy port is the hos
 
 ## 🧮 Available Models
 
-The proxy lists the models below under `/v1/models` (the list is for display only — any other model name is still forwarded as-is):
+The table below is for reference only:
 
 | Model | Context | Max Output |
 |------|--------|----------|
-| `glm-4.5-air` | 131K | 96K |
-| `glm-4.6` | 200K | 131K |
-| `glm-4.6v` (vision) | 131K | 32K |
-| `glm-4.7` | 200K | 131K |
-| `glm-5` / `glm-5-turbo` | 200K | 64K |
-| `glm-5v-turbo` (vision) | 200K | 131K |
-| `glm-5.1` | 200K | 64K |
-| `glm-5.2` | 1M | 128K |
-| `glm-5.3` / `glm-5.3-flash` | 1M | 128K |
+| `glm-5.3`  | 1M | 128K |
+| `glm-5.3-flash` (vision) | 1M | 128K |
 
 ## ❓ FAQ
 
