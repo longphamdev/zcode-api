@@ -278,7 +278,17 @@ keys.
 
 ## License
 
-MIT
+Copyright (c) 2026 TriDefender and the ZCode Proxy contributors.
+
+This project uses **[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)**. [LICENSE](LICENSE) contains the unmodified official standard text, preceded by the project's copyright and license notice.
+
+- **NonCommercial**: copying, sharing and adapting are permitted without a license fee when complying with the license. Uses primarily intended for commercial advantage or monetary compensation are not permitted.
+- **Attribution and notices**: when sharing the original or adaptations, retain attribution and supplied original copyright, license and disclaimer notices as required by the license, link to the license, and indicate modifications.
+- **ShareAlike**: publicly shared adaptations must use the same or a compatible license as permitted by CC BY-NC-SA 4.0. Do not impose additional legal terms or technical measures restricting the licensed rights.
+
+**Scope limits**: CC BY-NC-SA 4.0 does not require software source disclosure, cannot strictly guarantee a ban on closed-source distribution, and has no network-service source disclosure requirement. This project adds no such custom restrictions. CC [recommends against its licenses for software](https://creativecommons.org/faq/#can-i-apply-a-creative-commons-license-to-software); this project chooses its noncommercial, attribution and ShareAlike conditions. Independent tool outputs containing no licensed Project material are not automatically covered merely because the tool was used.
+
+Third-party components retain their own licenses. This license covers only material the rights holders may offer on these terms; valid earlier MIT grants are not retroactively revoked. This is a summary; see [LICENSE](LICENSE) and the [official legal code](https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.en) for the complete terms.
 
 ## Protocol and maintenance notes
 

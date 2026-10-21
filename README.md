@@ -274,7 +274,17 @@ bun run dev         # 开发模式启动面板
 
 ## License
 
-MIT
+Copyright (c) 2026 TriDefender and the ZCode Proxy contributors.
+
+本项目采用 **[CC BY-NC-SA 4.0（署名—非商业性使用—相同方式共享 4.0 国际）](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.zh-hans)**。[LICENSE](LICENSE) 收录未经修改的官方标准全文；文件开头为项目的版权与许可声明。
+
+- **非商业性使用**：允许在遵守许可的前提下免费复制、分享和改编；不得用于主要以商业利益或金钱报酬为目的的活动。
+- **署名并保留声明**：分享原作或改编作品时，须按许可要求保留原作者署名、已提供的原始版权声明、许可声明及免责声明，提供许可链接，并注明是否修改。
+- **相同方式共享**：公开分享改编作品时，须按本许可允许的相同或兼容许可授权，不得施加限制许可权利的附加法律条款或技术措施。
+
+**适用边界**：CC BY-NC-SA 4.0 没有强制提供软件源码的条款，不能严格保证禁止闭源，也不要求网络服务公开对应源码；本项目未附加此类自定义限制。CC 官方[不推荐将 CC 许可用于软件](https://creativecommons.org/faq/#can-i-apply-a-creative-commons-license-to-software)，本项目选择其非商业、署名和相同方式共享条件。不含本项目受许可内容的独立工具产出不会仅因使用本项目而自动适用此许可。
+
+第三方组件继续适用各自的许可。本许可仅覆盖权利人有权按这些条款授权的内容；此前依法取得的 MIT 授权不会被追溯撤销。上述说明为摘要，完整条件以 [LICENSE](LICENSE) 和[官方法律文本](https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.zh-hans)为准。
 
 ## 协议与维护说明
 
