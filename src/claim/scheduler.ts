@@ -33,6 +33,7 @@ export interface ClaimSchedulerDeps {
   getJwt(): Promise<string | undefined>;
   createClient(jwt: string): ClaimGateway;
   getCaptcha(): Promise<{ verifyParam: string; region?: string }>;
+  captchaRequired?: () => Promise<boolean> | boolean;
   config: ClaimSchedulerConfig;
   log?: (message: string) => void;
   now?: () => number;
