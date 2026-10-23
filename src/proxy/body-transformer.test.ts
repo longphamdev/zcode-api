@@ -284,7 +284,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.tools[1]).toEqual({ name: "read_file" });
   });
 
-  it("strips client cache_control from preserved system blocks", () => {
+  it("client system takes the customSystemPrompt path: 2 blocks, no default chain (3012 fix)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: [{ type: "text", text: "User rule", cache_control: { type: "ephemeral" } }],
@@ -293,8 +293,14 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
 
     const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
-    expect(parsed.system).toHaveLength(4);
-    expect(parsed.system[3]).toEqual({ type: "text", text: "User rule" });
+    // Bundle custom-prompt semantics: [cli_prefix, "\n"+custom] — the
+    // identity/desktop/dynamic chain is suppressed; a 4th appended block is a
+    // shape no real client produces and the gateway rejects with 405/3012.
+    expect(parsed.system).toHaveLength(2);
+    expect(parsed.system[0]).toEqual({ type: "text", text: "You are ZCode, an interactive coding agent" });
+    expect(parsed.system[1]).toEqual({ type: "text", text: "\nUser rule", cache_control: { type: "ephemeral" } });
+    expect(parsed.system[1].text).not.toContain("# Environment");
+    expect(parsed.system[1].text).not.toContain("powered by the model named");
   });
 
   it("omits the powered-by line when body.model is missing", () => {
@@ -337,7 +343,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.system[2].text).not.toContain("powered by the model named");
   });
 
-  it("preserves client system text after ZCode's official blocks", () => {
+  it("string client system takes the customSystemPrompt 2-block path", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: "User rule",
@@ -347,8 +353,8 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
-    expect(parsed.system).toHaveLength(4);
-    expect(parsed.system[3]).toEqual({ type: "text", text: "User rule" });
+    expect(parsed.system).toHaveLength(2);
+    expect(parsed.system[1]).toEqual({ type: "text", text: "\nUser rule", cache_control: { type: "ephemeral" } });
   });
 });
 

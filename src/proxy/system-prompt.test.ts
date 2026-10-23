@@ -153,20 +153,34 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
     expect(dynamic.text).toContain("- Is a git repository: no");
   });
 
-  it("appends client system blocks AFTER the official blocks, stripped of cache_control", () => {
+  it("client system takes the customSystemPrompt path: 2 blocks, custom replaces the whole chain", () => {
     const blocks = buildStartPlanSystem(
       [
         { type: "text", text: "User rule", cache_control: { type: "ephemeral" } },
         { type: "text", text: "" }, // dropped
-        "raw string block", // kept
+        "raw string block", // joined
       ],
       "glm-5.3",
       ENV,
       "zai",
+      VIZ_DIR,
     );
-    expect(blocks).toHaveLength(5);
-    expect(blocks[3]).toEqual({ type: "text", text: "User rule" });
-    expect(blocks[4]).toEqual({ type: "text", text: "raw string block" });
+    // Bundle Fje#build() i-branch: cli_prefix + "\n"+custom only — identity,
+    // desktop context, dynamic behavior, environment (incl. powered-by) and
+    // context management are ALL suppressed. Appending a 4th block is the
+    // 405/3012 "unusual activity" trigger (live-verified 2026-10-23).
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toEqual({ type: "text", text: "You are ZCode, an interactive coding agent" });
+    expect(blocks[1]).toEqual({ type: "text", text: "\nUser rule\n\nraw string block", cache_control: { type: "ephemeral" } });
+  });
+
+  it("whitespace-only / absent client system keeps the default 3-block identity chain", () => {
+    for (const system of [undefined, null, "", "   ", [], [{ type: "text", text: "  " }]]) {
+      const blocks = buildStartPlanSystem(system, "glm-5.3", ENV, "zai", VIZ_DIR);
+      expect(blocks).toHaveLength(3);
+      expect(blocks[1].text).toContain("interactive ZCode agent");
+      expect(blocks[2].text).toContain("# Environment");
+    }
   });
 
   it("returns only the 3 official blocks for absent system", () => {

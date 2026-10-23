@@ -139,13 +139,23 @@ export function buildDesktopContextSection(vizDir: string | undefined): string {
 
 /**
  * Prepend the official ZCode gateway blocks to the request's `system` field,
- * mirroring `assembleSystemMessages` (3 blocks: cli_prefix plain, stable and
- * dynamic blocks ephemeral, dynamic block `\n\n`-prefixed). Client system
- * blocks (if any) are preserved AFTER the official blocks, with their
- * `cache_control` stripped: the official blocks already consume cache
- * breakpoints (the last-message marker applied by body-transformer takes the
- * final one), so client markers would push the request over the cap — the
- * real client never emits foreign markers because it owns the whole body.
+ * mirroring `assembleSystemMessages`.
+ *
+ * No client system → the default 3-block desktop shape (cli_prefix plain,
+ * stable and dynamic blocks ephemeral, dynamic block `\n\n`-prefixed).
+ *
+ * Client system present → the bundle's `customSystemPrompt` semantics
+ * (3.16.3 `Fje#build()` `i`-branch): the custom text REPLACES the Agent
+ * Identity section AND suppresses the whole default chain (Desktop Context,
+ * Dynamic Behavior, Environment Info incl. the powered-by line, Context
+ * Management) — the wire is EXACTLY 2 blocks: [cli_prefix, "\n"+custom],
+ * block 2 ephemeral. This is the real subagent/custom-prompt client state;
+ * appending the client text as a 4th system block is a shape no real client
+ * produces, and the gateway's risk control rejects it with 405/3012
+ * "unusual activity" (live-verified 2026-10-23 — the opencode-502 root
+ * cause). Multiple client text blocks are `\n\n`-joined into the single
+ * custom string the real client would carry; client `cache_control` is
+ * dropped (block 2 owns the ephemeral breakpoint).
  */
 export function buildStartPlanSystem(
   existingSystem: unknown,
@@ -154,18 +164,24 @@ export function buildStartPlanSystem(
   provider?: "zai" | "bigmodel",
   vizDir: string = resolveVisualizationDirectory(),
 ): SystemBlock[] {
+  const custom = customSystemText(existingSystem);
+  if (custom !== undefined) {
+    return [
+      { type: "text", text: data.cliPrefix },
+      { type: "text", text: `\n${custom}`, cache_control: { ...EPHEMERAL } },
+    ];
+  }
   const stable = [data.stableSections.join("\n\n"), buildDesktopContextSection(vizDir)].join("\n\n");
   const dynamic = [
     data.dynamicSections.beforeEnvironment,
     buildEnvironmentSection(env, currentModel, provider),
     data.dynamicSections.afterEnvironment,
   ].join("\n\n");
-  const official: SystemBlock[] = [
+  return [
     { type: "text", text: data.cliPrefix },
     { type: "text", text: stable, cache_control: { ...EPHEMERAL } },
     { type: "text", text: `\n\n${dynamic}`, cache_control: { ...EPHEMERAL } },
   ];
-  return [...official, ...normalizeUserSystem(existingSystem)];
 }
 
 /**
@@ -184,24 +200,43 @@ export function buildContextPrefixMessage(now?: Date): { role: "user"; content: 
   };
 }
 
-function normalizeUserSystem(system: unknown): SystemBlock[] {
-  if (system == null) return [];
+/**
+ * Whether a client `system` payload would take the customSystemPrompt (2-block
+ * subagent-shape) path in {@link buildStartPlanSystem} — the pairing signal for
+ * the subagent session identity (gateway cross-checks x-zcode-session-type
+ * against the system shape; main + custom blocks = 405/3012, live-verified
+ * 2026-10-23).
+ */
+export function hasCustomSystemPrompt(system: unknown): boolean {
+  return customSystemText(system) !== undefined;
+}
+
+/**
+ * Client system → the single customSystemPrompt string (bundle semantic:
+ * `customSystemPrompt?.trim()`). String input is used as-is (trimmed);
+ * array input's text blocks are `\n\n`-joined into one string — the real
+ * client carries exactly one custom prompt string, never a block list.
+ * Returns undefined when there is no non-empty text (whitespace-only
+ * systems take the default identity path, matching `!!o` in the bundle).
+ */
+function customSystemText(system: unknown): string | undefined {
+  if (system == null) return undefined;
   if (typeof system === "string") {
     const text = system.trim();
-    return text ? [{ type: "text", text }] : [];
+    return text ? text : undefined;
   }
-  if (!Array.isArray(system)) return [];
-  const out: SystemBlock[] = [];
+  if (!Array.isArray(system)) return undefined;
+  const parts: string[] = [];
   for (const item of system) {
     if (typeof item === "string") {
-      if (item.trim()) out.push({ type: "text", text: item });
+      if (item.trim()) parts.push(item);
     } else if (item && typeof item === "object") {
       const b = item as Record<string, unknown>;
       if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
         // cache_control intentionally dropped — see buildStartPlanSystem doc.
-        out.push({ type: "text", text: b.text });
+        parts.push(b.text);
       }
     }
   }
-  return out;
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
 }

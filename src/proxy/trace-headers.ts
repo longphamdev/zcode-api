@@ -8,7 +8,7 @@ export interface ZcodeTraceContext {
 }
 
 const QUERY_PREFIX = "query_";
-const SUBAGENT_PREFIX = "subagent_agent_";
+export const SUBAGENT_PREFIX = "subagent_agent_";
 const SESSION_PREFIXES = ["sess_", SUBAGENT_PREFIX];
 
 /**

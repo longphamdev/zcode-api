@@ -23,6 +23,8 @@ export interface UpstreamClientSession {
   action: "off" | "observe" | "enforce";
   sessionId?: string;
   upstreamSessionId?: string;
+  /** Explicit x-zcode-session-type override (wins over sessionId-prefix derivation). */
+  sessionType?: "main" | "subagent" | "other";
   requestId?: string;
   traceId?: string;
   queryId?: string;
@@ -136,6 +138,7 @@ function buildTraceHeaders(plan: "coding-plan" | "start-plan", clientSession?: U
       traceId: clientSession?.traceId,
       queryId: clientSession?.queryId,
       sessionId,
+      ...(clientSession?.sessionType ? { sessionType: clientSession.sessionType } : {}),
     });
   }
 

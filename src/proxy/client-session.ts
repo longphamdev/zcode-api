@@ -27,6 +27,8 @@ export interface ClientSessionResult {
   confidence: number;
   sessionId?: string;
   upstreamSessionId?: string;
+  /** Explicit x-zcode-session-type override (wins over sessionId-prefix derivation). */
+  sessionType?: "main" | "subagent" | "other";
   requestId?: string;
   traceId?: string;
   queryId?: string;
