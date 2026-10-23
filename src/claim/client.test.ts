@@ -139,8 +139,10 @@ describe("createClaimClient — minimal claim-plane header set (3.12.3 verbatim)
 
   it("claim sends exactly the bundle's 6 headers (Authorization, Content-Type, captcha param, [region], version, platform)", async () => {
     let req: Request | undefined;
-    const fetchImpl = makeMockFetch((r) => {
+    let sentHeaders: Record<string, string> | undefined;
+    const fetchImpl = makeMockFetch((r, init) => {
       req = r;
+      sentHeaders = init?.headers as Record<string, string>;
       return Promise.resolve(jsonResp({ code: 0, data: { plan: { plan_id: "weekend-free-1024", starts_at: 1, ends_at: 2 } } }));
     });
     const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.12.3", platform: "win32-x64", fetchImpl });
@@ -159,6 +161,40 @@ describe("createClaimClient — minimal claim-plane header set (3.12.3 verbatim)
     expect(req!.headers.get("http-referer")).toBeNull();
     expect(req!.headers.get("x-device-mid")).toBeNull();
     expect(req!.headers.get("x-zcode-agent")).toBeNull();
+    // Wire-order contract, pinned on the pre-Headers Record (Bun's Headers
+    // re-normalizes key order).
+    expect(Object.keys(sentHeaders!)).toEqual([
+      "Authorization",
+      "Content-Type",
+      "X-Aliyun-Captcha-Verify-Param",
+      "X-Aliyun-Captcha-Verify-Region",
+      "X-ZCode-App-Version",
+      "X-Platform",
+    ]);
+  });
+
+  it("claim without a captcha token omits both captcha headers (3.16.3 switch off)", async () => {
+    let req: Request | undefined;
+    let sentHeaders: Record<string, string> | undefined;
+    const fetchImpl = makeMockFetch((r, init) => {
+      req = r;
+      sentHeaders = init?.headers as Record<string, string>;
+      return Promise.resolve(jsonResp({ code: 0, data: { plan: { plan_id: "weekend-free-1024" } } }));
+    });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.16.3", platform: "win32-x64", fetchImpl });
+
+    await client.claim("weekend-free-1024");
+
+    expect(req!.headers.get("authorization")).toBe("Bearer jwt-1");
+    expect(req!.headers.get("content-type")).toBe("application/json");
+    expect(req!.headers.get("x-aliyun-captcha-verify-param")).toBeNull();
+    expect(req!.headers.get("x-aliyun-captcha-verify-region")).toBeNull();
+    expect(req!.headers.get("x-zcode-app-version")).toBe("3.16.3");
+    expect(req!.headers.get("x-platform")).toBe("win32-x64");
+    // The captcha pair vanishes from its slot; everything else keeps its
+    // position (asserted on the pre-Headers Record — Bun's Headers
+    // re-normalizes key order).
+    expect(Object.keys(sentHeaders!)).toEqual(["Authorization", "Content-Type", "X-ZCode-App-Version", "X-Platform"]);
   });
 });
 

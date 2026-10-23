@@ -10,7 +10,8 @@
  *     anonymous — no Content-Type, no Accept)
  *   - `POST {origin}/api/v1/zcode-plan/billing/claim`  body `{plan_id}`
  *     headers (bundle order): Authorization, Content-Type,
- *     X-Aliyun-Captcha-Verify-Param, [X-Aliyun-Captcha-Verify-Region],
+ *     [X-Aliyun-Captcha-Verify-Param, [X-Aliyun-Captcha-Verify-Region]]
+ *     (omitted when the 3.16.3 configs.captcha gate is off),
  *     X-ZCode-App-Version, X-Platform
  *
  * NOTE: an earlier revision sent the full identity set with X-Device-Mid
@@ -52,7 +53,7 @@ export interface ClaimClientOptions {
 
 export interface ClaimClient {
   getPreviews(signal?: AbortSignal): Promise<ClaimablePlan[]>;
-  claim(planId: string, captcha: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome>;
+  claim(planId: string, captcha?: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome>;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -193,17 +194,21 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
       });
     },
 
-    async claim(planId: string, captcha: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome> {
+    async claim(planId: string, captcha?: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome> {
       if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
       // Bundle `claimManualPlan` header order: Authorization, Content-Type,
-      // captcha param, [captcha region], X-ZCode-App-Version, X-Platform,
-      // [X-Device-Mid] (campaign-gated deviation, same as preview).
+      // [captcha param, [captcha region]] (omitted entirely when the 3.16.3
+      // configs.captcha gate is off — captcha arg undefined),
+      // X-ZCode-App-Version, X-Platform, [X-Device-Mid] (campaign-gated
+      // deviation, same as preview).
       const headers: Record<string, string> = {
         Authorization: `Bearer ${jwt}`,
         "Content-Type": "application/json",
-        "X-Aliyun-Captcha-Verify-Param": captcha.verifyParam,
       };
-      if (captcha.region) headers["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
+      if (captcha) {
+        headers["X-Aliyun-Captcha-Verify-Param"] = captcha.verifyParam;
+        if (captcha.region) headers["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
+      }
       headers["X-ZCode-App-Version"] = opts.appVersion;
       headers["X-Platform"] = opts.platform;
       if (deviceMid) headers["X-Device-Mid"] = deviceMid;

@@ -66,9 +66,51 @@ interface RoutingTarget {
   includeZCodeAuthorization: boolean;
 }
 
+/**
+ * 3.16.3 request-verification switch (bundle `$rs`=readRequestVerificationConfig,
+ * chunk `o5`): agent/configs `data.configs.captcha` → camelCase. Only the two
+ * decisive booleans are kept — the official rest-spread carries them plus
+ * fields nothing reads, and the gate (bundle `a5`) only ever compares
+ * `enabled !== false` / `skipModelRequest !== true`, so this shape is
+ * outcome-identical.
+ */
+export interface RequestVerificationConfig {
+  enabled?: boolean;
+  skipModelRequest?: boolean;
+}
+
 interface RoutingSnapshot {
   expiresAt: number;
   mapping: Map<string, RoutingTarget>;
+  /**
+   * 3.16.3 `data.configs.captcha`, parsed on the same fetch. `null` while the
+   * server has not shipped the block (live state as of 2026-10-23) — consumers
+   * must treat that as "keep the pre-3.16.3 wire".
+   */
+  requestVerification: RequestVerificationConfig | null;
+}
+
+/** bundle `$rs`: `configs.captcha` object → switch; anything else → null. Cannot throw. */
+function parseRequestVerificationConfig(configs: unknown): RequestVerificationConfig | null {
+  const captcha = (configs as { captcha?: unknown } | null | undefined)?.captcha;
+  if (captcha === null || typeof captcha !== "object" || Array.isArray(captcha)) return null;
+  const { skip_model_request, ...rest } = captcha as Record<string, unknown>;
+  const out: RequestVerificationConfig = {};
+  if (typeof rest.enabled === "boolean") out.enabled = rest.enabled;
+  if (typeof skip_model_request === "boolean") out.skipModelRequest = skip_model_request;
+  return out;
+}
+
+/**
+ * 3.16.3 `requiresRequestVerification` (bundle `a5`/`Vrs`, chunk `a5`) applied
+ * to the claim plane. DELIBERATE DEVIATION: the official gate's first condition
+ * `e?.mode === "start-plan"` is dropped — our claim requests are always that
+ * account mode, so it is constant-true here. Absent config (block not shipped /
+ * fetch failed / routing disabled) → verification required — byte-identical to
+ * the pre-3.16.3 behavior.
+ */
+export function requiresClaimCaptcha(config: RequestVerificationConfig | null | undefined): boolean {
+  return config?.enabled !== false && config?.skipModelRequest !== true;
 }
 
 function normalizePath(pathname: string): string {
@@ -146,6 +188,15 @@ export class EndpointRoutingService {
     return this.snapshot !== undefined;
   }
 
+  async getRequestVerificationConfig(credential?: string): Promise<RequestVerificationConfig | null> {
+    try {
+      await this.ensureFresh(credential);
+    } catch {
+      // fail-open: read whatever snapshot we have
+    }
+    return this.snapshot?.requestVerification ?? null;
+  }
+
   /**
    * Resolve a request URL through the mapping table. Never throws: any error
    * resolves to `{ routed: false, url }` so the caller keeps the original URL.
@@ -216,7 +267,7 @@ export class EndpointRoutingService {
       if (!envelope || typeof envelope !== "object" || envelope.code !== 0) {
         throw new Error("agent_configs_nonzero_code");
       }
-      const data = envelope.data as { proxyEndpoint?: { mapping?: unknown } } | undefined;
+      const data = envelope.data as { proxyEndpoint?: { mapping?: unknown }; configs?: unknown } | undefined;
       const entries = data?.proxyEndpoint?.mapping;
       const list = Array.isArray(entries) ? entries : [];
       if (list.length > MAX_MAPPING_ENTRIES) throw new Error("agent_configs_too_many_mappings");
@@ -240,7 +291,11 @@ export class EndpointRoutingService {
         if (mapping.has(key)) throw new Error("agent_configs_duplicate_from");
         mapping.set(key, { url: to.href, includeZCodeAuthorization });
       }
-      this.snapshot = { expiresAt: this.now() + this.successTtlMs, mapping };
+      this.snapshot = {
+        expiresAt: this.now() + this.successTtlMs,
+        mapping,
+        requestVerification: parseRequestVerificationConfig(data?.configs),
+      };
       this.retryAfter = 0;
       this.onSnapshot?.(mapping.size);
     } catch {

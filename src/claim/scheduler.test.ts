@@ -15,7 +15,7 @@ type HarnessFields = {
   claimOutcome: ClaimOutcome | Error;
   captchaResult: { verifyParam: string; region?: string } | Error;
   captchaCalls: number;
-  claimCalls: Array<{ planId: string; captcha: { verifyParam: string; region?: string } }>;
+  claimCalls: Array<{ planId: string; captcha: { verifyParam: string; region?: string } | undefined }>;
   nowMs: number;
   logs: string[];
   config: ClaimSchedulerDeps["config"];
@@ -215,5 +215,83 @@ describe("ClaimScheduler lifecycle", () => {
     const h = makeHarness();
     h.scheduler.stop();
     expect(await h.scheduler.tick()).toEqual({ action: "stopped" });
+  });
+});
+
+describe("ClaimScheduler — 3.16.3 configs.captcha gate", () => {
+  const plans: ClaimablePlan[] = [{ planId: "weekend-1", name: "Weekend", description: "", priority: 1, entitlements: [] }];
+
+  function gateHarness(captchaRequired: ClaimSchedulerDeps["captchaRequired"]) {
+    const h = {
+      captchaCalls: 0,
+      claimCalls: [] as Array<{ planId: string; captcha: { verifyParam: string; region?: string } | undefined }>,
+    };
+    const scheduler = new ClaimScheduler({
+      getJwt: () => Promise.resolve("jwt-1"),
+      createClient: () => ({
+        getPreviews: () => Promise.resolve(plans),
+        claim: (planId, captcha) => {
+          h.claimCalls.push({ planId, captcha });
+          return Promise.resolve({ ok: true, planId } as ClaimOutcome);
+        },
+      }),
+      getCaptcha: () => {
+        h.captchaCalls += 1;
+        return Promise.resolve({ verifyParam: "cap", region: "cn" });
+      },
+      captchaRequired,
+      config: { pollIntervalMs: 300_000, cooldownMs: 600_000 },
+      log: () => {},
+      now: () => 1_000_000,
+    });
+    return { h, scheduler };
+  }
+
+  it("skips the solve and claims without captcha when the (async) gate returns false", async () => {
+    const { h, scheduler } = gateHarness(async () => false);
+    const result = await scheduler.tick();
+    expect(result.action).toBe("claimed");
+    expect(h.captchaCalls).toBe(0);
+    expect(h.claimCalls).toEqual([{ planId: "weekend-1", captcha: undefined }]);
+  });
+
+  it("fails open — a throwing gate keeps the pre-3.16.3 wire (solve + captcha headers)", async () => {
+    const { h, scheduler } = gateHarness(() => {
+      throw new Error("config fetch exploded");
+    });
+    const result = await scheduler.tick();
+    expect(result.action).toBe("claimed");
+    expect(h.captchaCalls).toBe(1);
+    expect(h.claimCalls).toEqual([{ planId: "weekend-1", captcha: { verifyParam: "cap", region: "cn" } }]);
+  });
+});
+
+describe("ClaimScheduler — 3.16.3 gate true keeps the solve (default-equivalent)", () => {
+  it("a gate returning true solves and claims with the captcha pair", async () => {
+    const plans: ClaimablePlan[] = [{ planId: "weekend-1", name: "Weekend", description: "", priority: 1, entitlements: [] }];
+    let captchaCalls = 0;
+    const claimCalls: Array<{ planId: string; captcha: { verifyParam: string; region?: string } | undefined }> = [];
+    const scheduler = new ClaimScheduler({
+      getJwt: () => Promise.resolve("jwt-1"),
+      createClient: () => ({
+        getPreviews: () => Promise.resolve(plans),
+        claim: (planId, captcha) => {
+          claimCalls.push({ planId, captcha });
+          return Promise.resolve({ ok: true, planId } as ClaimOutcome);
+        },
+      }),
+      getCaptcha: () => {
+        captchaCalls += 1;
+        return Promise.resolve({ verifyParam: "cap" });
+      },
+      captchaRequired: async () => true,
+      config: { pollIntervalMs: 300_000, cooldownMs: 600_000 },
+      log: () => {},
+      now: () => 1_000_000,
+    });
+    const result = await scheduler.tick();
+    expect(result.action).toBe("claimed");
+    expect(captchaCalls).toBe(1);
+    expect(claimCalls).toEqual([{ planId: "weekend-1", captcha: { verifyParam: "cap" } }]);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { EndpointRoutingService } from "./endpoint-routing.js";
+import { EndpointRoutingService, requiresClaimCaptcha } from "./endpoint-routing.js";
 import type { ProxyIdentity } from "../config/types.js";
 
 const identity: ProxyIdentity = { appVersion: "3.8.1", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" };
@@ -280,5 +280,94 @@ describe("EndpointRoutingService", () => {
       expect(resolved.routed).toBeTrue();
       expect(resolved.headers).toBeUndefined();
     });
+  });
+});
+
+describe("3.16.3 configs.captcha request-verification switch", () => {
+  function configFetchWith(captcha: unknown): typeof fetch {
+    return (async () => new Response(JSON.stringify({
+      code: 0,
+      data: { proxyEndpoint: { mapping: [{ from: ZAI_ANTHROPIC, to: ZAI_ULTRA }] }, configs: { captcha } },
+    }), { status: 200 })) as unknown as typeof fetch;
+  }
+
+  it("parses data.configs.captcha (snake_case → camelCase) on the same snapshot", async () => {
+    const svc = new EndpointRoutingService({
+      identity,
+      fetchImpl: configFetchWith({ enabled: true, skip_model_request: false }),
+    });
+    expect(await svc.getRequestVerificationConfig()).toEqual({ enabled: true, skipModelRequest: false });
+  });
+
+  it("returns null while the server has not shipped the block (live state 2026-10-23)", async () => {
+    const svc = new EndpointRoutingService({
+      identity,
+      fetchImpl: (async () => new Response(JSON.stringify({
+        code: 0,
+        data: { proxyEndpoint: { mapping: [] }, configs: {} },
+      }), { status: 200 })) as unknown as typeof fetch,
+    });
+    expect(await svc.getRequestVerificationConfig()).toBeNull();
+  });
+
+  it("records only the decisive booleans; non-boolean/garbage values degrade neutrally", async () => {
+    const neutral = new EndpointRoutingService({
+      identity,
+      fetchImpl: configFetchWith({ enabled: "false", skip_model_request: "true" }),
+    });
+    expect(await neutral.getRequestVerificationConfig()).toEqual({});
+    const garbage = new EndpointRoutingService({ identity, fetchImpl: configFetchWith("not-an-object") });
+    expect(await garbage.getRequestVerificationConfig()).toBeNull();
+  });
+
+  it("a malformed captcha block never fails the mapping refresh", async () => {
+    const svc = new EndpointRoutingService({ identity, fetchImpl: configFetchWith([1, 2]) });
+    const resolved = await svc.resolve(ZAI_ANTHROPIC);
+    expect(resolved.routed).toBeTrue();
+    expect(await svc.getRequestVerificationConfig()).toBeNull();
+  });
+
+  it("fails open on fetch errors (null → captcha stays required)", async () => {
+    const svc = new EndpointRoutingService({
+      identity,
+      fetchImpl: (async () => {
+        throw new Error("network down");
+      }) as unknown as typeof fetch,
+    });
+    expect(await svc.getRequestVerificationConfig()).toBeNull();
+  });
+
+  it("honors the snapshot TTL: a fresh cache does not refetch for the config read", async () => {
+    let clock = 0;
+    let calls = 0;
+    const svc = new EndpointRoutingService({
+      identity,
+      now: () => clock,
+      fetchImpl: (async () => {
+        calls++;
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { proxyEndpoint: { mapping: [] }, configs: { captcha: { skip_model_request: true } } },
+        }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    expect(await svc.getRequestVerificationConfig()).toEqual({ skipModelRequest: true });
+    expect(await svc.getRequestVerificationConfig()).toEqual({ skipModelRequest: true });
+    expect(calls).toBe(1);
+    clock = 301_000;
+    expect(await svc.getRequestVerificationConfig()).toEqual({ skipModelRequest: true });
+    expect(calls).toBe(2);
+  });
+
+  it("requiresClaimCaptcha mirrors requiresRequestVerification's defaults", () => {
+    // absent / null / neutral → required (pre-3.16.3 wire)
+    expect(requiresClaimCaptcha(undefined)).toBeTrue();
+    expect(requiresClaimCaptcha(null)).toBeTrue();
+    expect(requiresClaimCaptcha({})).toBeTrue();
+    expect(requiresClaimCaptcha({ enabled: true, skipModelRequest: false })).toBeTrue();
+    // explicit server switches → skipped
+    expect(requiresClaimCaptcha({ enabled: false })).toBeFalse();
+    expect(requiresClaimCaptcha({ skipModelRequest: true })).toBeFalse();
+    expect(requiresClaimCaptcha({ enabled: false, skipModelRequest: true })).toBeFalse();
   });
 });
