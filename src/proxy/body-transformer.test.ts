@@ -219,10 +219,10 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
+    // 3.15.1+ wire: cli_prefix block carries NO cache_control (stable/dynamic do).
     expect(parsed.system[0]).toEqual({
       type: "text",
       text: "You are ZCode, an interactive coding agent",
-      cache_control: { type: "ephemeral" },
     });
     expect(parsed.system[1].text).toContain("# Harness");
     expect(parsed.system[1].text).toContain("interactive ZCode agent");
