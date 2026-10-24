@@ -49,8 +49,9 @@ export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimSch
         deviceMid: config.identity.deviceMid,
       }),
     getCaptcha: async () => {
-      const { verifyParam, region } = await getCaptchaToken(config.identity.appVersion);
-      return { verifyParam, region: region || undefined };
+      const token = await getCaptchaToken(config.identity.appVersion);
+      if (!token) throw new Error("captcha config flipped to disabled between gate and mint");
+      return { verifyParam: token.verifyParam, region: token.region || undefined };
     },
     captchaRequired: () =>
       claimCaptchaRequired(config, async () => {
@@ -132,6 +133,7 @@ export async function runClaimCli(config: ProxyConfig, mode: "list" | "now"): Pr
   let captcha: { verifyParam: string; region?: string } | undefined;
   if (captchaRequired) {
     const token = await getCaptchaToken(config.identity.appVersion);
+    if (!token) throw new Error("captcha config flipped to disabled between gate and mint");
     captcha = { verifyParam: token.verifyParam, region: token.region || undefined };
   }
   const outcome = await client.claim(target.planId, captcha);

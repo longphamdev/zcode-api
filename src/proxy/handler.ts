@@ -32,7 +32,7 @@ import {
 import { credentialString } from "../auth/types.js";
 import { sendOrderedUpstreamRequest, orderedAdvertisedCodings } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
-import { isCaptchaChallenged, retryOnCaptchaChallenge } from "./captcha-retry.js";
+import { isCaptchaChallenged, retryOnCaptchaChallenge, resolveCaptchaAcquireBudgetMs, acquireCaptchaWithRetry, type CaptchaModuleLike } from "./captcha-retry.js";
 import { type ClientSessionResult } from "./client-session.js";
 import { resolveSessionContext } from "./session-context.js";
 import { gzipSync } from "node:zlib";
@@ -42,7 +42,7 @@ import { gzipSync } from "node:zlib";
 // by captcha-solver.ts, so non-start-plan processes never pay its startup
 // cost. Desktop Bun keeps the same code path; the dynamic import resolves
 // synchronously enough on Bun's warm cache.
-type CaptchaModule = typeof import("./captcha.js");
+type CaptchaModule = CaptchaModuleLike;
 let captchaModule: CaptchaModule | null = null;
 async function loadCaptcha(): Promise<CaptchaModule> {
   if (!captchaModule) captchaModule = await import("./captcha.js");
@@ -76,6 +76,8 @@ export interface ProxyHandlerOptions {
   clientSigning?: ClientSigningManager | null;
   /** Override the process-wide highspeed card manager (for testing). `null` disables. */
   highspeed?: HighspeedManager | null;
+  /** Override the lazily-imported captcha module (for testing). */
+  captcha?: CaptchaModule;
 }
 
 /**
@@ -225,13 +227,38 @@ export async function proxyRequest(
   }
 
   let captchaHeaders: Record<string, string> | undefined;
+  // 在飞即活动（NOTEPAD "3.16.3 增补" §H）：SSE 还在输出就不是空闲——流结束/请求
+  // 完成时刷新 captcha 池与 highspeed 抽卡循环的空闲窗，长流式请求不得让池衰减、
+  // 抽卡循环自熄（下一个 tool-loop turn 会落在被误判空闲抽干的池上）。captcha 侧
+  // 用动态 import 维持懒加载纪律（coding-plan 永不加载 captcha 模块）；highspeed
+  // 侧仅对合格请求记账（与 onRequest 同门）——不合格流量刷窗会让抽卡循环对永不
+  // 挂卡的流量空转烧 draw 配额。
+  // Only requests that actually entered onRequest may extend its auth's loop.
+  const hsNoteEligible = highspeedAuth !== undefined;
+  const noteInFlightEnded = (): void => {
+    if (startPlan) void (opts.captcha ? Promise.resolve(opts.captcha) : loadCaptcha()).then((m) => m.noteDemand?.()).catch(() => {});
+    if (hsNoteEligible) highspeedManager?.noteActivity();
+  };
   if (startPlan) {
+    // Captcha 头在 start-plane 是承重结构（2026-10-23 实弹，NOTEPAD "3.16.3 增补" §H）：
+    // 裸发是真实客户端永不产生的形态，ESA 边缘对之间歇性回**空体 502**（无源站
+    // request-id，下方 403 挑战重试不认识这种失败，不会兜底）。获取失败必须有界重试
+    // （configs 镜像 1h 快照/无负缓存、池内已含 25s+10s 等待，预算覆盖典型故障窗口）后诚实 503，
+    // 绝不 fail-open 裸发；getCaptchaToken 返回 null = 服务端明示禁用 → 无头即正确形态。
     try {
-      const captcha = await loadCaptcha();
-      const token = await captcha.getCaptchaToken(config.identity.appVersion);
-      captchaHeaders = { [captcha.RETRY_HEADERS.PARAM]: token.verifyParam, [captcha.RETRY_HEADERS.REGION]: token.region };
-    } catch {
-      // Will solve on 403 fallback below
+      captchaHeaders = await acquireCaptchaWithRetry(async () => {
+        const captcha = opts.captcha ?? (await loadCaptcha());
+        const token = await captcha.getCaptchaToken(config.identity.appVersion);
+        return token ? { [captcha.RETRY_HEADERS.PARAM]: token.verifyParam, [captcha.RETRY_HEADERS.REGION]: token.region } : undefined;
+      }, {
+        budgetMs: resolveCaptchaAcquireBudgetMs(process.env.CAPTCHA_ACQUIRE_BUDGET_MS),
+        signal: clientReq.signal,
+        onRetry: debug ? (err) => debugError(reqId, "captcha_acquire_retry", `${err.message}; retrying`) : undefined,
+      });
+    } catch (err) {
+      if (debug) debugError(reqId, "captcha_solver_failed", (err as Error).message);
+      printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
+      return errorResponse(503, "captcha_solver_failed", `Captcha acquisition failed: ${(err as Error).message}. The start-plan edge rejects captcha-less requests — retry shortly.`);
     }
   }
 
@@ -435,7 +462,7 @@ export async function proxyRequest(
   // response-header variant AND the in-body `{"code":3007}` variant (observed
   // 2026-08-29 as HTTP 400 JSON with no captcha header) via the shared
   // captcha-retry seam (used by /v1/responses too).
-  const captcha = startPlan ? await loadCaptcha() : null;
+  const captcha = startPlan ? (opts.captcha ?? (await loadCaptcha())) : null;
   const captchaChallenge = captcha ? await isCaptchaChallenged(upstreamResp, captcha) : false;
   if (captchaChallenge && captcha) {
     console.log(`${reqId} captcha challenge, re-solving...`);
@@ -482,10 +509,12 @@ export async function proxyRequest(
     if (isSSE && upstreamResp.body) {
       const translated = anthropicSseToOpenaiSse(upstreamResp.body, meta.model);
       const [clientBody, statsBody] = translated.tee();
-      observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, null);
+      observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, null, noteInFlightEnded);
       return translatedSseResponse(clientBody);
     }
-    return await translatedBatchResponse(clientReq, upstreamResp, meta.model, reqId, format, meta, started, headersAt);
+    const batchResp = await translatedBatchResponse(clientReq, upstreamResp, meta.model, reqId, format, meta, started, headersAt);
+    noteInFlightEnded();
+    return batchResp;
   }
 
   if (translateAnthropicToOpenAI) {
@@ -497,19 +526,22 @@ export async function proxyRequest(
     if (isSSE && upstreamResp.body) {
       const translated = openaiSseToAnthropicSse(upstreamResp.body, meta.model);
       const [clientBody, statsBody] = translated.tee();
-      observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, null);
+      observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, null, noteInFlightEnded);
       return translatedSseResponse(clientBody);
     }
-    return await translatedOpenAIToAnthropicBatchResponse(clientReq, upstreamResp, reqId, format, meta, started, headersAt);
+    const batchResp = await translatedOpenAIToAnthropicBatchResponse(clientReq, upstreamResp, reqId, format, meta, started, headersAt);
+    noteInFlightEnded();
+    return batchResp;
   }
 
   if (isSSE && upstreamResp.body) {
     const [clientBody, statsBody] = upstreamResp.body.tee();
-    observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, upstreamResp.headers.get("content-encoding"));
+    observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, upstreamResp.headers.get("content-encoding"), noteInFlightEnded);
     return passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq), clientBody);
   }
 
   printRow(reqId, format, meta, upstreamResp.status, started, headersAt, 0, 0, 0);
+  noteInFlightEnded();
   return passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq));
 }
 
@@ -1100,6 +1132,7 @@ function observeStream(
   requestSentAt: number,
   body: ReadableStream<Uint8Array>,
   contentEncoding: string | null,
+  onEnd?: () => void,
 ): void {
   const compressed = contentEncoding !== null;
   const dumpOn = dumpEnabled();
@@ -1148,6 +1181,10 @@ function observeStream(
       if (!compressed && sseBuffer) parseSse(sseBuffer, lastChunkAt);
     } catch {}
     const endAt = Date.now();
+    // Stream finished (or failed): the request is no longer in flight. Fired
+    // exactly once from this reader loop — the single point that observes
+    // SSE completion for every streaming response path.
+    try { onEnd?.(); } catch {}
     const ttfbMs = (firstChunkAt > 0 ? firstChunkAt : endAt) - requestSentAt;
     const totalMs = endAt - requestSentAt;
     const tokens = metrics.tokens;

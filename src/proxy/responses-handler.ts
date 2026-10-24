@@ -22,14 +22,13 @@ import { getProvider } from "../provider/providers.js";
 import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
 import { buildUpstreamRequest, buildUpstreamHeaderPairs, type UpstreamHeaderPair } from "./upstream.js";
-import { isCaptchaChallenged, retryOnCaptchaChallenge } from "./captcha-retry.js";
+import { isCaptchaChallenged, retryOnCaptchaChallenge, resolveCaptchaAcquireBudgetMs, acquireCaptchaWithRetry, type CaptchaModuleLike } from "./captcha-retry.js";
 import { dispatchWithConnectRetry } from "./handler.js";
-import type * as CaptchaExports from "./captcha.js";
 
 // Lazy, runtime-gated module load (exception to the static-import rule, same
 // as handler.ts): pulling captcha.ts eagerly drags in the happy-dom solver, so
 // only start-plan — the one plan whose upstream is captcha-gated — pays for it.
-type CaptchaModule = typeof CaptchaExports;
+type CaptchaModule = CaptchaModuleLike;
 let captchaModule: CaptchaModule | null = null;
 async function loadCaptcha(): Promise<CaptchaModule> {
   if (!captchaModule) captchaModule = await import("./captcha.js");
@@ -233,14 +232,33 @@ export async function handleResponses(
   // as HTTP 400 upstream_error on every request.
   let captchaHeaders: Record<string, string> | undefined;
   if (startPlan) {
+    // 与 handler.ts 同款严格获取（NOTEPAD "3.16.3 增补" §H）：裸发 captcha-less 会被
+    // start-plane 边缘空体 502 间歇拦截；null=服务端明示禁用（无头即正确形态），
+    // throw=有界重试（CAPTCHA_ACQUIRE_BUDGET_MS，默认 45s）后诚实 503。
     try {
-      const captcha = opts.captcha ?? (await loadCaptcha());
-      const token = await captcha.getCaptchaToken(opts.config.identity.appVersion);
-      captchaHeaders = { [captcha.RETRY_HEADERS.PARAM]: token.verifyParam, [captcha.RETRY_HEADERS.REGION]: token.region };
-    } catch {
-      // Fall through: the 3007 retry below solves on demand.
+      captchaHeaders = await acquireCaptchaWithRetry(async () => {
+        const captcha = opts.captcha ?? (await loadCaptcha());
+        const token = await captcha.getCaptchaToken(opts.config.identity.appVersion);
+        return token ? { [captcha.RETRY_HEADERS.PARAM]: token.verifyParam, [captcha.RETRY_HEADERS.REGION]: token.region } : undefined;
+      }, {
+        budgetMs: resolveCaptchaAcquireBudgetMs(process.env.CAPTCHA_ACQUIRE_BUDGET_MS),
+        signal: clientReq.signal,
+      });
+    } catch (err) {
+      if (debug) console.log(`[responses] ERROR captcha_solver_failed: ${(err as Error).message}`);
+      return errorResponse(503, "captcha_solver_failed", `Captcha acquisition failed: ${(err as Error).message}. The start-plan edge rejects captcha-less requests — retry shortly.`);
     }
   }
+  // 在飞即活动（同 handler.ts，NOTEPAD "3.16.3 增补" §H）：流结束/请求完成刷新
+  // captcha 池与 highspeed 抽卡循环的空闲窗——SSE 输出中不算空闲。highspeed 侧
+  // 仅对合格请求记账（与上面 onRequest 同门），防止不合格流量空转抽卡循环。
+  // Only requests that actually entered onRequest may extend its auth's loop.
+  const hsNoteEligible = highspeedAuth !== undefined;
+  const noteInFlightEnded = (): void => {
+    if (startPlan) void (opts.captcha ? Promise.resolve(opts.captcha) : loadCaptcha()).then((m) => m.noteDemand?.()).catch(() => {});
+    if (hsNoteEligible) highspeedManager?.noteActivity();
+  };
+
   const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, captchaHeaders, clientSession);
   let wireHeaders = upstreamHeaders;
   if (highspeedCard && highspeedAuth) {
@@ -378,7 +396,7 @@ export async function handleResponses(
   const meta = { customToolNames, namespaceMap, hasToolSearch };
 
   if (stream) {
-    return streamResponse(upstreamResp, { responseId, model: req.model, meta, request: req, input, options: opts });
+    return streamResponse(upstreamResp, { responseId, model: req.model, meta, request: req, input, options: opts, onStreamEnd: noteInFlightEnded });
   }
 
   const rawChatResp = await upstreamResp.text();
@@ -403,6 +421,7 @@ export async function handleResponses(
 
   if (debug) console.log(`[responses] ← ${responsesResp.status} (${Date.now() - start}ms)`);
 
+  noteInFlightEnded();
   return new Response(JSON.stringify(responsesResp), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -420,6 +439,8 @@ interface StreamResponseContext {
   request: ResponsesRequest;
   input: ResponsesInputItem[];
   options: ResponsesHandlerOptions;
+  /** Fired once when the client stream completes, errors, or is cancelled. */
+  onStreamEnd?: () => void;
 }
 
 function streamResponse(upstreamResp: Response, context: StreamResponseContext): Response {
@@ -427,6 +448,12 @@ function streamResponse(upstreamResp: Response, context: StreamResponseContext):
     return errorResponse(502, "translation_failed", "upstream returned no body for stream");
   }
   const state = newResponsesStreamState(context.model, { meta: context.meta, responseId: context.responseId });
+  let onStreamEnded = false;
+  const fireStreamEnd = (): void => {
+    if (onStreamEnded) return;
+    onStreamEnded = true;
+    try { context.onStreamEnd?.(); } catch {}
+  };
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -480,10 +507,13 @@ function streamResponse(upstreamResp: Response, context: StreamResponseContext):
           })) send(evt);
           controller.close();
         } catch { try { controller.error(err); } catch {} }
+      } finally {
+        fireStreamEnd();
       }
     },
     cancel(reason) {
       context.options.debug === true && console.log(`[responses] stream cancelled: ${String(reason)}`);
+      fireStreamEnd();
       try { upstreamResp.body?.cancel(); } catch {}
     },
   });

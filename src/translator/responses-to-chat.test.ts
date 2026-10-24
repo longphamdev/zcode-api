@@ -255,7 +255,6 @@ describe("responsesToChatCompletions: media parts", () => {
     ] }));
     expect(r.chatRequest.messages[0]).toEqual({ role: "assistant", content: "looked at this" });
   });
-});
 
   it("accepts a bare data field as the input_video URL carrier", () => {
     const r = responsesToChatCompletions(baseReq({ input: [{
@@ -271,3 +270,4 @@ describe("responsesToChatCompletions: media parts", () => {
       video_url: { url: "data:video/mp4;base64,AAAAKGZ0eXBtcDQy" },
     });
   });
+});

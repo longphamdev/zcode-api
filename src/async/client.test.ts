@@ -290,20 +290,29 @@ describe("settle", () => {
   });
 
   it("uses settleTimeoutMs when provided (separate from controlTimeoutMs)", async () => {
-    const callTimes: number[] = [];
+    // Hung fetch: if settle() used controlTimeoutMs (30s) this test would hang;
+    // it must abort on the 100ms settle budget. Falsifies the name — the old
+    // immediately-resolving mock passed even when settleTimeoutMs was ignored.
     const fetchImpl = makeMockFetch(async () => {
-      callTimes.push(Date.now());
+      await new Promise((r) => setTimeout(r, 5_000));
       return new Response(null, { status: 200 });
     });
     const client = createOffPeakClient({
       origin: "https://zcode.z.ai",
       credentials: CRED,
       fetchImpl,
-      controlTimeoutMs: 30000,
+      controlTimeoutMs: 30_000,
       settleTimeoutMs: 100,
     });
-    await client.settle("t-1");
-    expect(callTimes.length).toBe(1);
+    const started = Date.now();
+    try {
+      await client.settle("t-1");
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(OffPeakServerError);
+      expect((e as OffPeakServerError).message).toMatch(/abort|network/i);
+    }
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
 

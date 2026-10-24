@@ -10,11 +10,11 @@
  *    never consumes the body), so freshness is pinned by OBJECT IDENTITY —
  *    the second call must receive a different Request instance.
  *
- * Both tests use the start-plan path with an injected captcha module via
- * `mock.module("./captcha.js")` (same technique as captcha-pool.test.ts).
+ * Tests inject a request-local captcha dependency so real facade tests can
+ * run before or after this file without sharing a module mock.
  */
 import { describe, it, expect, mock } from "bun:test";
-import { proxyRequest } from "./handler.js";
+import { proxyRequest, type ProxyHandlerOptions } from "./handler.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
 
@@ -57,22 +57,28 @@ const ANTHROPIC_OK = JSON.stringify({
   usage: { input_tokens: 5, output_tokens: 3 },
 });
 
+type CaptchaStub = NonNullable<ProxyHandlerOptions["captcha"]>;
+
+function captchaStub(getCaptchaToken: CaptchaStub["getCaptchaToken"]): CaptchaStub {
+  return {
+    detectCaptchaChallenge: (resp: Response): string | null => {
+      const v = resp.headers.get("x-aliyun-captcha-verify-param");
+      return v && v.trim().length > 0 ? v.trim() : null;
+    },
+    getCaptchaToken,
+    RETRY_HEADERS: { PARAM: "x-aliyun-captcha-verify-param", REGION: "x-aliyun-captcha-verify-region" },
+  };
+}
+
 describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
   it("retries an in-body 3007 captcha challenge with a fresh token", async () => {
-    // Mock the captcha module: config enabled, token take returns distinct
+    // Inject captcha behavior: config enabled, token take returns distinct
     // tokens per call so we can assert the retry used a FRESH token.
     let tokenSeq = 0;
-    mock.module("./captcha.js", () => ({
-      detectCaptchaChallenge: (resp: Response): string | null => {
-        const v = resp.headers.get("x-aliyun-captcha-verify-param");
-        return v && v.trim().length > 0 ? v.trim() : null;
-      },
-      getCaptchaToken: async (_appVersion: string) => {
-        tokenSeq += 1;
-        return { verifyParam: `tok-${tokenSeq}`, region: "sgp" };
-      },
-      RETRY_HEADERS: { PARAM: "x-aliyun-captcha-verify-param", REGION: "x-aliyun-captcha-verify-region" },
-    }));
+    const captcha = captchaStub(async () => {
+      tokenSeq += 1;
+      return { verifyParam: `tok-${tokenSeq}`, region: "sgp" };
+    });
 
     // Upstream: first call = HTTP 400 with {"code":3007} in the body (no
     // captcha header), second call = success. The mock also records the
@@ -104,7 +110,7 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
       body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
     });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any, captcha });
 
     // The in-body 3007 challenge was detected and retried with a fresh token.
     expect(calls).toBe(2);
@@ -116,6 +122,7 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
   });
 
   it("retries a connect failure with a FRESH Request (identity-pinned)", async () => {
+    const captcha = captchaStub(async () => ({ verifyParam: "tok-connect", region: "sgp" }));
     // Upstream: first call = connect-level failure (the bug shape), second
     // call = success. Review follow-up #1 (PR #34): a mock fetch never
     // consumes the Request body, so a `req.bodyUsed === false` assertion is
@@ -145,12 +152,129 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
       body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
     });
 
-    const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any });
+    const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any, captcha });
 
     // The connect failure was retried with a FRESH Request (identity check
     // inside the mock passed).
     expect(calls).toBe(2);
     expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.choices[0].message.content).toBe("resilience reply");
+  });
+});
+
+describe("proxyRequest — start-plan strict captcha acquisition (NOTEPAD 3.16.3 §H)", () => {
+  const makeClientReq = () =>
+    new Request("http://localhost:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
+    });
+
+  it("acquisition failure → 503 captcha_solver_failed, upstream NEVER dispatched", async () => {
+    const captcha = captchaStub(async () => {
+      throw new Error("captcha worker timeout");
+    });
+
+    let upstreamCalls = 0;
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      if (req.url.includes("/client/configs")) {
+        return new Response(JSON.stringify({ data: { configs: { captcha: { enabled: true } } } }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      upstreamCalls += 1;
+      return new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const savedBudget = process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
+    process.env.CAPTCHA_ACQUIRE_BUDGET_MS = "10";
+    const auth = new AuthManager();
+    auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
+    try {
+      const resp = await proxyRequest(makeClientReq(), "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any, captcha });
+      expect(resp.status).toBe(503);
+      const body = await resp.json();
+      expect(body.error.type).toBe("captcha_solver_failed");
+      // Strict mode: a captcha-less dispatch is a shape the real client never
+      // produces — the ESA edge answers it with bare 502s. Must not go out.
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      if (savedBudget === undefined) delete process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
+      else process.env.CAPTCHA_ACQUIRE_BUDGET_MS = savedBudget;
+    }
+  });
+
+  it("bounds a pending acquisition and ignores its token after the deadline", async () => {
+    const lateToken = { verifyParam: "tok-too-late", region: "sgp" };
+    let resolveToken!: (value: typeof lateToken) => void;
+    const pendingToken = new Promise<typeof lateToken>((resolve) => { resolveToken = resolve; });
+    let acquireCalls = 0;
+    const captcha = captchaStub(async () => {
+      acquireCalls += 1;
+      return pendingToken;
+    });
+    const fetchMock = mock(async () =>
+      new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    const auth = new AuthManager();
+    auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
+    const savedBudget = process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
+    process.env.CAPTCHA_ACQUIRE_BUDGET_MS = "25";
+    const responsePromise = proxyRequest(makeClientReq(), "openai", {
+      config: TEST_CONFIG, auth, fetchImpl: fetchMock as unknown as typeof fetch, captcha,
+    });
+    let guardTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // A stalled solver must not keep the handler alive until the solve ends.
+      const resp = await Promise.race([
+        responsePromise,
+        new Promise<never>((_, reject) => {
+          guardTimer = setTimeout(() => reject(new Error("captcha acquisition exceeded its budget")), 1_000);
+        }),
+      ]);
+      expect(resp.status).toBe(503);
+      expect((await resp.json()).error.type).toBe("captcha_solver_failed");
+      expect(acquireCalls).toBe(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      resolveToken(lateToken);
+      await pendingToken;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(acquireCalls).toBe(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(guardTimer);
+      resolveToken(lateToken);
+      if (savedBudget === undefined) delete process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
+      else process.env.CAPTCHA_ACQUIRE_BUDGET_MS = savedBudget;
+      await responsePromise;
+    }
+  });
+
+  it("config-disabled (token=null) → dispatches WITHOUT captcha headers, upstream 200", async () => {
+    const captcha = captchaStub(async () => null);
+
+    let upstreamCalls = 0;
+    let sawCaptchaHeader: string | null = "sentinel";
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      if (req.url.includes("/client/configs")) {
+        return new Response(JSON.stringify({ data: {} }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      upstreamCalls += 1;
+      sawCaptchaHeader = req.headers.get("x-aliyun-captcha-verify-param");
+      return new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const auth = new AuthManager();
+    auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
+    const resp = await proxyRequest(makeClientReq(), "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any, captcha });
+
+    expect(resp.status).toBe(200);
+    expect(upstreamCalls).toBe(1);
+    expect(sawCaptchaHeader).toBeNull();
     const body = await resp.json();
     expect(body.choices[0].message.content).toBe("resilience reply");
   });

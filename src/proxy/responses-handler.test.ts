@@ -1,4 +1,4 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { handleResponses } from "./responses-handler.js";
 import { ResponseStore } from "../responses/store.js";
 import type { ProxyConfig } from "../config/types.js";
@@ -8,6 +8,10 @@ import { ClientSigningManager } from "./client-signing.js";
 import type * as CaptchaExports from "./captcha.js";
 
 type CaptchaModule = typeof CaptchaExports;
+const liveManagers: HighspeedManager[] = [];
+afterEach(() => {
+  for (const manager of liveManagers.splice(0)) manager.stop();
+});
 
 const CONFIG: ProxyConfig = {
   server: { port: 0, host: "127.0.0.1" },
@@ -458,27 +462,94 @@ describe("handleResponses resilience (CL-08)", () => {
     expect(body.error.type).toBe("upstream_unreachable");
   });
 
-  it("captcha solver failure → 503 captcha_solver_failed", async () => {
+  it("captcha solver failure → 503 captcha_solver_failed (after bounded acquire retries)", async () => {
     const START_PLAN: ProxyConfig = { ...CONFIG, plan: "start-plan", provider: "bigmodel" };
     const fetchImpl = (async (): Promise<Response> =>
       new Response(JSON.stringify({ code: 3007, msg: "captcha verify failed" }), {
         status: 400, headers: { "content-type": "application/json" },
       })) as unknown as typeof fetch;
 
-    const captcha = {
-      RETRY_HEADERS: { PARAM: "x-aliyun-captcha-verify-param", REGION: "x-aliyun-captcha-verify-region" },
-      getCaptchaToken: async () => {
-        throw new Error("solver exploded");
-      },
-      detectCaptchaChallenge: (resp: Response) => resp.headers.get("x-aliyun-captcha-verify-param"),
-    } as unknown as CaptchaModule;
+    // Strict acquisition retries within CAPTCHA_ACQUIRE_BUDGET_MS before
+    // giving up (NOTEPAD "3.16.3 增补" §H) — shrink the budget for the test.
+    const savedBudget = process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
+    process.env.CAPTCHA_ACQUIRE_BUDGET_MS = "10";
+    let upstreamCalled = 0;
+    const countingFetch = (async (req: Request): Promise<Response> => {
+      upstreamCalled += 1;
+      return fetchImpl(req);
+    }) as unknown as typeof fetch;
+    try {
+      const captcha = {
+        RETRY_HEADERS: { PARAM: "x-aliyun-captcha-verify-param", REGION: "x-aliyun-captcha-verify-region" },
+        getCaptchaToken: async () => {
+          throw new Error("solver exploded");
+        },
+        detectCaptchaChallenge: (resp: Response) => resp.headers.get("x-aliyun-captcha-verify-param"),
+      } as unknown as CaptchaModule;
 
-    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
-      config: START_PLAN, auth, fetchImpl, captcha,
-    });
-    expect(resp.status).toBe(503);
-    const body = await resp.json();
-    expect(body.error.type).toBe("captcha_solver_failed");
+      const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+        config: START_PLAN, auth, fetchImpl: countingFetch, captcha,
+      });
+      expect(resp.status).toBe(503);
+      const body = await resp.json();
+      expect(body.error.type).toBe("captcha_solver_failed");
+      // Strict mode: a captcha-less request is NEVER dispatched upstream.
+      expect(upstreamCalled).toBe(0);
+    } finally {
+      if (savedBudget === undefined) delete process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
+      else process.env.CAPTCHA_ACQUIRE_BUDGET_MS = savedBudget;
+    }
+  });
+
+  it("times out a stalled captcha acquisition and never dispatches a late token", async () => {
+    const savedBudget = process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
+    process.env.CAPTCHA_ACQUIRE_BUDGET_MS = "25";
+    const lateToken = { verifyParam: "late-token", region: "cn" };
+    let finishAcquire!: (token: typeof lateToken) => void;
+    const acquisition = new Promise<typeof lateToken>((resolve) => { finishAcquire = resolve; });
+    let acquires = 0;
+    let upstreamCalls = 0;
+    let pendingResponse: Promise<Response> | undefined;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const captcha = {
+        RETRY_HEADERS: { PARAM: "x-aliyun-captcha-verify-param", REGION: "x-aliyun-captcha-verify-region" },
+        getCaptchaToken: () => {
+          acquires++;
+          return acquisition;
+        },
+        detectCaptchaChallenge: () => null,
+      } as unknown as CaptchaModule;
+      pendingResponse = handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+        config: { ...CONFIG, plan: "start-plan" }, auth, captcha,
+        endpointRouting: null, clientSigning: null, highspeed: null,
+        fetchImpl: (async () => {
+          upstreamCalls++;
+          return new Response(anthropicMsg("should not dispatch"));
+        }) as unknown as typeof fetch,
+      });
+      const response = await Promise.race([
+        pendingResponse,
+        new Promise<never>((_resolve, reject) => {
+          watchdog = setTimeout(() => reject(new Error("captcha acquisition exceeded its budget")), 1_000);
+        }),
+      ]);
+      expect(response.status).toBe(503);
+      expect((await response.json()).error.type).toBe("captcha_solver_failed");
+      expect(acquires).toBe(1);
+      expect(upstreamCalls).toBe(0);
+
+      finishAcquire(lateToken);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(acquires).toBe(1);
+      expect(upstreamCalls).toBe(0);
+    } finally {
+      finishAcquire(lateToken);
+      await pendingResponse?.catch(() => {});
+      if (watchdog !== undefined) clearTimeout(watchdog);
+      if (savedBudget === undefined) delete process.env.CAPTCHA_ACQUIRE_BUDGET_MS;
+      else process.env.CAPTCHA_ACQUIRE_BUDGET_MS = savedBudget;
+    }
   });
 });
 
@@ -509,6 +580,7 @@ async function cardHoldingManager(): Promise<HighspeedManager> {
       },
     }), { status: 200 })) as unknown as typeof fetch,
   });
+  liveManagers.push(manager);
   manager.onRequest("glm-5.2", "t-1", { jwt: "test-zcode-jwt", codingPlanAuth: "testkey.testsecret", family: "zai" });
   await new Promise((r) => setTimeout(r, 5));
   expect(manager.activeCard()?.cardId).toBe("hsc_resp_1");
@@ -516,6 +588,51 @@ async function cardHoldingManager(): Promise<HighspeedManager> {
 }
 
 describe("handleResponses highspeed wiring", () => {
+  it("does not extend the old account's draw loop after switching to a credential without JWT", async () => {
+    const clock = { now: 1_000_000 };
+    let draws = 0;
+    let finishIdleCheck!: (stopped: boolean) => void;
+    const idleStopped = new Promise<boolean>((resolve) => { finishIdleCheck = resolve; });
+    const manager = new HighspeedManager({
+      origin: "https://zcode.z.ai",
+      models: ["glm-5.2"],
+      now: () => clock.now,
+      retryMs: 2,
+      onEvent: (message) => {
+        if (message.includes("idle-stopped")) finishIdleCheck(true);
+      },
+      fetchImpl: (async () => {
+        draws++;
+        return new Response(JSON.stringify({ code: 0, data: { card: null } }));
+      }) as unknown as typeof fetch,
+    });
+    liveManagers.push(manager);
+    manager.onRequest("glm-5.2", "old-task", { jwt: "old-jwt", codingPlanAuth: "old-key", family: "zai" });
+    expect(draws).toBe(1);
+
+    // Match the panel's live credential reload after a coding-plan-only import.
+    const switchedAuth = oauthJwtAuth();
+    switchedAuth.setOAuthCredential({ apiKey: "imported-key", provider: "zai" });
+    clock.now += 4 * 60_000;
+    const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+      config: CONFIG, auth: switchedAuth, highspeed: manager,
+      endpointRouting: null, clientSigning: null,
+      fetchImpl: chatUpstream(anthropicMsg("answer")),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+
+    const drawsBeforeIdle = draws;
+    clock.now += 2 * 60_000; // Six minutes since the last JWT-backed request.
+    const timeout = setTimeout(() => finishIdleCheck(false), 1_000);
+    try {
+      expect(await idleStopped).toBeTrue();
+      expect(draws).toBe(drawsBeforeIdle);
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+
   it("restores the signing manager after a rejected unsigned card request", async () => {
     const manager = await cardHoldingManager();
     let signingCalls = 0;

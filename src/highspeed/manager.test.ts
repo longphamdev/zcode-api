@@ -169,6 +169,38 @@ describe("HighspeedManager", () => {
     expect(fetches).toBe(fetchesAtStop); // loop is dead — no more draws
   });
 
+  it("noteActivity (in-flight stream still producing) extends the idle window — no self-extinguish mid-stream", async () => {
+    const clock = { now: 1_000_000 };
+    let fetches = 0;
+    const events: string[] = [];
+    const manager = makeManager((async () => {
+      fetches++;
+      return drawResponse(null);
+    }) as unknown as typeof fetch, clock, { onEvent: (m) => events.push(m) });
+
+    manager.onRequest("glm-5.3", SESSION_TASK, AUTH);
+    expect(await until(() => fetches >= 2)).toBeTrue();
+    // 4 minutes into a long stream the SSE is still producing — that is
+    // activity, not idle (§H): the stream-end touch re-arms the 5min window.
+    clock.now += 4 * 60_000;
+    manager.noteActivity();
+    clock.now += 4 * 60_000 + 1; // 8min after the request, 4min+1ms after the touch
+    await settle();
+    expect(events.some((m) => m.includes("idle-stopped"))).toBeFalse(); // re-armed — loop alive
+    expect(fetches).toBeGreaterThanOrEqual(2); // still drawing
+    // Only a real gap past the TOUCHED window stops it.
+    clock.now += 60_000 + 2; // >5min since the touch
+    expect(await until(() => events.some((m) => m.includes("idle-stopped")))).toBeTrue();
+    const fetchesAtStop = fetches;
+    clock.now += 60_000;
+    await settle();
+    expect(fetches).toBe(fetchesAtStop); // loop dead — noteActivity never re-ignites
+    manager.noteActivity(); // inert on a stopped loop: extends loopUntil but draws nothing
+    clock.now += 60_000;
+    await settle();
+    expect(fetches).toBe(fetchesAtStop);
+  });
+
   it("re-ignites after idle-stop when a new request arrives", async () => {
     const clock = { now: 1_000_000 };
     const manager = makeManager((async () => drawResponse(hitCard(clock.now))) as unknown as typeof fetch, clock);

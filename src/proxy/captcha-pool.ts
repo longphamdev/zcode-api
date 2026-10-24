@@ -388,6 +388,21 @@ export class CaptchaTokenPool {
     // tick; takes only need to restore the active floor instantly.
   }
 
+  /**
+   * Refresh the demand/idle clock WITHOUT taking a token or widening the
+   * target: an in-flight request whose SSE is still producing is activity —
+   * its stream must not let the pool stay decayed AFTER the turn ends (the
+   * next tool-loop turn would land on a decayed pool, NOTEPAD "3.16.3
+   * 增补" §H). Fires at stream end: a stream longer than the scale-down
+   * idle still decays mid-flight to the keeper floor; this resets the idle
+   * clock so computeActiveTarget() restores the full target on the next
+   * refill tick. Unlike onTokenTaken this never pollutes takeTimestamps
+   * (the demand-sizing signal) — it only resets the idle decay levers.
+   */
+  touchDemand(): void {
+    this.lastTakeAt = Date.now();
+  }
+
   private maybeScaleDown(): void {
     if (this.lastTakeAt === 0) return;
     const idleMs = Date.now() - this.lastTakeAt;
@@ -693,6 +708,11 @@ export async function takeCaptchaToken(cfg: CaptchaConfig): Promise<string> {
     throw new Error("Captcha config unavailable from ZCode API");
   }
   return pool.takeToken(cfg);
+}
+
+/** In-flight request activity (stream still producing) — see pool.touchDemand. */
+export function touchCaptchaDemand(): void {
+  pool.touchDemand();
 }
 
 export function startCaptchaPoolRefill(cfg: CaptchaConfig): void {

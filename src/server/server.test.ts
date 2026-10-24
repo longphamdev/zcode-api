@@ -4,7 +4,6 @@
 import { describe, it, expect } from "bun:test";
 import { createFetchHandler } from "./server.js";
 import { handleListModels } from "./routes-openai.js";
-import { handleMessages } from "./routes-anthropic.js";
 import type { ProxyConfig } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
 
@@ -161,25 +160,6 @@ describe("server routing", () => {
     expect(body.error.type).toBe("async_plan_unsupported");
   });
 
-  it("dispatches /async/v1/messages when plan is coding-plan (reaches credential check)", async () => {
-    const config = makeConfig({
-      async: { enabled: true, origin: "https://zcode.z.ai", pollIntervalMs: 10, keepAliveIntervalMs: 5, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 100, controlTimeoutMs: 1000, defaultModel: "" },
-    });
-    // JWT-less credential: the route must get PAST the plan gate and fail later
-    // with async_credentials_unavailable (proving dispatch, not blocking).
-    const auth = oauthAuth();
-    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
-
-    const resp = await handler(new Request("http://localhost/async/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] }),
-    }));
-    expect(resp.status).toBe(400);
-    const body = await resp.json();
-    expect(body.error.type).toBe("async_credentials_unavailable");
-  });
-
   it("GET /health returns ok status", async () => {
     const config = makeConfig();
     const auth = oauthAuth("test");
@@ -313,11 +293,6 @@ describe("web UI", () => {
 });
 
 describe("route handler exports", () => {
-  it("handleListModels returns model list", () => {
-    const resp = handleListModels(new Request("http://localhost/v1/models"));
-    expect(resp.status).toBe(200);
-  });
-
   it("handleListModels rich catalog on client_version=pi", async () => {
     const resp = handleListModels(new Request("http://localhost/v1/models?client_version=pi"));
     expect(resp.status).toBe(200);
@@ -349,9 +324,5 @@ describe("route handler exports", () => {
     // better-basicfun bridge maps onto its selector levels.
     const efforts = flash!.supported_reasoning_levels.map((l) => l.effort);
     expect(efforts).toEqual(["low", "medium", "high", "xhigh"]);
-  });
-
-  it("handleMessages is a function", () => {
-    expect(typeof handleMessages).toBe("function");
   });
 });

@@ -33,7 +33,7 @@ const BASE_CONFIG: ProxyConfig = {
 };
 
 describe("session context", () => {
-  it("uses the same lineage resolver regardless of plan-specific caller", () => {
+  it("uses the lineage resolver for session inference (both plan callers share it)", () => {
     const resolver = createClientSessionResolver();
     const body = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] });
     const req = new Request("http://localhost:8080/v1/chat/completions", {

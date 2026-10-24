@@ -3,7 +3,7 @@
  * (injected manager), covering model rewrite + auth swap + unsigned dispatch,
  * and the selectionFallback redispatch after a card rejection.
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { proxyRequest } from "./handler.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
@@ -41,6 +41,10 @@ const TEST_CONFIG: ProxyConfig = {
 
 const CRED = "testkey.testsecret";
 const JWT = "test-zcode-jwt";
+const liveManagers: HighspeedManager[] = [];
+afterEach(() => {
+  for (const manager of liveManagers.splice(0)) manager.stop();
+});
 
 function oauthAuth(key = CRED): AuthManager {
   const [apiKey, secret] = key.split(".");
@@ -82,6 +86,7 @@ async function cardHoldingManager(): Promise<HighspeedManager> {
       },
     }), { status: 200 })) as unknown as typeof fetch,
   });
+  liveManagers.push(manager);
   manager.onRequest("glm-5.1", "t-1", { jwt: JWT, codingPlanAuth: CRED, family: "zai" });
   await new Promise((r) => setTimeout(r, 5));
   expect(manager.activeCard()?.cardId).toBe("hsc_wiring_1");
@@ -100,6 +105,52 @@ function recordingSigner(calls: string[]): ClientSigningManager {
 }
 
 describe("proxyRequest highspeed wiring", () => {
+  it("does not extend the old account's draw loop after switching to a credential without JWT", async () => {
+    const clock = { now: 1_000_000 };
+    let draws = 0;
+    let finishIdleCheck!: (stopped: boolean) => void;
+    const idleStopped = new Promise<boolean>((resolve) => { finishIdleCheck = resolve; });
+    const manager = new HighspeedManager({
+      origin: "https://zcode.z.ai",
+      models: ["glm-5.1"],
+      now: () => clock.now,
+      retryMs: 2,
+      onEvent: (message) => {
+        if (message.includes("idle-stopped")) finishIdleCheck(true);
+      },
+      fetchImpl: (async () => {
+        draws++;
+        return new Response(JSON.stringify({ code: 0, data: { card: null } }));
+      }) as unknown as typeof fetch,
+    });
+    liveManagers.push(manager);
+    manager.onRequest("glm-5.1", "old-task", { jwt: JWT, codingPlanAuth: CRED, family: "zai" });
+    expect(draws).toBe(1);
+
+    // The serve panel can reload a coding-plan-only --import credential while
+    // the process-wide manager still holds the previous account's draw params.
+    const switchedAuth = oauthAuth();
+    switchedAuth.setOAuthCredential({ apiKey: "imported-key", provider: "zai" });
+    clock.now += 4 * 60_000;
+    const response = await proxyRequest(anthropicClientReq(), "anthropic", {
+      config: TEST_CONFIG, auth: switchedAuth, highspeed: manager,
+      endpointRouting: null, clientSigning: null,
+      fetchImpl: (async () => anthropicOk()) as unknown as typeof fetch,
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+
+    const drawsBeforeIdle = draws;
+    clock.now += 2 * 60_000; // Six minutes since the last JWT-backed request.
+    const timeout = setTimeout(() => finishIdleCheck(false), 1_000);
+    try {
+      expect(await idleStopped).toBeTrue();
+      expect(draws).toBe(drawsBeforeIdle);
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+
   it("rewrites the model, swaps auth to the JWT set, adds the card header, and skips signing", async () => {
     const manager = await cardHoldingManager();
     const upstreamCalls: { url: string; headers: Headers; body: string }[] = [];
@@ -201,7 +252,15 @@ describe("proxyRequest highspeed wiring", () => {
   });
 
   it("leaves requests untouched when the model is not eligible", async () => {
-    const manager = await cardHoldingManager();
+    const base = await cardHoldingManager();
+    let noteActivityCalls = 0;
+    // Object.create wrapper (NOT Object.assign): mutating base in place would
+    // rebind base.noteActivity to the spy itself → infinite recursion.
+    const manager = Object.create(base) as HighspeedManager;
+    manager.noteActivity = () => {
+      noteActivityCalls += 1;
+      base.noteActivity();
+    };
     const upstreamCalls: { headers: Headers; body: string }[] = [];
 
     const resp = await proxyRequest(new Request("http://localhost:8080/v1/messages", {
@@ -226,5 +285,32 @@ describe("proxyRequest highspeed wiring", () => {
     expect(upstreamCalls[0]!.headers.get("x-highspeed-card-id")).toBeNull();
     expect(upstreamCalls[0]!.headers.get("x-api-key")).toBe(CRED);
     expect(JSON.parse(upstreamCalls[0]!.body).model).toBe("glm-4.6");
+    // §H eligibility gate: in-flight activity must not re-arm the draw loop
+    // for traffic that can never mount a card (idle-window invariant).
+    expect(noteActivityCalls).toBe(0);
+    base.stop();
+  });
+
+  it("notifies in-flight activity for an eligible model after the response completes", async () => {
+    const base = await cardHoldingManager();
+    let noteActivityCalls = 0;
+    const manager = Object.create(base) as HighspeedManager;
+    manager.noteActivity = () => {
+      noteActivityCalls += 1;
+      base.noteActivity();
+    };
+
+    const resp = await proxyRequest(anthropicClientReq(), "anthropic", {
+      config: TEST_CONFIG,
+      auth: oauthAuth(),
+      fetchImpl: Object.assign(async () => anthropicOk(), { preconnect: () => {} }) as unknown as typeof fetch,
+      endpointRouting: null,
+      clientSigning: null,
+      highspeed: manager,
+    });
+
+    expect(resp.status).toBe(200);
+    expect(noteActivityCalls).toBe(1);
+    base.stop();
   });
 });

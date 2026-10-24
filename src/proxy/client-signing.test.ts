@@ -440,7 +440,6 @@ describe("project-access JWT signing form (bigmodel OAuth)", () => {
     const signed = await manager.sign(JWT_URL, BASE_PAIRS, {
       credential: CRED, appVersion: "3.8.1", oauthAccessToken: OAUTH, provider: "bigmodel",
     });
-    console.log("MINTS:", JSON.stringify(mintUrls));
     expect(pair(signed, "X-Client-Sig")).toBeDefined();
     expect(mintUrls.some((u) => u.includes("/api_keys/testkey/access_tokens"))).toBeTrue();
     // minted JWT form handshake: accessToken body field

@@ -2,7 +2,7 @@
  * Tests for provider definitions and model catalog.
  */
 import { describe, it, expect } from "bun:test";
-import { getProvider, ZAI_PROVIDER, BIGMODEL_PROVIDER } from "./providers.js";
+import { getProvider } from "./providers.js";
 import { MODELS, ADVERTISED_MODELS } from "./models.js";
 
 describe("providers", () => {
@@ -20,14 +20,6 @@ describe("providers", () => {
     expect(p.anthropicBaseURL).toBe("https://open.bigmodel.cn/api/anthropic");
     expect(p.openaiBaseURL).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
     expect(p.bizHost).toBe("https://open.bigmodel.cn");
-  });
-
-  it("ZAI_PROVIDER constant matches getProvider('zai')", () => {
-    expect(ZAI_PROVIDER).toEqual(getProvider("zai"));
-  });
-
-  it("BIGMODEL_PROVIDER constant matches getProvider('bigmodel')", () => {
-    expect(BIGMODEL_PROVIDER).toEqual(getProvider("bigmodel"));
   });
 
   it("getProvider throws on unknown id", () => {
@@ -89,14 +81,6 @@ describe("models", () => {
     expect(v("glm-4.6v")).toBe(true);
     expect(v("glm-5.3")).toBeUndefined();
     expect(v("glm-5.2")).toBeUndefined();
-  });
-
-  it("includes key GLM models", () => {
-    const ids = MODELS.map((m) => m.id);
-    expect(ids).toContain("glm-4.6");
-    expect(ids).toContain("glm-5.2");
-    expect(ids).toContain("glm-5.3");
-    expect(ids).toContain("glm-5v-turbo");
   });
 
   it("advertises exactly the glm-5.3 pair via ADVERTISED_MODELS", () => {

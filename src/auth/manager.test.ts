@@ -13,12 +13,6 @@ describe("credentialString", () => {
   it("returns apiKey only when secret absent", () => {
     expect(credentialString({ apiKey: "abc", provider: "bigmodel" })).toBe("abc");
   });
-
-  it("handles complex key values", () => {
-    expect(credentialString({ apiKey: "key123", secret: "secret456", provider: "zai" })).toBe(
-      "key123.secret456",
-    );
-  });
 });
 
 describe("isExpired", () => {

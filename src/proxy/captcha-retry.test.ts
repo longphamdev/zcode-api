@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "bun:test";
 import { gzipSync } from "node:zlib";
-import { detectInBodyChallenge, isCaptchaChallenged, retryOnCaptchaChallenge, type CaptchaModuleLike } from "./captcha-retry.js";
+import { detectInBodyChallenge, isCaptchaChallenged, retryOnCaptchaChallenge, resolveCaptchaAcquireBudgetMs, acquireCaptchaWithRetry, type CaptchaModuleLike } from "./captcha-retry.js";
 
 function challengeBytes(): Uint8Array {
   return new TextEncoder().encode(JSON.stringify({ code: 3007, msg: "captcha verify failed" }));
@@ -163,5 +163,81 @@ describe("retryOnCaptchaChallenge", () => {
     expect(phases).toEqual(["dispatch"]);
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.resp.status).toBe(502);
+  });
+});
+
+describe("resolveCaptchaAcquireBudgetMs (§H)", () => {
+  it("equivalence classes: undefined/empty/non-numeric/zero/negative → default 45s; valid numerics pass through", () => {
+    for (const raw of [undefined, "", "abc", "0", "-5000"]) {
+      expect(resolveCaptchaAcquireBudgetMs(raw)).toBe(45_000);
+    }
+    expect(resolveCaptchaAcquireBudgetMs("10")).toBe(10);
+    expect(resolveCaptchaAcquireBudgetMs("120000")).toBe(120_000);
+  });
+});
+
+describe("acquireCaptchaWithRetry", () => {
+  it("keeps the authoritative disabled result without retrying", async () => {
+    let attempts = 0;
+    expect(await acquireCaptchaWithRetry(async () => { attempts++; return null; }, { budgetMs: 1000 })).toBeNull();
+    expect(attempts).toBe(1);
+  });
+
+  it("does not start a new attempt after backoff exhausts the budget", async () => {
+    let attempts = 0;
+    await expect(acquireCaptchaWithRetry(async () => {
+      attempts++;
+      throw new Error("configs unavailable");
+    }, { budgetMs: 25 })).rejects.toThrow("configs unavailable");
+    expect(attempts).toBe(1);
+  });
+
+  it("bounds a stalled attempt and ignores its late result", async () => {
+    let attempts = 0;
+    let resolveToken!: (value: string) => void;
+    const pending = new Promise<string>((resolve) => { resolveToken = resolve; });
+    try {
+      await expect(acquireCaptchaWithRetry(() => { attempts++; return pending; }, { budgetMs: 25 })).rejects.toThrow("timed out");
+    } finally {
+      resolveToken("late-token");
+    }
+    await Promise.resolve();
+    expect(attempts).toBe(1);
+  });
+
+  it("rejects a result completed beyond the deadline even before the timer runs", async () => {
+    let now = 0;
+    await expect(acquireCaptchaWithRetry(async () => {
+      now = 1001;
+      return "late-token";
+    }, { budgetMs: 1000, now: () => now })).rejects.toThrow("timed out");
+  });
+
+  it("retries a transient failure while time remains", async () => {
+    let attempts = 0;
+    const result = await acquireCaptchaWithRetry(async () => {
+      if (++attempts === 1) throw new Error("temporary failure");
+      return "fresh-token";
+    }, { budgetMs: 4000 });
+    expect(result).toBe("fresh-token");
+    expect(attempts).toBe(2);
+  });
+
+  it("stops waiting on client abort and does not acquire for an already aborted client", async () => {
+    const controller = new AbortController();
+    const reason = new Error("client disconnected");
+    let attempts = 0;
+    let resolveToken!: (value: string) => void;
+    const pending = new Promise<string>((resolve) => { resolveToken = resolve; });
+    const result = acquireCaptchaWithRetry(() => { attempts++; return pending; }, { budgetMs: 1000, signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(reason);
+    try {
+      await expect(result).rejects.toThrow("client disconnected");
+      await expect(acquireCaptchaWithRetry(() => { attempts++; return pending; }, { budgetMs: 1000, signal: controller.signal })).rejects.toThrow("client disconnected");
+      expect(attempts).toBe(1);
+    } finally {
+      resolveToken("late-token");
+    }
   });
 });

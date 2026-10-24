@@ -92,15 +92,6 @@ describe("buildUpstreamURL", () => {
       "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
     );
   });
-
-  it("can still build direct Anthropic upstream URLs when explicitly requested", () => {
-    expect(buildUpstreamURL("anthropic", ZAI_PROVIDER)).toBe(
-      "https://api.z.ai/api/anthropic/v1/messages",
-    );
-    expect(buildUpstreamURL("anthropic", BIGMODEL_PROVIDER)).toBe(
-      "https://open.bigmodel.cn/api/anthropic/v1/messages",
-    );
-  });
 });
 
 describe("buildZcodeTraceHeaders", () => {

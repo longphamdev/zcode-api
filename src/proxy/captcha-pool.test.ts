@@ -134,6 +134,37 @@ describe("CaptchaTokenPool deep idle", () => {
     expect(pool.stats().ready).toBeLessThanOrEqual(1);
   });
 
+  it("touchDemand (in-flight stream activity) suppresses idle decay without taking a token", async () => {
+    pool = new CaptchaTokenPool({
+      poolSizeMin: 5,
+      poolSizeMax: 10,
+      idleFloor: 1,
+      tokenTtlMs: 60_000,
+      refillIntervalMs: 60_000,
+      solveRetries: 1,
+      solveConcurrency: 1,
+      scaleDownIdleMs: 60_000,
+    });
+    await pool.prefill(CFG, 5);
+    expect(pool.stats().target).toBe(5);
+    // A request whose SSE has been producing for minutes is NOT idle: the last
+    // token take is 61s old, but the stream just ended (touchDemand refreshes
+    // the idle clock) — the pool must not decay mid/after-stream (§H).
+    const p = pool as unknown as { lastTakeAt: number };
+    p.lastTakeAt = Date.now() - 61_000;
+    pool.touchDemand();
+    const decayed = pool as unknown as { maybeScaleDown: () => void; applyGovernorCaps: () => void };
+    decayed.maybeScaleDown();
+    decayed.applyGovernorCaps();
+    expect(pool.stats().target).toBe(5);
+    expect(pool.stats().ready).toBe(5);
+    // touchDemand refreshes only the idle clock — it never pollutes the
+    // demand-sizing signal (takeTimestamps), so repeat calls stay inert.
+    pool.touchDemand();
+    decayed.maybeScaleDown();
+    expect(pool.stats().target).toBe(5);
+  });
+
   it("restores full floor on the next token take", async () => {
     pool = new CaptchaTokenPool({
       poolSizeMin: 5,
@@ -172,8 +203,7 @@ describe("CaptchaTokenPool deep idle", () => {
     // Past scaleDownIdleMs but before deepIdleAfterMs → keeper floor.
     p.lastTakeAt = Date.now() - 61_000;
     let decayed = pool as unknown as { maybeScaleDown: () => void };
-    decayed.maybeScaleDown();
-    expect(pool.stats().target).toBe(1);
+    decayed.maybeScaleDown(); expect(pool.stats().target).toBe(1);
     // Past deepIdleAfterMs → floor 0.
     p.lastTakeAt = Date.now() - 121_000;
     decayed.maybeScaleDown();

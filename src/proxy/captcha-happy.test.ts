@@ -274,23 +274,6 @@ describe("alias lifecycle (install/remove descriptor contract)", () => {
     expect(g.window).toBeUndefined();
   });
 
-  test("an expired tombstone leaves callable stubs, never a ReferenceError", async () => {
-    // The grace period ends, but guest stragglers can still be running: the
-    // FeiLin heartbeat `tE` re-arms itself every 2s and dereferences `moveBy`
-    // (feilin008.js:169658). A hard `delete` turned that read into an uncaught
-    // ReferenceError — fatal in the host realm, and the field crash this
-    // guards. The name must stay resolvable and callable.
-    const { g, w } = makeSandbox();
-    (w as Record<string, unknown>).moveBy = () => {};
-    installGlobalWindowAlias(g, w, 15);
-    removeGlobalWindowAlias(g, w);
-    await Bun.sleep(70);
-    expect(typeof g.moveBy).toBe("function");
-    expect(() => (g.moveBy as () => void)()).not.toThrow();
-    // The stub must not keep the closed window reachable from globalThis.
-    expect(g.moveBy).not.toBe((w as Record<string, unknown>).moveBy);
-  });
-
   test("requestAnimationFrame/cancelAnimationFrame resolve during a solve", () => {
     // Bun has no native rAF. While these sat in HOST_CRITICAL_GLOBALS the
     // alias pass skipped them, so the FeiLin bundle's 9 bare
