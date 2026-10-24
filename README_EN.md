@@ -26,7 +26,7 @@ Codex, Silly Tavern … can all use your plan quota directly.
 - 📱 **Android app** — start/stop the proxy, watch live logs and switch providers on your phone, handy when you're away.
 - 💬 **Web chat included** — open `/webui` for a local ChatGPT-style chat page to try out models.
 - 🌙 **Off-peak channel & plan grabber** (optional) — a free-quota channel for off-peak hours and automatic claiming of limited trial plans are both built in.
-- 🔌 **In-plan MCP relay** — official ZCode plugin MCPs (Tianyancha / Wind / iFinD…) are relayed to local `/mcp/*` (requires a coding-plan login; `GET /mcp` lists what's available); the built-in web chat can also attach your own MCP servers as tools for the model.
+- 🔌 **In-plan MCP aggregate endpoint** — official ZCode plugin MCPs (Tianyancha / Wind / iFinD…, 134+ tools) are merged behind a **single** `/mcp` endpoint (streamable HTTP, tools namespaced `{plugin}__{tool}` — clients configure just one MCP server; requires a coding-plan login, `GET /mcp` in a browser shows the catalogue); the built-in web chat can also attach your own MCP servers as tools for the model.
 - 🪟 **Cross-platform** — Windows / macOS / Linux run from one codebase; can also be compiled into a single-file executable or deployed with Docker.
 
 ## 🚀 Quick Start
