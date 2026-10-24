@@ -16,7 +16,7 @@ import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
 import { handleResponsesRoute } from "./routes-responses.js";
 import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute } from "./routes-async.js";
-import { handleMcpListingRoute, handleMcpRelayRoute, type McpRouteOptions } from "./routes-mcp.js";
+import { handleMcpRoute, type McpRouteOptions } from "./routes-mcp.js";
 import { handleQuota } from "./routes-quota.js";
 import { errorResponse } from "../proxy/handler.js";
 import type { ResponseStore } from "../responses/store.js";
@@ -136,24 +136,11 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     }
 
     if (config.mcp.gateway.enabled) {
-      if (path === "/mcp" && method === "GET") {
-        return handleMcpListingRoute(req, mcpOpts);
-      }
-      // MCP streamable HTTP: POST (JSON-RPC), GET (SSE stream), DELETE
-      // (session close). `/mcp` itself only supports GET above.
-      if (
-        path.startsWith("/mcp/") &&
-        (method === "POST" || method === "GET" || method === "DELETE")
-      ) {
-        let serverKey = path.slice("/mcp/".length);
-        try {
-          serverKey = decodeURIComponent(serverKey);
-        } catch {
-          // Malformed percent-escape (e.g. /mcp/%zz): decodeURIComponent throws
-          // URIError; the raw string can never match a catalogue key, so let
-          // the handler's lookup produce the 404 instead of a 500 here.
-        }
-        return handleMcpRelayRoute(req, serverKey, mcpOpts);
+      // Aggregated MCP endpoint: ONE `/mcp` URL exposes every official
+      // plugin's tools (streamable HTTP — POST JSON-RPC, GET listing,
+      // DELETE session close). Replaces the per-plugin `/mcp/{key}` relay.
+      if (path === "/mcp" && (method === "POST" || method === "GET" || method === "DELETE")) {
+        return handleMcpRoute(req, mcpOpts);
       }
     }
 

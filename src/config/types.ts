@@ -88,7 +88,7 @@ export interface ResponsesConfig {
  * 3.14.3) for the header contract.
  */
 export interface McpGatewayConfig {
-  /** Expose `GET /mcp` and `/mcp/{server}` relay routes. Default `true`. */
+  /** Expose the aggregated `/mcp` endpoint (POST JSON-RPC, GET listing, DELETE). Default `true`. */
   enabled: boolean;
   /** Base origin substituted for `${ZCODE_BASE_URL}` in plugin `.mcp.json`
    *  URLs. Default `https://zcode.z.ai` (desktop bundle production fallback
@@ -106,7 +106,7 @@ export interface McpConfig {
   webReader: boolean;
   /** Legacy repository-reader preference, currently unwired. Default `false`. */
   zread: boolean;
-  /** Official plugin-MCP gateway relay (`/mcp/*`). Separate plane from the
+  /** Official plugin-MCP gateway (`/mcp` aggregate). Separate plane from the
    *  GLM hosted-tool fields above (those remain unwired). */
   gateway: McpGatewayConfig;
 }

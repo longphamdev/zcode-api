@@ -12,7 +12,7 @@
 import raw from "./official-catalogue.json" with { type: "json" };
 
 interface OfficialMcpServerDef {
-  /** mcpServers key from the plugin's .mcp.json — the /mcp/{key} route name. */
+  /** mcpServers key from the plugin's .mcp.json — the tool-namespace key in the aggregated /mcp endpoint. */
   key: string;
   /** Gateway route identifier (path segment after /api/v1/mcp/server/). */
   routeId: string;
