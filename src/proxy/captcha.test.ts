@@ -17,6 +17,8 @@ mock.module("./captcha-solver.js", () => ({
 }));
 
 const captcha = await import("./captcha.js");
+const { configureCaptchaPool, prefillCaptchaPool } = await import("./captcha-pool.js");
+const flushRefresh = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 const ENABLED_BODY = JSON.stringify({
   data: { configs: { captcha: { enabled: true, prefix: "no8xfe", sceneId: "11xygtvd", region: "sgp" } } },
@@ -70,11 +72,98 @@ describe("getCaptchaToken — pool-first degradation (§H 九轮)", () => {
 
     expect(await captcha.getCaptchaToken("test-1.0.0")).not.toBeNull();
     disabled = true;
-    captcha.__resetCaptchaConfigCacheForTests(true); // see the fresh config now
-    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull(); // no headers is the correct shape
+    captcha.__resetCaptchaConfigCacheForTests(true);
+    // The triggering request uses the last snapshot; completed refreshes apply
+    // to subsequent acquisitions, including authoritative disables.
+    expect(await captcha.getCaptchaToken("test-1.0.0")).not.toBeNull();
+    await flushRefresh();
+    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull();
     outage = true;
     captcha.__resetCaptchaConfigCacheForTests(true);
     expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull(); // never resurrect the old enabled config
+  });
+
+  it("serves banked tokens before a stalled config refresh settles, sharing one refresh", async () => {
+    const cfg = JSON.parse(ENABLED_BODY).data.configs.captcha;
+    configureCaptchaPool({ poolSizeMin: 4, poolSizeMax: 4, cpuLimitPercent: 0, staggerMs: 0 });
+    await prefillCaptchaPool(cfg, 4);
+    captcha.__setConfigsFetchForTests((async () => jsonResp(ENABLED_BODY)) as typeof fetch);
+    await captcha.getCaptchaToken("test-1.0.0");
+    await prefillCaptchaPool(cfg, 4);
+    captcha.__resetCaptchaConfigCacheForTests(true);
+    let finishRefresh!: (response: Response) => void;
+    let refreshes = 0;
+    captcha.__setConfigsFetchForTests((async () => {
+      refreshes++;
+      return new Promise<Response>((resolve) => { finishRefresh = resolve; });
+    }) as typeof fetch);
+    let completed = false;
+    const acquisitions = Promise.all([
+      captcha.getCaptchaToken("test-1.0.0"),
+      captcha.getCaptchaToken("test-1.0.0"),
+    ]).then((tokens) => { completed = true; return tokens; });
+    try {
+      await flushRefresh();
+      expect(refreshes).toBe(1);
+      expect(completed).toBe(true);
+    } finally {
+      finishRefresh(jsonResp(ENABLED_BODY));
+      await acquisitions;
+      await flushRefresh();
+    }
+  });
+
+  it("an absent captcha field disables an older enabled snapshot through outages", async () => {
+    captcha.__setConfigsFetchForTests((async () => jsonResp(ENABLED_BODY)) as typeof fetch);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).not.toBeNull();
+    captcha.__resetCaptchaConfigCacheForTests(true);
+    captcha.__setConfigsFetchForTests((async () => jsonResp('{"data":{"configs":{}}}')) as typeof fetch);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).not.toBeNull();
+    await flushRefresh();
+    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull();
+    captcha.__resetCaptchaConfigCacheForTests(true);
+    captcha.__setConfigsFetchForTests((async () => { throw new Error("outage"); }) as typeof fetch);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull();
+  });
+
+  it("an absent captcha field on cold start is an authoritative disable", async () => {
+    captcha.__setConfigsFetchForTests((async () => jsonResp('{"data":{"configs":{}}}')) as typeof fetch);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull();
+  });
+
+  it("retries a failed background refresh on the next acquisition", async () => {
+    captcha.__setConfigsFetchForTests((async () => jsonResp(ENABLED_BODY)) as typeof fetch);
+    await captcha.getCaptchaToken("test-1.0.0");
+    captcha.__resetCaptchaConfigCacheForTests(true);
+    let refreshes = 0;
+    captcha.__setConfigsFetchForTests((async () => {
+      refreshes++;
+      throw new Error("outage");
+    }) as typeof fetch);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).not.toBeNull();
+    await flushRefresh();
+    expect(refreshes).toBe(1);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).not.toBeNull();
+    expect(refreshes).toBe(2);
+  });
+
+  it("a refresh finishing after shutdown cannot overwrite a new authoritative disable", async () => {
+    captcha.__setConfigsFetchForTests((async () => jsonResp(ENABLED_BODY)) as typeof fetch);
+    await captcha.getCaptchaToken("test-1.0.0");
+    captcha.__resetCaptchaConfigCacheForTests(true);
+    let finishOld!: (response: Response) => void;
+    captcha.__setConfigsFetchForTests((async () => new Promise<Response>((resolve) => {
+      finishOld = resolve;
+    })) as typeof fetch);
+    const oldAcquisition = captcha.getCaptchaToken("test-1.0.0");
+    await flushRefresh();
+    captcha.shutdownCaptcha();
+    captcha.__setConfigsFetchForTests((async () => jsonResp(DISABLED_BODY)) as typeof fetch);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull();
+    finishOld(jsonResp(ENABLED_BODY));
+    await oldAcquisition;
+    await flushRefresh();
+    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull();
   });
 
   it("no config history + outage → strict throw (never dispatch captcha-less)", async () => {

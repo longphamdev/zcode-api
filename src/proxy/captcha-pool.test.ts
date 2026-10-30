@@ -355,3 +355,164 @@ describe("CaptchaTokenPool deep idle", () => {
     expect(fired2.length).toBe(0);
   });
 });
+
+describe("CaptchaTokenPool refill delivery", () => {
+  let pending: Array<{ resolve: (token: string) => void; reject: (error: Error) => void }>;
+  const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const token = (id: string) => Buffer.from(JSON.stringify({ certifyId: id })).toString("base64");
+
+  beforeEach(() => {
+    pending = [];
+    solveMock.mockImplementation(() => new Promise<string>((resolve, reject) => pending.push({ resolve, reject })));
+    pool = new CaptchaTokenPool({
+      poolSizeMin: 2, poolSizeMax: 2, solveConcurrency: 2, emptyTakeRace: 2,
+      solveRetries: 1, staggerMs: 0, refillIntervalMs: 60_000, cpuLimitPercent: 0,
+    });
+  });
+
+  afterEach(async () => {
+    pool.stopBackgroundRefill();
+    // Resolve remaining work so no deferred solve leaks into another test.
+    for (let i = 0; i < pending.length; i += 1) pending[i]!.resolve(token(`cleanup-${i}`));
+    await tick();
+    delete process.env.CAPTCHA_TAKE_GRACE_MS;
+    delete process.env.CAPTCHA_SOLVE_RACE_DEADLINE_MS;
+  });
+
+  it("publishes a completed refill token while its peer is still pending", async () => {
+    pool.startBackgroundRefill(CFG);
+    expect(pending.length).toBe(2);
+    pending[0]!.resolve(token("fast"));
+    await tick();
+    expect(pool.stats().ready).toBe(1);
+    expect(pool.stats().activeSolves).toBe(1);
+  });
+
+  it("serves an empty take from refill and banks late racer successes", async () => {
+    pool.startBackgroundRefill(CFG);
+    let served: string | undefined;
+    const take = pool.takeToken(CFG).then((value) => { served = value; });
+    expect(pending.length).toBe(2);
+    pending[0]!.resolve(token("background"));
+    await tick();
+    expect(served).toBe(token("background"));
+    pending[1]!.resolve(token("late-peer"));
+    await tick();
+    expect(pool.stats().ready).toBe(1);
+    await take;
+  });
+
+  it("gives concurrent empty takes distinct refill tokens", async () => {
+    pool.startBackgroundRefill(CFG);
+    const served: string[] = [];
+    void pool.takeToken(CFG).then((value) => served.push(value));
+    void pool.takeToken(CFG).then((value) => served.push(value));
+    pending[0]!.resolve(token("first"));
+    pending[1]!.resolve(token("second"));
+    await tick();
+    expect(served).toEqual([token("first"), token("second")]);
+    expect(pool.stats().ready).toBe(0);
+  });
+
+  it("removes a failed take's waiter before later background tokens arrive", async () => {
+    process.env.CAPTCHA_TAKE_GRACE_MS = "0";
+    pool.startBackgroundRefill(CFG);
+    const failed = pool.takeToken(CFG).catch((error: Error) => error.message);
+    pending[0]!.reject(new Error("fixture failure"));
+    pending[1]!.reject(new Error("fixture failure"));
+    expect(await failed).toContain("fixture failure");
+    expect(pending.length).toBe(2);
+    await tick();
+    pool.startBackgroundRefill(CFG);
+    pending.at(-2)!.resolve(token("still-available"));
+    pending.at(-1)!.resolve(token("also-available"));
+    await tick();
+    expect(pool.stats().ready).toBe(2);
+  });
+
+  it("does not issue the same certifyId to concurrent waiters", async () => {
+    pool.startBackgroundRefill(CFG);
+    const served: string[] = [];
+    void pool.takeToken(CFG).then((value) => served.push(value));
+    void pool.takeToken(CFG).then((value) => served.push(value));
+    pending[0]!.resolve(token("duplicate"));
+    pending[1]!.resolve(token("duplicate"));
+    await tick();
+    expect(served).toEqual([token("duplicate")]);
+    pending[2]!.resolve(token("distinct"));
+    await tick();
+    expect(served).toEqual([token("duplicate"), token("distinct")]);
+  });
+
+  it("removes a timed-out waiter and banks its late racing result", async () => {
+    process.env.CAPTCHA_SOLVE_RACE_DEADLINE_MS = "1000";
+    process.env.CAPTCHA_TAKE_GRACE_MS = "0";
+    const failed = pool.takeToken(CFG).catch((error: Error) => error.message);
+    expect(await failed).toContain("captcha take deadline");
+    pending[0]!.resolve(token("after-deadline"));
+    await tick();
+    expect(pool.stats().ready).toBe(1);
+    expect(await pool.takeToken(CFG)).toBe(token("after-deadline"));
+  });
+});
+
+
+describe("CaptchaTokenPool shared demand lifecycle", () => {
+  it("prefill yields when background work already occupies all solve slots", async () => {
+    const pending: Array<(token: string) => void> = [];
+    solveMock.mockImplementation(() => new Promise<string>((resolve) => pending.push(resolve)));
+    pool = new CaptchaTokenPool({ poolSizeMin: 5, poolSizeMax: 5, solveConcurrency: 2, solveRetries: 1, cpuLimitPercent: 0 });
+    pool.startBackgroundRefill(CFG);
+    try {
+      await pool.prefill(CFG, 5);
+      expect(pending.length).toBe(2);
+    } finally {
+      pool.stopBackgroundRefill();
+      for (const resolve of pending) resolve("late-prefill");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
+
+  it("bounds a burst of five empty takes to configured solve concurrency", async () => {
+    let active = 0;
+    let peak = 0;
+    let id = 0;
+    solveMock.mockImplementation(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      const current = ++id;
+      await new Promise((resolve) => setImmediate(resolve));
+      active -= 1;
+      return Buffer.from(JSON.stringify({ certifyId: `burst-${current}` })).toString("base64");
+    });
+    pool = new CaptchaTokenPool({ poolSizeMin: 2, poolSizeMax: 2, solveConcurrency: 2, emptyTakeRace: 2, solveRetries: 1, cpuLimitPercent: 0 });
+    const tokens = await Promise.all(Array.from({ length: 5 }, () => pool.takeToken(CFG)));
+    expect(new Set(tokens).size).toBe(5);
+    expect(peak).toBeLessThanOrEqual(2);
+    pool.stopBackgroundRefill();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  it("stops pending takes promptly and ignores late completions", async () => {
+    const pending: Array<(token: string) => void> = [];
+    solveMock.mockImplementation(() => new Promise<string>((resolve) => pending.push(resolve)));
+    pool = new CaptchaTokenPool({ poolSizeMin: 2, poolSizeMax: 2, solveConcurrency: 2, emptyTakeRace: 2, solveRetries: 1, cpuLimitPercent: 0 });
+    pool.startBackgroundRefill(CFG);
+    const outcome = pool.takeToken(CFG).catch((error: Error) => error.message);
+    pool.stopBackgroundRefill();
+    expect(await outcome).toBe("captcha pool stopped");
+    for (const resolve of pending) resolve("late-after-stop");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(pending.length).toBe(2);
+    expect(pool.stats().ready).toBe(0);
+    expect(pool.stats().activeSolves).toBe(0);
+    // Only explicit new demand can resume the lazy pool after shutdown.
+    const resumed = pool.takeToken(CFG);
+    expect(pending.length).toBe(4);
+    pending[2]!("fresh-after-restart");
+    expect(await resumed).toBe("fresh-after-restart");
+    pool.stopBackgroundRefill();
+    pending[3]!("late-restarted-peer");
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+});

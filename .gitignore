@@ -1,6 +1,7 @@
 node_modules/
 *.log
 config.yaml
+/.env
 .omo/evidence/
 dist/
 .DS_Store

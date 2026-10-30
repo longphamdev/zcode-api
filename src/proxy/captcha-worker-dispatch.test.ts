@@ -66,6 +66,27 @@ describe("captcha worker dispatch (worker / in-process)", () => {
     const param = await solveViaWorkerOrInProcess({ scene: "sc3", region: "rg3", prefix: "pf3" });
     expect(param).toBe("inproc-param:sc3");
   });
+
+  test.each([
+    ["runtime crash", 'throw new Error("ModuleNotFound inside solver");'],
+    ["solver rejection", 'parentPort.postMessage({ id: m.id, ok: false, error: "ModuleNotFound inside solver" });'],
+  ])("a %s never retries on the main thread", async (_name, response) => {
+    const failingFixture = path.join(fixtureDir, "failing-worker.mjs");
+    fs.writeFileSync(failingFixture, [
+      'import { parentPort } from "node:worker_threads";',
+      `parentPort.on("message", (m) => { ${response} });`,
+    ].join("\n"));
+    mock.module("./captcha-worker-asset.js", () => ({ default: failingFixture }));
+    let inprocCalls = 0;
+    __setInProcessSolverForTest(async () => {
+      inprocCalls += 1;
+      return "must-not-happen";
+    });
+    __resetCaptchaWorkerDispatchForTest();
+    await expect(solveViaWorkerOrInProcess({ scene: "s", region: "r", prefix: "p" }))
+      .rejects.toThrow("ModuleNotFound inside solver");
+    expect(inprocCalls).toBe(0);
+  });
 });
 
 describe("resolveWorkerEntryCandidates (pure)", () => {
@@ -84,8 +105,8 @@ describe("resolveWorkerEntryCandidates (pure)", () => {
 
 describe("entry resolution & strict mode", () => {
   const saved = {
-    worker: process.env.ZCODE_CAPTCHA_WORKER,
-    strict: process.env.ZCODE_CAPTCHA_REQUIRE_WORKER,
+    ZCODE_CAPTCHA_WORKER: process.env.ZCODE_CAPTCHA_WORKER,
+    ZCODE_CAPTCHA_REQUIRE_WORKER: process.env.ZCODE_CAPTCHA_REQUIRE_WORKER,
   };
   afterEach(() => {
     for (const [k, v] of Object.entries(saved)) {
@@ -124,12 +145,26 @@ describe("entry resolution & strict mode", () => {
     expect((err as Error).message).toContain("no in-process fallback");
     expect(inprocCalls).toBe(0);
   });
+
+  test("strict mode rejects an unloadable worker without in-process fallback", async () => {
+    process.env.ZCODE_CAPTCHA_WORKER = fixtureDir;
+    process.env.ZCODE_CAPTCHA_REQUIRE_WORKER = "1";
+    let inprocCalls = 0;
+    __setInProcessSolverForTest(async () => {
+      inprocCalls += 1;
+      return "must-not-happen";
+    });
+    __resetCaptchaWorkerDispatchForTest();
+    await expect(solveViaWorkerOrInProcess({ scene: "s", region: "r", prefix: "p" }))
+      .rejects.toThrow("no in-process fallback");
+    expect(inprocCalls).toBe(0);
+  });
 });
 
 describe("warm worker pool", () => {
   const saved = {
-    warm: process.env.ZCODE_CAPTCHA_WARM_WORKERS,
-    worker: process.env.ZCODE_CAPTCHA_WORKER,
+    ZCODE_CAPTCHA_WARM_WORKERS: process.env.ZCODE_CAPTCHA_WARM_WORKERS,
+    ZCODE_CAPTCHA_WORKER: process.env.ZCODE_CAPTCHA_WORKER,
   };
   const warmDir = fs.mkdtempSync(path.join(os.tmpdir(), "cap-warm-"));
   const markerPath = path.join(warmDir, "spawns.txt");

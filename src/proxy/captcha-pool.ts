@@ -143,6 +143,9 @@ function resolvePoolOpts(opts: CaptchaPoolOptions): ResolvedPoolOpts {
 
 export class CaptchaTokenPool {
   private tokens: TokenEntry[] = [];
+  private tokenWaiters = new Map<(param: string) => void, (err: unknown) => void>();
+  private stopped = false;
+  private generation = 0;
   private opts: ResolvedPoolOpts;
   private effectiveTarget: number;
   private refillTimer: ReturnType<typeof setInterval> | null = null;
@@ -222,8 +225,10 @@ export class CaptchaTokenPool {
   }
 
   startBackgroundRefill(cfg: CaptchaConfig): void {
+    this.governor?.stop();
+    if (this.refillTimer) clearInterval(this.refillTimer);
+    this.stopped = false;
     this.cfg = cfg;
-    this.stopBackgroundRefill();
     this.governor?.start();
     void this.refill({ urgent: false });
     this.refillTimer = setInterval(() => {
@@ -232,6 +237,10 @@ export class CaptchaTokenPool {
   }
 
   stopBackgroundRefill(): void {
+    this.stopped = true;
+    this.generation += 1;
+    this.cfg = null;
+    for (const fail of this.tokenWaiters.values()) fail(new Error("captcha pool stopped"));
     this.governor?.stop();
     if (this.refillTimer) {
       clearInterval(this.refillTimer);
@@ -240,6 +249,10 @@ export class CaptchaTokenPool {
   }
 
   async takeToken(cfg: CaptchaConfig): Promise<string> {
+    // Explicit new demand may resume lazy acquisition after shutdown. Old
+    // in-flight work stays cancelled by its generation and cannot restart us.
+    this.stopped = false;
+    const generation = this.generation;
     this.cfg = cfg;
 
     const token = this.popFresh();
@@ -255,20 +268,9 @@ export class CaptchaTokenPool {
     this.effectiveTarget = Math.max(this.effectiveTarget, this.computeActiveTarget());
     let param: string;
     try {
-      // Overall deadline for the racing chain: during mint storms a racer can
-      // grind through its retry budget (~30-45s) — cap the client-facing wait
-      // and let the background waves finish the job instead.
-      const raceDeadlineMs = Number(process.env.CAPTCHA_SOLVE_RACE_DEADLINE_MS || 35_000);
-      param = await Promise.race([
-        this.solveRaced(cfg),
-        new Promise<never>((_, rej) =>
-          setTimeout(
-            () => rej(new Error(`captcha take deadline (${raceDeadlineMs}ms)`)),
-            Math.max(1_000, raceDeadlineMs),
-          ),
-        ),
-      ]);
+      param = await this.waitForToken(cfg);
     } catch (err) {
+      if (this.stopped || generation !== this.generation) throw err;
       // Mints fail in clusters (pe-stall storms, F008 velocity). Background
       // refill waves keep retrying — give them a short window to land a
       // token before surfacing a failure to the client. This converts most
@@ -277,6 +279,7 @@ export class CaptchaTokenPool {
       const deadline = Date.now() + Math.max(0, graceMs);
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 400));
+        if (this.stopped || generation !== this.generation) throw new Error("captcha pool stopped");
         const token = this.popFresh();
         if (token) {
           this.markParamIssued(token);
@@ -291,10 +294,44 @@ export class CaptchaTokenPool {
     return param;
   }
 
+  /** Any completed mint can serve a waiting take, including background work. */
+  private waitForToken(cfg: CaptchaConfig): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        settled = true;
+        clearTimeout(timer);
+        this.tokenWaiters.delete(deliver);
+      };
+      const deliver = (param: string) => {
+        cleanup();
+        resolve(param);
+      };
+      const fail = (err: unknown) => {
+        if (settled) return;
+        cleanup();
+        reject(err);
+      };
+      const raceDeadlineMs = Number(process.env.CAPTCHA_SOLVE_RACE_DEADLINE_MS || 35_000);
+      const timer = setTimeout(
+        () => fail(new Error(`captcha take deadline (${raceDeadlineMs}ms)`)),
+        Math.max(1_000, raceDeadlineMs),
+      );
+      this.tokenWaiters.set(deliver, fail);
+      this.pumpDemand(cfg);
+    });
+  }
+
   async prefill(cfg: CaptchaConfig, count?: number): Promise<void> {
+    this.stopped = false;
+    const generation = this.generation;
     this.cfg = cfg;
     const target = Math.min(count ?? this.effectiveTarget, this.effectiveTarget);
-    while (this.tokens.length + this.activeSolves < target) {
+    // Existing work owns occupied slots. Do not spin while waiting for it:
+    // prefill, like startup refill, may return with mints still in flight.
+    while (!this.stopped && generation === this.generation &&
+      this.activeSolves < this.opts.solveConcurrency &&
+      this.tokens.length + this.activeSolves < target) {
       const need = target - this.tokens.length - this.activeSolves;
       if (need <= 0) break;
       const concurrency = this.governor?.enabled
@@ -332,11 +369,19 @@ export class CaptchaTokenPool {
 
   private pushToken(param: string): void {
     this.pruneExpired();
-    if (this.tokens.length >= this.effectiveTarget) return;
     const certifyId = parseCertifyId(param);
     if (certifyId && (this.certifyIds.has(certifyId) || this.poolHasCertifyId(certifyId))) {
       return;
     }
+    const waiter = this.tokenWaiters.keys().next().value;
+    if (waiter) {
+      // Claim synchronously so another completion cannot issue this ID again
+      // before the consumer resumes from its await.
+      this.markParamIssued(param);
+      waiter(param);
+      return;
+    }
+    if (this.tokens.length >= this.effectiveTarget) return;
     this.tokens.push({ param, cachedAt: Date.now(), certifyId });
   }
 
@@ -468,7 +513,7 @@ export class CaptchaTokenPool {
   }
 
   private async refill(opts: { urgent: boolean }): Promise<void> {
-    if (!this.cfg) return;
+    if (this.stopped || !this.cfg) return;
     // Refresh sizing BEFORE the in-flight guard: a fill batch with slow or
     // stalling solves can hold refillInFlight for minutes, and freezing the
     // target that whole time starves the buffer exactly when demand exists.
@@ -516,17 +561,17 @@ export class CaptchaTokenPool {
   /** Fire up to `need` solves in parallel waves of solveConcurrency. */
   private async solveBatch(cfg: CaptchaConfig, need: number, concurrency = this.opts.solveConcurrency): Promise<void> {
     let remaining = need;
-    while (remaining > 0 && this.tokens.length + this.activeSolves < this.effectiveTarget) {
-      const wave = Math.min(remaining, concurrency, this.deficit());
-      if (wave <= 0) break;
+    const generation = this.generation;
+    while (!this.stopped && generation === this.generation && remaining > 0 && this.tokens.length + this.activeSolves < this.effectiveTarget) {
       if (this.opts.staggerMs > 0) await this.waitForStagger();
+      if (this.stopped || generation !== this.generation) break;
+      const wave = Math.min(remaining, concurrency, this.deficit(), this.opts.solveConcurrency - this.activeSolves);
+      if (wave <= 0) break;
       const results = await Promise.allSettled(
         Array.from({ length: wave }, () => this.solveOne(cfg)),
       );
       for (const r of results) {
-        if (r.status === "fulfilled") {
-          this.pushToken(r.value);
-        } else {
+        if (r.status === "rejected" && !this.stopped && generation === this.generation) {
           console.warn("[captcha-pool] parallel solve failed:", r.reason);
         }
       }
@@ -579,94 +624,81 @@ export class CaptchaTokenPool {
   }
 
   private async solveFresh(cfg: CaptchaConfig): Promise<string> {
-    this.activeSolves += 1;
+    const generation = this.generation;
     this.lastSolveAt = Date.now();
-    try {
-      let lastErr: string | null = null;
-      let sawIpBlock = false;
-      for (let attempt = 1; attempt <= this.opts.solveRetries; attempt += 1) {
-        try {
-          const param = await runCaptchaSolve(cfg.sceneId, cfg.region, cfg.prefix);
-          if (!param) {
-            lastErr = "solver returned empty";
-            continue;
-          }
-          if (this.isDuplicateParam(param)) {
-            lastErr = `duplicate certifyId ${parseCertifyId(param) ?? "?"}`;
-            continue;
-          }
-          this.noteMintSuccess();
-          return param;
-        } catch (err) {
-          lastErr = err instanceof Error ? err.message : String(err);
-          if (isCaptchaDuplicateError(lastErr)) {
-            lastErr = `duplicate certifyId (F008)`;
-          } else if (isCaptchaIpBlockError(lastErr)) {
-            sawIpBlock = true;
-          }
-          this.noteMintFailure(lastErr);
+    let lastErr: string | null = null;
+    let sawIpBlock = false;
+    for (let attempt = 1; attempt <= this.opts.solveRetries; attempt += 1) {
+      if (this.stopped || generation !== this.generation) throw new Error("captcha pool stopped");
+      try {
+        const param = await runCaptchaSolve(cfg.sceneId, cfg.region, cfg.prefix);
+        if (this.stopped || generation !== this.generation) throw new Error("captcha pool stopped");
+        if (!param) {
+          lastErr = "solver returned empty";
+          continue;
         }
-      }
-      // All retries failed. If any failure was an IP-level block, ask the
-      // caller to rotate the egress (Telegram network reset) so the next
-      // mint has a fresh IP instead of being stuck unable to mint.
-      if (sawIpBlock && this.opts.onCaptchaIpBlock) {
-        try {
-          this.opts.onCaptchaIpBlock(lastErr ?? "captcha ip block");
-        } catch (_) {
-          // callback is best-effort; never let it break the pool
+        if (this.isDuplicateParam(param)) {
+          lastErr = `duplicate certifyId ${parseCertifyId(param) ?? "?"}`;
+          continue;
         }
+        this.noteMintSuccess();
+        return param;
+      } catch (err) {
+        if (this.stopped || generation !== this.generation) throw err;
+        lastErr = err instanceof Error ? err.message : String(err);
+        if (isCaptchaDuplicateError(lastErr)) {
+          lastErr = `duplicate certifyId (F008)`;
+        } else if (isCaptchaIpBlockError(lastErr)) {
+          sawIpBlock = true;
+        }
+        this.noteMintFailure(lastErr);
       }
-      throw new Error(`captcha failed after ${this.opts.solveRetries} attempts: ${lastErr ?? "unknown"}`);
-    } finally {
-      this.activeSolves -= 1;
     }
+    // All retries failed. If any failure was an IP-level block, ask the
+    // caller to rotate the egress (Telegram network reset) so the next
+    // mint has a fresh IP instead of being stuck unable to mint.
+    if (sawIpBlock && this.opts.onCaptchaIpBlock) {
+      try {
+        this.opts.onCaptchaIpBlock(lastErr ?? "captcha ip block");
+      } catch (_) {
+        // callback is best-effort; never let it break the pool
+      }
+    }
+    throw new Error(`captcha failed after ${this.opts.solveRetries} attempts: ${lastErr ?? "unknown"}`);
   }
 
   private async solveOne(cfg: CaptchaConfig): Promise<string> {
-    return this.solveFresh(cfg);
+    const generation = this.generation;
+    this.activeSolves += 1;
+    let succeeded = false;
+    try {
+      const param = await this.solveFresh(cfg);
+      succeeded = true;
+      if (!this.stopped && generation === this.generation) this.pushToken(param);
+      return param;
+    } catch (err) {
+      if (generation === this.generation && this.activeSolves === 1) {
+        for (const fail of this.tokenWaiters.values()) fail(err);
+      }
+      throw err;
+    } finally {
+      this.activeSolves -= 1;
+      if ((succeeded || generation !== this.generation) && !this.stopped && this.cfg) this.pumpDemand(this.cfg);
+    }
   }
 
-  /**
-   * Empty-pool serve: race up to `emptyTakeRace` solves in parallel and
-   * resolve with the first success so the client waits for one mint, not a
-   * sequential retry chain. Extra successes are banked into the pool instead
-   * of being wasted; the race only rejects when every racer fails.
-   */
-  private solveRaced(cfg: CaptchaConfig): Promise<string> {
-    const racers = Math.max(1, Math.min(this.opts.emptyTakeRace, this.opts.solveConcurrency));
-    if (racers <= 1) return this.solveFresh(cfg);
-
-    return new Promise<string>((resolve, reject) => {
-      let pending = racers;
-      let served = false;
-      let lastErr: unknown = null;
-      for (let i = 0; i < racers; i += 1) {
-        this.solveFresh(cfg).then(
-          (param) => {
-            if (served) {
-              // Lost the race but minted a valid token — bank it.
-              this.pushToken(param);
-            } else {
-              served = true;
-              resolve(param);
-            }
-          },
-          (err) => {
-            lastErr = err ?? lastErr;
-          },
-        ).finally(() => {
-          pending -= 1;
-          if (pending === 0 && !served) {
-            reject(
-              lastErr instanceof Error
-                ? lastErr
-                : new Error(String(lastErr ?? "captcha race failed")),
-            );
-          }
-        });
-      }
-    });
+  /** Foreground takes share in-flight mints and only fill unused worker slots. */
+  private pumpDemand(cfg: CaptchaConfig): void {
+    if (this.stopped || this.tokenWaiters.size === 0) return;
+    const desired = Math.min(
+      this.opts.solveConcurrency,
+      Math.max(this.opts.emptyTakeRace, this.tokenWaiters.size),
+    );
+    const available = Math.max(0, desired - this.activeSolves);
+    for (let i = 0; i < available; i += 1) {
+      // Each failure has already notified waiters when no other mint remains.
+      void this.solveOne(cfg).catch(() => {});
+    }
   }
 
   private initGovernor(opts: CaptchaPoolOptions): void {

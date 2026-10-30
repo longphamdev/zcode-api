@@ -32,8 +32,9 @@ interface FetchedCaptchaConfig { enabled: boolean; prefix: string; sceneId: stri
 // Config snapshot — mirrors the real client's host `getClientConfigs`
 // (3.16.3 codingPlanSubscription): 1h TTL (`RRe=3600*1e3`), 15s timeout
 // (`Js=15e3`), in-flight request dedup, and NO negative cache — a failed
-// response said (absent captcha field included); only SUCCESSFUL fetches
-// write it (§H 十轮; the old 60s TTL + 15s neg-cache was self-invented
+// refresh must not replace the last successful snapshot (an absent captcha
+// field is an authoritative disable); only SUCCESSFUL fetches write it
+// (§H 十轮; the old 60s TTL + 15s neg-cache was self-invented
 // cadence refreshing 60× more often than the real client, and it manufactured
 // the #002 "Captcha config unavailable" storm).
 let cachedConfig: { value: FetchedCaptchaConfig | null; expiresAt: number } = { value: null, expiresAt: 0 };
@@ -41,7 +42,9 @@ let configsFetchInFlight: Promise<FetchedCaptchaConfig | null> | null = null;
 // Last successfully fetched config, including an authoritative disable.
 // Its region keeps serving pool takes through configs-fetch outages without
 // resurrecting a previously enabled config after the server disables it.
-let lastGoodCfg: FetchedCaptchaConfig | null = null;
+// undefined means no successful snapshot; null means captcha was absent.
+let lastGoodCfg: FetchedCaptchaConfig | null | undefined;
+let configGeneration = 0;
 
 type ConfigsFetch = typeof fetch;
 let configsFetch: ConfigsFetch | null = null;
@@ -53,9 +56,14 @@ export function __setConfigsFetchForTests(impl: ConfigsFetch | null): void {
 /** Test seam: clear the config caches — tests only. `keepLastGood` preserves
  *  the outage-fallback config (simulates snapshot expiry mid-outage). */
 export function __resetCaptchaConfigCacheForTests(keepLastGood = false): void {
+  resetConfigCache(keepLastGood);
+}
+
+function resetConfigCache(keepLastGood = false): void {
+  configGeneration++;
   cachedConfig = { value: null, expiresAt: 0 };
   configsFetchInFlight = null;
-  if (!keepLastGood) lastGoodCfg = null;
+  if (!keepLastGood) lastGoodCfg = undefined;
 }
 
 export function detectCaptchaChallenge(resp: Response): string | null {
@@ -67,6 +75,7 @@ export function detectCaptchaChallenge(resp: Response): string | null {
 async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaConfig | null> {
   if (cachedConfig.expiresAt > Date.now()) return cachedConfig.value;
   if (configsFetchInFlight) return configsFetchInFlight;
+  const generation = configGeneration;
   configsFetchInFlight = (async () => {
     const controller = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -110,14 +119,15 @@ async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaCon
       const cfg = json?.data?.configs?.captcha ?? null;
       // Snapshot write ONLY on a successful fetch (mirror: failures never
       // update the snapshot — the next call retries immediately).
+      if (generation !== configGeneration) return null;
       cachedConfig = { value: cfg, expiresAt: Date.now() + captchaConfigTtlMs() };
-      if (cfg) lastGoodCfg = cfg;
+      lastGoodCfg = cfg;
       return cfg;
     } catch {
       return null;
     } finally {
       clearTimeout(timer);
-      configsFetchInFlight = null;
+      if (generation === configGeneration) configsFetchInFlight = null;
     }
   })();
   return configsFetchInFlight;
@@ -143,17 +153,28 @@ function captchaConfigTtlMs(): number {
  *
  * Pool-first degradation: a configs-fetch outage never strands banked tokens
  * — with a last-good config on record the pool keeps serving (its region
- * rides along); the latest authoritative `enabled:false` remains disabled
+ * rides along) while expired snapshots refresh asynchronously. The latest
+ * successful disable (including an absent captcha field) remains disabled
  * through outages (§H 九轮: #002 live-烧 47s/16 次重试全因 configs 抖动，池内其实有货).
  */
 export async function getCaptchaToken(appVersion: string): Promise<{ verifyParam: string; region: string } | null> {
-  const cfg = (await fetchCaptchaConfig(appVersion)) ?? lastGoodCfg;
-  if (!cfg) throw new Error("Captcha config unavailable");
-  if (!cfg.enabled || !cfg.prefix || !cfg.sceneId) return null;
+  // A known snapshot serves immediately while one shared refresh runs. Await
+  // only the cold fetch: config endpoint latency must not strand banked tokens.
+  let cfg = lastGoodCfg;
+  if (cfg === undefined) {
+    await fetchCaptchaConfig(appVersion);
+    cfg = lastGoodCfg;
+  } else if (cachedConfig.expiresAt <= Date.now()) {
+    void fetchCaptchaConfig(appVersion);
+  }
+  if (cfg === undefined) throw new Error("Captcha config unavailable");
+  if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) return null;
   return { verifyParam: await takeCaptchaToken(cfg), region: cfg.region };
 }
 
 export function shutdownCaptcha(): void {
+  // Late refresh completion must not repopulate a stopped/reset facade.
+  resetConfigCache();
   try { shutdownCaptchaSolver(); } catch {}
   try { stopCaptchaPool(); } catch {}
 }
