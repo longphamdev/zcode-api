@@ -173,7 +173,10 @@ function isEntryUnavailableError(err: unknown): boolean {
   const e = err as { code?: string; message?: string };
   return (
     e?.code === "ERR_MODULE_NOT_FOUND" ||
-    /cannot find module|module not found/i.test(String(e?.message ?? ""))
+    /cannot find module|module not found/i.test(String(e?.message ?? "")) ||
+    // Bun reports an unloadable worker entry without Node's error code.
+    // Match its entry-point diagnostic, not arbitrary solver exceptions.
+    /^BuildMessage:\s*ModuleNotFound resolving .+ \(entry point\)$/i.test(String(e?.message ?? ""))
   );
 }
 

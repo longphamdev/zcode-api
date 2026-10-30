@@ -34,8 +34,10 @@ plan: coding-plan
 # CAPTCHA_ACQUIRE_BUDGET_MS=45000 bounds initial acquisition and retry backoff.
 # Expiry returns 503 without forwarding; client abort stops waiting immediately.
 # CAPTCHA_CONFIG_TIMEOUT_MS=15000 covers config headers AND the complete body.
-# CAPTCHA_CONFIG_TTL_MS=3600000 caches successful snapshots only. Refresh errors
-# preserve the last known config, including an explicit disabled state.
+# CAPTCHA_CONFIG_TTL_MS=3600000 caches successful snapshots only. Expired snapshots
+# refresh in the background while requests use the last successful config.
+# Completed refreshes apply to subsequent requests; failures preserve that config,
+# including disabled or absent captcha settings. Cold starts await the first fetch.
 # Non-numeric, non-finite, or non-positive values use the defaults above.
 
 providers:
