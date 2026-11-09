@@ -8,6 +8,7 @@ on:
   pull_request:
   push:
     branches: [master]
+  workflow_dispatch: # manual trigger — also the way to kick CI on forks with Actions newly enabled
 
 permissions:
   contents: read
