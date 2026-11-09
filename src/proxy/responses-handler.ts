@@ -175,7 +175,7 @@ export async function handleResponses(
   let reservation: import("../auth/pool.js").Reservation | null = null;
   if (opts.accountPool) {
     try {
-      reservation = await opts.accountPool.reserve({ signal: clientReq.signal });
+      reservation = await opts.accountPool.reserve({ signal: clientReq.signal, modelHint: req.model });
       cred = reservation.credential;
     } catch (err) {
       if (err instanceof AllAccountsCoolingError) {

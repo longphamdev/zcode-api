@@ -441,3 +441,20 @@ identity:
     expect(cfg.identity.refererOrigin).toBe("https://example.com");
   });
 });
+
+describe("accounts.pickStrategy config (#2 follow-up)", () => {
+  it("valid strategy parses", () => {
+    const path = writeYaml("accounts:\n  pickStrategy: most-remaining-quota\n");
+    const config = loadConfig(path);
+    expect(config.accounts?.pickStrategy).toBe("most-remaining-quota");
+  });
+  it("invalid strategy FAILS startup (no silent fallback)", () => {
+    const path = writeYaml("accounts:\n  pickStrategy: least-used\n");
+    expect(() => loadConfig(path)).toThrow(/pickStrategy/);
+  });
+  it("default is round-robin when absent", () => {
+    const path = writeYaml("");
+    const config = loadConfig(path);
+    expect(config.accounts?.pickStrategy).toBe("round-robin");
+  });
+});

@@ -148,7 +148,7 @@ export async function proxyRequest(
     // Multi-account path: pick an account via the pool. Single-account pools
     // pass through (no cap/queue), matching the legacy behavior exactly.
     try {
-      reservation = await opts.accountPool.reserve({ signal: clientReq.signal });
+      reservation = await opts.accountPool.reserve({ signal: clientReq.signal, modelHint: meta.model });
       cred = reservation.credential;
     } catch (err) {
       if (err instanceof AllAccountsCoolingError) {

@@ -582,7 +582,7 @@ export class AccountPool {
    * `signal`: abort while queued removes the waiter (no leaked slot later);
    * an already-aborted signal rejects immediately.
    */
-  async reserve(opts: { queueTimeoutMs?: number; signal?: AbortSignal; exclude?: ReadonlySet<string> } = {}): Promise<Reservation> {
+  async reserve(opts: { queueTimeoutMs?: number; signal?: AbortSignal; exclude?: ReadonlySet<string>; modelHint?: string } = {}): Promise<Reservation> {
     if (opts.signal?.aborted) {
       throw new AccountsBusyError(1, "request already aborted");
     }
@@ -590,7 +590,7 @@ export class AccountPool {
     // store via lockfile; pick from a store read at most 1s old.
     await this.syncIfStale();
     const singleAccount = this.accounts.size === 1;
-    const id = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined, opts.exclude);
+    const id = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined, opts.exclude, opts.modelHint);
     if (id) return this.makeReservation(id);
 
     // Nothing immediate. Distinguish the three failure shapes first.
@@ -603,7 +603,7 @@ export class AccountPool {
     }
     await this.enqueueWait(timeoutMs, opts.signal);
     // Woken by a release() (or timeout-throw above). Try again.
-    const retryId = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined, opts.exclude);
+    const retryId = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined, opts.exclude, opts.modelHint);
     if (retryId) return this.makeReservation(retryId);
     this.throwForPoolState();
     // release() woke us but another waiter took the slot — one more queued
@@ -611,17 +611,52 @@ export class AccountPool {
     throw new AccountsBusyError(1, "all accounts still busy after queue wake");
   }
 
-  private pickImmediate(capOverride?: number, exclude?: ReadonlySet<string>): string | null {
+  /**
+   * most-remaining-quota pick. Per-model comparison when a model hint is
+   * available and every candidate has a reliable bucket for THAT model.
+   * Candidates with missing/unreliable numbers can't be ranked — they fall
+   * back to round-robin among themselves rather than being treated as 0
+   * (a 0 reading can be an under-report; live finding #7).
+   */
+  private pickMostRemaining(ids: string[], modelHint?: string): string {
+    if (ids.length === 1) return ids[0];
+    const norm = (m: string): string => m.toLowerCase().replace(/^model:/, "");
+    const usable = modelHint
+      ? ids.filter((id) => {
+          const r = this.runtime.get(id)!;
+          if (r.remainingUnreliable) return false;
+          const bucket = r.models?.find((m) => norm(m.model) === norm(modelHint));
+          return bucket?.remainingUnits !== undefined;
+        })
+      : ids.filter((id) => {
+          const r = this.runtime.get(id)!;
+          return !r.remainingUnreliable && r.remainingUnits !== undefined;
+        });
+    if (usable.length === 0) {
+      // Nobody has reliable numbers → round-robin among all candidates.
+      const idx = this.rrCursor % ids.length;
+      this.rrCursor = (this.rrCursor + 1) % Number.MAX_SAFE_INTEGER;
+      return ids[idx];
+    }
+    const picked = usable.reduce((best, id) => {
+      const rB = this.runtime.get(best)!;
+      const rC = this.runtime.get(id)!;
+      const rem = (r: typeof rB): number =>
+        modelHint
+          ? (r.models?.find((m) => norm(m.model) === norm(modelHint))?.remainingUnits ?? -1)
+          : (r.remainingUnits ?? -1);
+      return rem(rC) > rem(rB) ? id : best;
+    }, usable[0]);
+    return picked;
+  }
+
+  private pickImmediate(capOverride?: number, exclude?: ReadonlySet<string>, modelHint?: string): string | null {
     const cap = capOverride ?? this.maxInFlight;
     const ids = this.pickable(cap).filter((id) => !exclude?.has(id));
     if (ids.length === 0) return null;
     let picked: string;
     if (this.strategy === "most-remaining-quota") {
-      picked = ids.reduce((best, id) => {
-        const rb = this.runtime.get(best)!.remainingUnits ?? -1;
-        const rc = this.runtime.get(id)!.remainingUnits ?? -1;
-        return rc > rb ? id : best;
-      }, ids[0]);
+      picked = this.pickMostRemaining(ids, modelHint);
     } else {
       // Round-robin on pick order (insertion order of the runtime map), not a
       // re-sorted id list: re-sorting would hand the revived account the next

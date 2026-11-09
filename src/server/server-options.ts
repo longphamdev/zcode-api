@@ -30,6 +30,7 @@ export function buildServerOptions(
       rateLimitCooldownMs: config.accounts?.rateLimitCooldownMs,
       reservationTimeoutMs: config.accounts?.reservationTimeoutMs,
     });
+    pool.setStrategy(config.accounts?.pickStrategy ?? "round-robin");
     opts.accountPool = pool;
     void pool.syncWithStore(); // async warm-up; first request syncs again if pending
     // Per-account quota poller (#6): feeds remainingUnits/health into the pool.

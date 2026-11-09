@@ -709,3 +709,80 @@ describe("AccountPool — unreliability flag lifecycle", () => {
     expect(pool.runtimeFor("a")!.remainingUnreliable).toBeUndefined();
   });
 });
+
+describe("AccountPool — pickStrategy config (#2 CLI follow-up)", () => {
+  it("most-remaining-quota compares the REQUESTED MODEL's bucket, not cross-model", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    pool.setStrategy("most-remaining-quota");
+    // A: 300M flash campaign. B: 3M glm-5.3 daily. Cross-model compare would
+    // always pick A — wrong when the request is glm-5.3 (B wins on-model).
+    pool.updateQuota("a", 300_000_000, clock.now(), [
+      { model: "model:glm-5.3-flash", remainingUnits: 300_000_000 },
+    ]);
+    pool.updateQuota("b", 3_000_000, clock.now(), [
+      { model: "model:glm-5.3", remainingUnits: 3_000_000 },
+    ]);
+    const r = await pool.reserve({ modelHint: "glm-5.3" });
+    expect(r.accountId).toBe("b"); // on-model: B has quota for glm-5.3
+    r.release();
+    const r2 = await pool.reserve({ modelHint: "glm-5.3-flash" });
+    expect(r2.accountId).toBe("a"); // flash → A's 300M
+    r2.release();
+  });
+
+  it("unreliable/missing numbers fall back to round-robin, never treated as 0", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    pool.setStrategy("most-remaining-quota");
+    // A: 300M reliable. B: 0 flagged unreliable (under-report).
+    pool.updateQuota("a", 300_000_000, clock.now(), [
+      { model: "model:glm-5.3-flash", remainingUnits: 300_000_000 },
+    ]);
+    pool.updateQuota("b", 0, clock.now(), [
+      { model: "model:glm-5.3-flash", remainingUnits: 0 },
+    ]);
+    const r = pool.runtimeFor("b")!;
+    r.remainingUnreliable = true;
+    // B's numbers are unreliable → excluded from ranking → RR among... usable
+    // set is [a] only (b has numbers but unreliable). most-remaining picks A.
+    const r2 = await pool.reserve({ modelHint: "glm-5.3-flash" });
+    expect(r2.accountId).toBe("a");
+    r2.release();
+  });
+
+  it("syncWithStore does NOT reset the round-robin cursor", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    // Interleave syncs (the 5s server timer) with picks:
+    const picks: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const r = await pool.reserve();
+      picks.push(r.accountId);
+      r.release();
+      await pool.syncWithStore(); // fires between every pick
+    }
+    const a = picks.filter((p) => p === "a").length;
+    const b = picks.filter((p) => p === "b").length;
+    expect(a).toBe(3); // cursor survived → even distribution
+    expect(b).toBe(3);
+  });
+
+  it("invalid strategy config fails startup (loader test path)", async () => {
+    // Covered in config loader tests below — here just pin the type values.
+    const strategies = ["round-robin", "most-remaining-quota"];
+    for (const s of strategies) {
+      const store = new FakeStore();
+      store.accounts = [stored("a")];
+      const pool = await makePool(store, new FakeClock());
+      pool.setStrategy(s as never);
+      expect(pool.snapshot()).toBeDefined();
+    }
+  });
+});

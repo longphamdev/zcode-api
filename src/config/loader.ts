@@ -79,6 +79,7 @@ const DEFAULTS = {
   CLAIM_POLL_INTERVAL_MS: 300000,
   CLAIM_COOLDOWN_MS: 600000,
   CLAIM_PLAN_ID: "",
+  ACCOUNTS_PICK_STRATEGY: "round-robin" as const,
   ACCOUNTS_MAX_IN_FLIGHT: 2,
   ACCOUNTS_QUEUE_TIMEOUT_MS: 5000,
   ACCOUNTS_RATE_LIMIT_COOLDOWN_MS: 30000,
@@ -400,7 +401,17 @@ function resolveIdentity(inp: IdentityInputs): ProxyIdentity {
 /** Cross-field validation after all fields are resolved. */
 function resolveAccountsConfig(raw: unknown): AccountsConfig {
   const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const strategyRaw = (process.env.ACCOUNTS_PICK_STRATEGY ?? obj.pickStrategy);
+  const strategy = typeof strategyRaw === "string" && (strategyRaw === "round-robin" || strategyRaw === "most-remaining-quota")
+    ? strategyRaw
+    : strategyRaw === undefined || strategyRaw === null || strategyRaw === ""
+      ? DEFAULTS.ACCOUNTS_PICK_STRATEGY
+      : null;
+  if (strategy === null) {
+    throw new Error(`accounts.pickStrategy must be "round-robin" or "most-remaining-quota" (got: ${JSON.stringify(strategyRaw)})`);
+  }
   return {
+    pickStrategy: strategy,
     maxInFlightPerAccount: resolvePositiveInt(
       process.env.ACCOUNTS_MAX_IN_FLIGHT ?? obj.maxInFlightPerAccount,
       DEFAULTS.ACCOUNTS_MAX_IN_FLIGHT, "accounts.maxInFlightPerAccount"),

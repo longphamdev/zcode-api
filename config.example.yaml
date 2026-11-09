@@ -48,6 +48,23 @@ models:
   - glm-5.3
   - glm-5.3-flash
 
+# Multi-account pool
+accounts:
+  # Account pick strategy: "round-robin" (default, even distribution — safest
+  # for free tier) or "most-remaining-quota" (drench traffic into the account
+  # with the most quota; compares the REQUESTED MODEL's bucket per-model and
+  # falls back to round-robin for accounts with unreliable/missing numbers).
+  pickStrategy: round-robin
+  # Max concurrent in-flight requests per account (free-tier accounts 429 with
+  # ~3 concurrent streams).
+  maxInFlightPerAccount: 2
+  # Queue wait when all accounts are at cap (ms). 0 disables queueing.
+  queueTimeoutMs: 5000
+  # Fallback cooling for a 429 without Retry-After (ms).
+  rateLimitCooldownMs: 30000
+  # Reservation watchdog: force-release slots held longer than this (ms).
+  reservationTimeoutMs: 900000
+
 # Configurable identity headers injected on every upstream request to mimic the
 # ZCode desktop client (User-Agent, X-Title, X-ZCode-Agent, HTTP-Referer).
 # X-ZCode-App-Version is not configurable: the app version is pinned in code

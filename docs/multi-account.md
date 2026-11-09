@@ -33,7 +33,12 @@ zcode-proxy auth logout                            # clears the PRIMARY only
 - **2+ accounts**: round-robin over healthy accounts (skip cooling/exhausted/expired),
   per-account `maxInFlightPerAccount` cap (default 4), short queue (`queueTimeoutMs`,
   default 5s, woken by release) → over-limit requests get 429 + `Retry-After`.
-- Optional strategy: `most-remaining-quota` (uses poller data).
+- **Strategy** (`accounts.pickStrategy` in config.yaml, env `ACCOUNTS_PICK_STRATEGY`):
+  - `round-robin` (default) — even distribution; safest for free-tier accounts
+  - `most-remaining-quota` — drench traffic into the account with the most quota;
+    compares the REQUESTED MODEL's bucket (per-model, never cross-model), and
+    accounts with unreliable/missing numbers fall back to round-robin among
+    themselves rather than being ranked as 0. Invalid config values fail startup.
 
 ## Account states
 
