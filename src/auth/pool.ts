@@ -126,6 +126,9 @@ export interface AccountRuntime {
   quotaExpiresAtMs?: number;
   /** From the quota poller (ticket #6); optional pick hint. */
   remainingUnits?: number;
+  /** True when the 0 reading conflicts with observed successful traffic
+   *  (billing balance can under-report — live finding, #7). */
+  remainingUnreliable?: boolean;
   /** From the poller; freshness marker (stale data never gates picking). */
   lastPolledAtMs?: number;
   inFlight: number;
@@ -174,6 +177,8 @@ export class AccountPool {
   private recent401s: Array<{ id: string; at: number }> = [];
   /** Recent 429 timestamps per account — the global-rate-limit detector. */
   private recent429s: Array<{ id: string; at: number }> = [];
+  /** Last successful request per account (ground truth vs balance polls). */
+  private lastSuccessAtMs = new Map<string, number>();
 
   private accounts = new Map<string, StoredAccount>();
   private runtime = new Map<string, AccountRuntime>();
@@ -440,7 +445,19 @@ export class AccountPool {
     const r = this.runtime.get(accountId);
     if (!r) return;
     r.lastPolledAtMs = polledAtMs;
-    if (remainingUnits !== undefined) r.remainingUnits = remainingUnits;
+    if (remainingUnits !== undefined) {
+      r.remainingUnits = remainingUnits;
+      // A 0 reading from an account with a recent successful request is kept
+      // but flagged unreliable (billing balance can under-report claimed-plan
+      // entitlements — live finding #7). Without the flag,
+      // most-remaining-quota would penalize a working account between polls
+      // (the flapping the review called out).
+      const lastSuccess = this.lastSuccessAtMs.get(accountId);
+      r.remainingUnreliable =
+        remainingUnits === 0 && lastSuccess !== undefined && polledAtMs - lastSuccess < 30 * 60_000
+          ? true
+          : undefined;
+    }
   }
 
   /** Poller reports the account's entitlement expiry (quotaExpiresAt). */
@@ -465,10 +482,16 @@ export class AccountPool {
    *  traffic fine — the claimed-plan entitlement does not surface there).
    */
   noteSuccess(accountId: string): void {
+    this.lastSuccessAtMs.set(accountId, this.now());
     const r = this.runtime.get(accountId);
     if (r) {
       r.consecutiveFailures = 0;
-      if (r.remainingUnits === 0) r.remainingUnits = undefined; // stale poll — request proved otherwise
+      if (r.remainingUnits === 0) {
+        // Stale 0 cleared AND flagged: the next poll may report 0 again, and
+        // the flag keeps most-remaining-quota from penalizing a working acc.
+        r.remainingUnits = undefined;
+        r.remainingUnreliable = true;
+      }
       if (r.status === "expired" || r.status === "exhausted") {
         // Healed: a successful authenticated interaction proves the
         // credential works and quota exists.

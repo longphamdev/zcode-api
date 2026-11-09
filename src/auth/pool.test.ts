@@ -623,7 +623,7 @@ describe("AccountPool — global-401 escape hatch", () => {
 });
 
 describe("AccountPool — request outranks balance poll (#7 finding)", () => {
-  it("a successful request invalidates a stale remaining=0 poll reading", async () => {
+  it("a successful request invalidates a stale remaining=0 poll reading; next 0 is flagged unreliable", async () => {
     const store = new FakeStore();
     store.accounts = [stored("a")];
     const clock = new FakeClock();
@@ -635,6 +635,15 @@ describe("AccountPool — request outranks balance poll (#7 finding)", () => {
     // A request succeeds — ground truth: the account HAS quota.
     pool.noteSuccess("a");
     expect(pool.runtimeFor("a")!.remainingUnits).toBeUndefined(); // stale 0 cleared
+    // The NEXT poll reports 0 again — recorded, but flagged unreliable so
+    // strategy/parsers never read it as fact (no more flapping blind spot):
+    clock.advance(5 * 60_000);
+    pool.updateQuota("a", 0, clock.now());
+    expect(pool.runtimeFor("a")!.remainingUnits).toBe(0);
+    expect(pool.runtimeFor("a")!.remainingUnreliable).toBe(true);
+    // A later poll with a non-zero reading clears the flag:
+    pool.updateQuota("a", 300, clock.now() + 60_000);
+    expect(pool.runtimeFor("a")!.remainingUnreliable).toBeFalsy(); // not flagged
   });
 
   it("internal cooling is clamped even with a huge upstream Retry-After", async () => {
@@ -646,5 +655,40 @@ describe("AccountPool — request outranks balance poll (#7 finding)", () => {
     pool.cool("a", clock.now() + 7 * 24 * 3600_000);
     const retryAt = pool.runtimeFor("a")!.retryAtMs!;
     expect(retryAt - clock.now()).toBeLessThanOrEqual(6 * 3600_000 + 1000); // clamped to 6h
+  });
+});
+
+describe("AccountPool — poll-0 flapping fix (review follow-up)", () => {
+  it("poll reports 0 again after a success → flagged unreliable, not silently trusted", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    // Poll cycle 1: 0 (stale under-report)
+    pool.updateQuota("a", 0, clock.now());
+    expect(pool.runtimeFor("a")!.remainingUnits).toBe(0);
+    // Request succeeds → ground truth, 0 cleared + flagged
+    pool.noteSuccess("a");
+    expect(pool.runtimeFor("a")!.remainingUnits).toBeUndefined();
+    expect(pool.runtimeFor("a")!.remainingUnreliable).toBe(true);
+    // Poll cycle 2: 0 again (within 30min of the success) → KEPT but flagged,
+    // so most-remaining-quota never penalizes the working account:
+    pool.updateQuota("a", 0, clock.now() + 5 * 60_000);
+    expect(pool.runtimeFor("a")!.remainingUnits).toBe(0);
+    expect(pool.runtimeFor("a")!.remainingUnreliable).toBe(true);
+    // And noteSuccess clears it again on the next successful request:
+    pool.noteSuccess("a");
+    expect(pool.runtimeFor("a")!.remainingUnits).toBeUndefined();
+  });
+
+  it("0 reading WITHOUT recent success is trusted (real exhaustion signal)", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    // No noteSuccess ever recorded — a 0 poll is the only signal we have:
+    pool.updateQuota("a", 0, clock.now());
+    expect(pool.runtimeFor("a")!.remainingUnits).toBe(0);
+    expect(pool.runtimeFor("a")!.remainingUnreliable).toBeUndefined();
   });
 });
