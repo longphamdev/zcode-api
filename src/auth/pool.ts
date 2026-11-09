@@ -65,9 +65,10 @@ export type AccountStatus = "healthy" | "cooling" | "exhausted" | "expired";
 
 export interface PoolOptions {
   /**
-   * Max concurrent in-flight requests per account. Streams from coding
-   * agents (Claude Code) hold a slot for minutes, so this stays generous.
-   * Default 4. Config: `accounts.maxInFlightPerAccount`.
+   * Max concurrent in-flight requests per account. Free-tier accounts 429
+   * with ~3 concurrent streams (live data, #7) — default 2 lets the queue
+   * absorb bursts instead of feeding the upstream limit. Config:
+   * `accounts.maxInFlightPerAccount`.
    */
   maxInFlightPerAccount?: number;
   /**
@@ -180,7 +181,7 @@ export class AccountPool {
   private credentialsAtLastSync = new Map<string, Credential>();
 
   constructor(private store: { listAccounts(): Promise<StoredAccount[]> }, opts: PoolOptions = {}) {
-    this.maxInFlight = opts.maxInFlightPerAccount ?? 4;
+    this.maxInFlight = opts.maxInFlightPerAccount ?? 2;
     this.queueTimeoutMs = opts.queueTimeoutMs ?? 5_000;
     this.rateLimitCooldownMs = opts.rateLimitCooldownMs ?? 30_000;
     this.reservationTimeoutMs = opts.reservationTimeoutMs ?? 15 * 60_000;
@@ -261,12 +262,54 @@ export class AccountPool {
     return this.accounts.size;
   }
 
+  /**
+   * Accounts that can serve traffic now or soon: healthy or cooling.
+   * Exhausted/expired are dead until a probe/poller proves otherwise —
+   * they must not count toward multi-account decisions (global guards,
+   * single-acc pass-through parity). With a 2-acc pool where one is dead,
+   * the live account behaves as single-acc.
+   */
+  usableCount(): number {
+    const t = this.now();
+    let n = 0;
+    for (const r of this.runtime.values()) {
+      if (r.status === "healthy" || r.status === "cooling") {
+        // A cooling account whose deadline passed is effectively usable.
+        if (r.status === "cooling" && r.retryAtMs !== undefined && r.retryAtMs > t) continue;
+        n++;
+      }
+    }
+    return n;
+  }
+
   // -- state transitions ----------------------------------------------------
 
-  /** Rate-limited: cool until `retryAtMs` (absolute unix ms). */
+  /**
+   * Rate-limited from an upstream `Retry-After` in SECONDS — the deadline is
+   * computed with the pool's own clock (handlers must not mix Date.now()
+   * with an injectable pool clock).
+   */
+  coolForSeconds(accountId: string, retryAfterSec?: number): void {
+    const until = retryAfterSec !== undefined && Number.isFinite(retryAfterSec)
+      ? this.now() + retryAfterSec * 1000
+      : undefined;
+    this.cool(accountId, until);
+  }
+
+  /**
+   * Rate-limited: cool until `retryAtMs` (absolute unix ms).
+   *
+   * Precedence rule: `exhausted`/`expired` OUTRANK `cooling`. A half-open
+   * probe (or any stray 429 on a dead account) must not downgrade a terminal
+   * state to cooling — that would resurrect the account early and burn the
+   * same failure (e.g. biz-1005) on every subsequent request. Exhausted
+   * accounts revive only via their own deadline, the poller, or a
+   * credential change.
+   */
   cool(accountId: string, retryAtMs?: number): void {
     const r = this.runtime.get(accountId);
     if (!r) return;
+    if (r.status === "exhausted" || r.status === "expired") return; // terminal outranks cooling
     const until = retryAtMs ?? this.now() + this.rateLimitCooldownMs;
     if (until <= this.now()) {
       // Expired cooldown → healthy again.
@@ -317,9 +360,10 @@ export class AccountPool {
    * almost certainly upstream-wide (gateway/auth incident) — callers should
    * stop marking accounts expired and surface the error instead.
    */
-  note401(accountId: string, atMs: number): void {
-    this.recent401s.push({ id: accountId, at: atMs });
-    this.recent401s = this.recent401s.filter((e) => atMs - e.at < this.global401WindowMs);
+  note401(accountId: string, atMs?: number): void {
+    const at = atMs ?? this.now();
+    this.recent401s.push({ id: accountId, at });
+    this.recent401s = this.recent401s.filter((e) => at - e.at < this.global401WindowMs);
   }
 
   /** True when >= 2 distinct accounts saw a 401 inside the recent window. */
@@ -354,6 +398,11 @@ export class AccountPool {
    * response. Requests arriving during a pool cooldown get
    * AllAccountsCoolingError with Retry-After = time remaining.
    */
+  /** coolAll with a Retry-After in SECONDS (pool-clock deadline). */
+  coolAllForSeconds(retryAfterSec: number): void {
+    this.coolAll(this.now() + retryAfterSec * 1000);
+  }
+
   coolAll(untilMs: number): void {
     for (const r of this.runtime.values()) {
       if (r.status === "healthy" || r.status === "cooling") {
@@ -364,9 +413,10 @@ export class AccountPool {
   }
 
   /** Record a 429 for `accountId` (global-rate-limit evidence window). */
-  note429(accountId: string, atMs: number): void {
-    this.recent429s.push({ id: accountId, at: atMs });
-    this.recent429s = this.recent429s.filter((e) => atMs - e.at < this.global401WindowMs);
+  note429(accountId: string, atMs?: number): void {
+    const at = atMs ?? this.now();
+    this.recent429s.push({ id: accountId, at });
+    this.recent429s = this.recent429s.filter((e) => at - e.at < this.global401WindowMs);
   }
 
   /** True when >= 2 distinct accounts saw a 429 inside the recent window. */

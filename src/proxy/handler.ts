@@ -590,27 +590,33 @@ export async function proxyRequest(
       }
     }
     if (upstreamResp.status === 429) {
-      // Single-account pass-through parity: a 429 on the only account must
-      // NOT cool it into blocking the next request — legacy behavior passes
-      // the 429 through and lets the client decide.
-      if (pool.accountCount() > 1) {
-        const ra = upstreamResp.headers.get("retry-after");
-        const retryAtMs = ra !== null && Number.isFinite(Number(ra))
-          ? Date.now() + Number(ra) * 1000
-          : undefined;
-        pool.note429(booked.accountId, Date.now());
-        // Global-429 evidence: many DISTINCT accounts 429ing in a short
-        // window means the limit is IP/service-wide — per-account cooling
-        // with 2 accounts would alternate drains. Cooldown the whole pool.
-        if (pool.isGlobal429()) {
-          const poolRetrySec = ra !== null && Number.isFinite(Number(ra)) ? Number(ra) : 30;
-          pool.coolAll(Date.now() + poolRetrySec * 1000);
-          if (debug) debugError(reqId, "global_429", `${booked.accountId} 429 — pool-wide cooldown ${poolRetrySec}s`);
-          console.log(`${reqId} pool: suspected GLOBAL 429 (service/IP-level) — pool cooldown ${poolRetrySec}s`);
-        } else {
-          pool.cool(booked.accountId, retryAtMs);
-          if (debug) debugError(reqId, "account_rate_limited", `${booked.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
-        }
+      // Single-acc parity is based on USABLE accounts (healthy/cooling), not
+      // stored accounts: with 2 stored but 1 exhausted, the live account IS
+      // effectively single — a 429 on it passes through (legacy behavior)
+      // instead of coolAll-ing a pool that has nowhere to rotate anyway.
+      const usable = pool.usableCount();
+      const ra = upstreamResp.headers.get("retry-after");
+      const retryAfterSec = ra !== null && Number.isFinite(Number(ra)) ? Number(ra) : undefined;
+      pool.note429(booked.accountId);
+      // Order matters: evaluate global evidence FIRST (it accumulates across
+      // sequential requests — A cools, then B 429ing is the second distinct
+      // account even though A is no longer usable at that instant).
+      if (pool.isGlobal429()) {
+        // Global-429: limit is IP/service-wide — cool the whole pool (dead
+        // accounts excluded by coolAll's status filter).
+        const poolRetrySec = retryAfterSec ?? 30;
+        pool.coolAllForSeconds(poolRetrySec);
+        if (debug) debugError(reqId, "global_429", `${booked.accountId} 429 — pool-wide cooldown ${poolRetrySec}s`);
+        console.log(`${reqId} pool: suspected GLOBAL 429 (service/IP-level) — pool cooldown ${poolRetrySec}s`);
+      } else if (usable > 1) {
+        // Respect the upstream Retry-After verbatim (free-tier limits are
+        // long — retrying early only prolongs the lockout).
+        pool.coolForSeconds(booked.accountId, retryAfterSec);
+        if (debug) debugError(reqId, "account_rate_limited", `${booked.accountId} cooling${retryAfterSec !== undefined ? ` ${retryAfterSec}s (upstream Retry-After)` : ""}`);
+      } else {
+        // Single usable account: pass-through parity (legacy behavior) — the
+        // client decides. Logging keeps the Retry-After measurable.
+        if (debug) debugError(reqId, "single_usable_429", `${booked.accountId} 429 — single usable account, pass-through${retryAfterSec !== undefined ? ` (upstream Retry-After: ${retryAfterSec}s)` : ""}`);
       }
     } else if (upstreamResp.ok && !classifiedQuotaExhausted) {
       // A 200-with-1005 is NOT a success (it heals exhausted — the exact
@@ -648,7 +654,7 @@ export async function proxyRequest(
         // window, the outage is upstream-wide (gateway/auth incident), not
         // per-account — don't burn the whole pool into "expired"; the client
         // gets the 401 and the incident is visible in logs.
-        pool.note401(failedAccountId, Date.now());
+        pool.note401(failedAccountId);
         // Suppression semantics (escape hatch): mark normally UNLESS the
         // global guard is active (>=2 distinct accounts within the window,
         // first burst only — repeated bursts mean real per-account death).
@@ -1001,6 +1007,7 @@ function passthroughResponse(
     "content-encoding",
     "cache-control",
     "x-request-id",
+    "retry-after",
     "anthropic-ratelimit-requests-limit",
     "anthropic-ratelimit-requests-remaining",
     "anthropic-ratelimit-requests-reset",
@@ -1260,9 +1267,14 @@ async function upstreamErrorPassthrough(
 ): Promise<Response> {
   const errBody = await upstreamResp.text().catch(() => "");
   printRow(reqId, format, meta, upstreamResp.status, started, headersAt, 0, 0, 0);
+  // Retry-After is operator- and client-relevant on rate-limit errors —
+  // forward it verbatim alongside the body.
+  const headers: Record<string, string> = { "content-type": upstreamResp.headers.get("content-type") ?? "application/json" };
+  const retryAfter = upstreamResp.headers.get("retry-after");
+  if (retryAfter !== null) headers["retry-after"] = retryAfter;
   return new Response(errBody, {
     status: upstreamResp.status,
-    headers: { "content-type": upstreamResp.headers.get("content-type") ?? "application/json" },
+    headers,
   });
 }
 

@@ -764,3 +764,92 @@ describe("proxyRequest — 1005 scan safety (#5 review follow-up)", () => {
     }
   });
 });
+
+describe("proxyRequest — 429 guard correctness (#7 live data)", () => {
+  it("acc1 exhausted + acc2 429 → only acc2 cools; client gets 429 with acc2's Retry-After (single-usable parity)", async () => {
+    const server = createServer((req2, res) => {
+      req2.on("data", () => {});
+      req2.on("end", () => {
+        const key = String(req2.headers.authorization ?? "").replace(/^Bearer /, "");
+        if (key === "a") {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ code: 1005, msg: "exceed quota limit", logid: "t" }));
+        } else {
+          res.writeHead(429, { "content-type": "application/json", "retry-after": "90" });
+          res.end('{"error":{"type":"rate_limited"}}');
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a"), stored("b")];
+      const pool = await makePool(store);
+      // Request 1: A 1005s → exhausted → rotate → B returns 429 (single usable
+      // at that instant since A is now dead) → pass-through parity: A stays
+      // exhausted, B NOT coolAll'd, client gets the 429 + B's Retry-After.
+      const resp = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(resp.status).toBe(429);
+      expect(resp.headers.get("retry-after")).toBe("90"); // upstream value verbatim
+      await resp.text();
+      expect(pool.runtimeFor("a")!.status).toBe("exhausted");
+      // B must NOT be cooling (single usable account → pass-through parity):
+      expect(pool.runtimeFor("b")!.status).toBe("healthy");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("exhausted account probed with a 429 stays exhausted (terminal outranks cooling)", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = new AccountPool(store, { now: clock.now, expiredHalfOpenMs: 60_000 });
+    await pool.syncWithStore();
+    pool.markExhausted("a");
+    // WITHIN the half-open window, a stray 429 arrives (e.g. the probe itself
+    // got rate-limited before the terminal error was classified):
+    clock.advance(10_000);
+    pool.cool("a", clock.now() + 90_000);
+    // Terminal state outranks cooling — no early resurrection:
+    expect(pool.runtimeFor("a")!.status).toBe("exhausted");
+    // The exhausted deadline is untouched by the cooling attempt:
+    expect(pool.runtimeFor("a")!.quotaExpiresAtMs).toBeGreaterThan(clock.now() + 25 * 60_000);
+  });
+
+  it("2 healthy accounts both 429ing → global branch fires (coolAll)", async () => {
+    const server = createServer((req2, res) => {
+      req2.on("data", () => {});
+      req2.on("end", () => {
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "45" });
+        res.end('{"error":{"type":"rate_limited"}}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a"), stored("b")];
+      const pool = await makePool(store);
+      // Request 1: A 429s → cooling (not global yet — single evidence).
+      const r1 = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(r1.status).toBe(429);
+      await r1.text();
+      expect(pool.runtimeFor("a")!.status).toBe("cooling");
+      // Request 2: B 429s → 2 usable accounts 429ing in window → coolAll.
+      const r2 = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(r2.status).toBe(429);
+      await r2.text();
+      expect(pool.runtimeFor("a")!.status).toBe("cooling");
+      expect(pool.runtimeFor("b")!.status).toBe("cooling");
+      // All-cooling → subsequent request gets AllAccountsCoolingError shape:
+      const r3 = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(r3.status).toBe(429);
+      expect(r3.headers.get("retry-after")).not.toBeNull();
+      await r3.text();
+    } finally {
+      server.close();
+    }
+  });
+});

@@ -164,7 +164,7 @@ export interface AsyncConfig {
  * proxy exactly.
  */
 export interface AccountsConfig {
-  /** Max concurrent in-flight requests per account. Ignored when only one account is stored. Default `4`. */
+  /** Max concurrent in-flight requests per account. Ignored when only one account is stored. Default `2` (free-tier accounts 429 with ~3 concurrent streams — see #7). */
   maxInFlightPerAccount: number;
   /** Queue wait cap (ms) when all accounts sit at their inflight cap. Default `5000`. `0` disables queueing. */
   queueTimeoutMs: number;
