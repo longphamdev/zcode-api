@@ -283,11 +283,18 @@ export async function proxyRequest(
   }
 
   const useOrderedTransport = shouldUseOrderedTransport(clientSession, hasCustomFetchImpl);
-  let upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, captchaHeaders, clientSession);
-  if (highspeedCard && highspeedAuth) {
-    highspeedOrigPairs = upstreamHeaderPairs;
-    upstreamHeaderPairs = applyHighspeedCardHeaders(upstreamHeaderPairs, highspeedCard, highspeedAuth);
-  }
+  const buildPairs = (): UpstreamHeaderPair[] => {
+    let pairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, captchaHeaders, clientSession);
+    if (highspeedCard && highspeedAuth) {
+      pairs = applyHighspeedCardHeaders(pairs, highspeedCard, highspeedAuth);
+      // Capture the carded pairs as the pre-accept-encoding-cap original —
+      // the card-rejection fallback restores exactly this set (was inline
+      // before the buildPairs refactor).
+      highspeedOrigPairs = pairs;
+    }
+    return pairs;
+  };
+  let upstreamHeaderPairs = buildPairs();
   let upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
   if (highspeedCard && highspeedAuth) {
     // dispatch reuses the pre-built Request whenever the signer returns the
@@ -391,8 +398,18 @@ export async function proxyRequest(
     });
   }
 
+  // ── Account failover loop (#5) ──
+  // Only account-level auth rejection (401) triggers rotation today; 429 and
+  // quota-exhausted marking happen in the health-bookkeeping block below but
+  // do NOT rotate mid-request (their semantics: cool/exhaust until a deadline,
+  // and the response itself is informative to the client). Max attempts =
+  // account count (each attempt burns a distinct account); requires pool mode.
   let upstreamResp: Response;
-  try {
+  const failoverAttempts = reservation ? opts.accountPool!.accountCount() : 1;
+  let attemptIndex = 0;
+  while (true) {
+    attemptIndex += 1;
+    try {
     // Transient connect failures (DNS blip, TLS reset, Bun "Unable to
     // connect") happen a few times a day against the gateway. Retry the
     // CONNECT twice with a short backoff before surfacing a 502 — the
@@ -483,13 +500,37 @@ export async function proxyRequest(
     }
   }
 
-  if (upstreamResp.status === 401 && startPlan) {
+  if (upstreamResp.status === 401 && !highspeedCard) {
+    // NOTE: a carded request's 401 is handled by the highspeed card-rejection
+    // fallback below (drop card, retry with normal auth, same account) — it
+    // is not an account-level rejection.
+    // 401 = upstream rejected the credential. There is no programmatic
+    // refresh in this codebase (OAuth re-login is interactive), so mark the
+    // account expired and — pool mode, attempts left — fail over to the next
+    // account NOW (headers not yet sent downstream; the request is replayable).
+    if (reservation) {
+      const pool = opts.accountPool!;
+      pool.markExpired(reservation.accountId);
+      if (debug) debugError(reqId, "account_expired", `${reservation.accountId} credential rejected upstream`);
+      reservation.release();
+      reservation = null;
+      if (attemptIndex < failoverAttempts) {
+        console.log(`${reqId} 401 on account — failing over (attempt ${attemptIndex + 1}/${failoverAttempts})`);
+        try {
+          const next = await pool.reserve({ signal: clientReq.signal });
+          reservation = next;
+          cred = next.credential;
+          upstreamHeaderPairs = buildPairs();
+          upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
+          continue; // re-enter the while loop: rebuild + dispatch with the new credential
+        } catch {
+          break; // no other account available — fall through to the error return
+        }
+      }
+    }
     if (debug) debugError(reqId, "start_plan_jwt_invalid", "JWT rejected upstream");
     printRow(reqId, format, meta, 401, started, headersAt, 0, 0, 0);
-    // Pool mode: a 401 is account-level auth rejection. Mark it so the NEXT
-    // request skips this account (full refresh+failover is ticket #5).
-    if (reservation && !startPlan) opts.accountPool!.markExpired(reservation.accountId);
-    return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
+    return errorResponse(401, "start_plan_jwt_invalid", "Credential rejected upstream for this account. Re-login: zcode-proxy auth login <provider> --add");
   }
 
   // highspeed selectionFallback（官方语义）：挂卡请求收到 401 / biz 3402
@@ -649,6 +690,7 @@ export async function proxyRequest(
   printRow(reqId, format, meta, upstreamResp.status, started, headersAt, 0, 0, 0);
   noteInFlightEnded();
   return finishWith(passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq)));
+  } // while (true) — account failover loop
 }
 
 export function shouldUseOrderedTransport(clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {

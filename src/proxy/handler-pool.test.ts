@@ -393,7 +393,10 @@ describe("proxyRequest — release wrapper data-path integrity", () => {
       serverKillers.push(() => {
         if (killed) return;
         killed = true;
-        res.destroy();
+        // Destroy the raw socket: a clean res.end() after destroy-pending
+        // writes can surface as a graceful EOF on some stacks; ECONNRESET is
+        // the behavior we're pinning.
+        res.socket?.destroy();
       });
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
@@ -443,5 +446,111 @@ describe("proxyRequest — release wrapper data-path integrity", () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe("proxyRequest — 401 failover + credential freshness (#5)", () => {
+  it("401 on account A → marks expired, fails over to B, client gets 200", async () => {
+    const apiKeys: string[] = [];
+    const server = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        const key = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+        apiKeys.push(key);
+        if (key === "a") {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end('{"error":{"type":"invalid_api_key","message":"key revoked"}}');
+        } else {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end('{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"glm-4.6","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}');
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a"), stored("b")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(resp.status).toBe(200);
+      await resp.text();
+      expect(apiKeys).toEqual(["a", "b"]); // one 401, one success
+      expect(pool.runtimeFor("a")!.status).toBe("expired"); // A out
+      // Subsequent requests skip A entirely:
+      const resp2 = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(resp2.status).toBe(200);
+      await resp2.text();
+      expect(apiKeys[2]).toBe("b");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("401 on the ONLY account (pass-through) → 401 to client, account expired, clear message", async () => {
+    const server = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end('{"error":{"type":"invalid_api_key"}}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(resp.status).toBe(401);
+      const body = (await resp.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("auth login");
+      expect(pool.runtimeFor("a")!.status).toBe("expired");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("credential freshness: re-login lands in the store → next reserve uses the NEW credential (no 5s wait)", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    // Injectable clock so the test can age past syncIfStale's 1s window
+    // deterministically (no real sleep).
+    const clock = new FakeClock();
+    const pool = new AccountPool(store, { now: clock.now });
+    await pool.syncWithStore();
+
+    // Simulate CLI re-login (another process writes the store):
+    store.accounts = [{ id: "a", credential: cred("a-rotated"), addedAt: 0 }];
+    clock.advance(1_500); // past the 1s freshness window
+    const r = await pool.reserve(); // reserve() calls syncIfStale → re-reads
+    expect(r.credential.apiKey).toBe("a-rotated");
+    r.release();
+  });
+
+  it("expired account recovering via store re-login becomes pickable again", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const pool = await makePool(store);
+    pool.markExpired("a");
+    expect(pool.hasPickable()).toBe(false);
+    // User re-logs in: the credential CHANGES → runtime state resets (the
+    // expired/cooling verdict belonged to the OLD credential).
+    store.accounts = [{ id: "a", credential: cred("a-new"), addedAt: 0 }];
+    await pool.syncWithStore();
+    expect(pool.runtimeFor("a")!.status).toBe("healthy");
+    expect(pool.hasPickable()).toBe(true);
+    const r = await pool.reserve();
+    expect(r.credential.apiKey).toBe("a-new");
+    r.release();
+  });
+
+  it("unchanged credential does NOT reset a sick account's runtime state", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const pool = await makePool(store);
+    pool.markExpired("a");
+    await pool.syncWithStore(); // same credential — state must survive
+    expect(pool.runtimeFor("a")!.status).toBe("expired");
   });
 });

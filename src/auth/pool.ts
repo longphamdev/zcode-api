@@ -151,6 +151,9 @@ export class AccountPool {
   private strategy: PickStrategy = "round-robin";
   private rrCursor = 0;
   private queue: QueueWaiter[] = [];
+  private lastSyncAtMs = 0;
+  private syncing: Promise<void> | null = null;
+  private credentialsAtLastSync = new Map<string, Credential>();
 
   constructor(private store: { listAccounts(): Promise<StoredAccount[]> }, opts: PoolOptions = {}) {
     this.maxInFlight = opts.maxInFlightPerAccount ?? 4;
@@ -160,13 +163,44 @@ export class AccountPool {
     this.now = opts.now ?? Date.now;
   }
 
+  /**
+   * Sync when the cache is older than `maxAgeMs` (default 1000ms). Runs at
+   * most once concurrently (single-flight): a burst of reserves triggers one
+   * store read, everyone awaits the same promise. Keeps re-login credentials
+   * fresh without waiting on the server's 5s sync timer.
+   */
+  async syncIfStale(maxAgeMs = 1_000): Promise<void> {
+    if (this.now() - this.lastSyncAtMs < maxAgeMs) return;
+    if (this.syncing) return this.syncing;
+    this.syncing = this.syncWithStore().finally(() => {
+      this.lastSyncAtMs = this.now();
+      this.syncing = null;
+    });
+    return this.syncing;
+  }
+
   /** Load accounts from the store. Runtime state of surviving ids is kept. */
   async syncWithStore(): Promise<void> {
     const stored = await this.store.listAccounts();
     const nextIds = new Set(stored.map((a) => a.id));
     this.accounts = new Map(stored.map((a) => [a.id, a]));
     for (const id of nextIds) {
-      if (!this.runtime.has(id)) {
+      const existingRuntime = this.runtime.get(id);
+      const existingCred = this.accounts.get(id)!.credential;
+      const prevCred = this.credentialsAtLastSync.get(id);
+      const credentialChanged =
+        prevCred !== undefined &&
+        (prevCred.apiKey !== existingCred.apiKey ||
+          prevCred.secret !== existingCred.secret ||
+          prevCred.jwt !== existingCred.jwt);
+      if (credentialChanged && existingRuntime && existingRuntime.status !== "healthy" && existingRuntime.inFlight === 0) {
+        // A re-login replaced the credential for a sick account — reset its
+        // runtime state so it rejoins the pool (expired/cooling/exhausted
+        // referred to the OLD credential).
+        this.runtime.set(id, { id, status: "healthy", inFlight: 0, consecutiveFailures: 0 });
+        continue;
+      }
+      if (!existingRuntime) {
         this.runtime.set(id, {
           id,
           status: "healthy",
@@ -175,9 +209,11 @@ export class AccountPool {
         });
       }
     }
+    this.credentialsAtLastSync = new Map([...this.accounts].map(([id, a]) => [id, a.credential]));
     for (const id of [...this.runtime.keys()]) {
       if (!nextIds.has(id)) this.runtime.delete(id); // removed from store
     }
+    this.lastSyncAtMs = this.now();
   }
 
   setStrategy(strategy: PickStrategy): void {
@@ -282,6 +318,9 @@ export class AccountPool {
     if (opts.signal?.aborted) {
       throw new AccountsBusyError(1, "request already aborted");
     }
+    // Freshness: a credential re-login (CLI, another process) lands in the
+    // store via lockfile; pick from a store read at most 1s old.
+    await this.syncIfStale();
     const singleAccount = this.accounts.size === 1;
     const id = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined);
     if (id) return this.makeReservation(id);
