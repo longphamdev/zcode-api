@@ -28,3 +28,4 @@ Android-APP/app/src/main/assets/server_bundle/server.cjs
 # scripts/build-fork-worker.ts (chained into every build:* script), never
 # committed.
 src/proxy/captcha-worker-entry.bundle.js
+credentials-backup.json
