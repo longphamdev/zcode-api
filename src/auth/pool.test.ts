@@ -580,3 +580,21 @@ describe("AccountPool — re-login state reset preserves inFlight", () => {
     expect(pool.runtimeFor("a")!.inFlight).toBe(0);
   });
 });
+
+describe("AccountPool — global-429 detector", () => {
+  it("2 distinct accounts 429ing in the window → isGlobal429; same account → not", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock, { global401WindowMs: 30_000 });
+    pool.note429("a", clock.now());
+    expect(pool.isGlobal429()).toBe(false);
+    pool.note429("a", clock.now() + 1000); // same account — not global
+    expect(pool.isGlobal429()).toBe(false);
+    pool.note429("b", clock.now() + 2000);
+    expect(pool.isGlobal429()).toBe(true);
+    clock.advance(35_000); // everything except the just-recorded note is pruned
+    pool.note429("a", clock.now());
+    expect(pool.isGlobal429()).toBe(false); // old evidence pruned
+  });
+});

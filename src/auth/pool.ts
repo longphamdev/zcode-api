@@ -160,6 +160,8 @@ export class AccountPool {
   private readonly now: () => number;
   /** Recent 401 timestamps per account — the global-outage detector. */
   private recent401s: Array<{ id: string; at: number }> = [];
+  /** Recent 429 timestamps per account — the global-rate-limit detector. */
+  private recent429s: Array<{ id: string; at: number }> = [];
 
   private accounts = new Map<string, StoredAccount>();
   private runtime = new Map<string, AccountRuntime>();
@@ -306,6 +308,19 @@ export class AccountPool {
   isGlobal401(): boolean {
     const cutoff = this.now() - this.global401WindowMs;
     const distinct = new Set(this.recent401s.filter((e) => e.at >= cutoff).map((e) => e.id));
+    return distinct.size >= 2;
+  }
+
+  /** Record a 429 for `accountId` (global-rate-limit evidence window). */
+  note429(accountId: string, atMs: number): void {
+    this.recent429s.push({ id: accountId, at: atMs });
+    this.recent429s = this.recent429s.filter((e) => atMs - e.at < this.global401WindowMs);
+  }
+
+  /** True when >= 2 distinct accounts saw a 429 inside the recent window. */
+  isGlobal429(): boolean {
+    const cutoff = this.now() - this.global401WindowMs;
+    const distinct = new Set(this.recent429s.filter((e) => e.at >= cutoff).map((e) => e.id));
     return distinct.size >= 2;
   }
 
