@@ -465,3 +465,29 @@ describe("AccountPool — exhausted revival semantics", () => {
     r.release();
   });
 });
+
+describe("AccountPool — watchdog aborts the request", () => {
+  it("watchdog firing aborts the reservation signal (upstream teardown)", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const pool = await makePool(store, new FakeClock(), { maxInFlightPerAccount: 1, reservationTimeoutMs: 40 });
+    const r1 = await pool.reserve();
+    let aborted = false;
+    r1.signal.addEventListener("abort", () => (aborted = true));
+    expect(aborted).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 80)); // watchdog fires
+    expect(aborted).toBe(true);
+    expect(r1.signal.aborted).toBe(true);
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+  });
+
+  it("signal is NOT aborted by a normal release", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const pool = await makePool(store, new FakeClock(), { reservationTimeoutMs: 10_000 });
+    const r = await pool.reserve();
+    r.release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(r.signal.aborted).toBe(false);
+  });
+});

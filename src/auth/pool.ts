@@ -117,6 +117,14 @@ export interface Reservation {
   readonly credential: Credential;
   /** Idempotent: safe to call from both `finally` and response close. */
   release(): void;
+  /**
+   * Aborts when the watchdog force-releases this reservation (or manually
+   * via `abortReservation`). Handlers should thread `signal` into the
+   * upstream dispatch so a watchdog firing also tears down the hung request
+   * — releasing the slot alone would let the request keep running with
+   * real concurrency above the cap.
+   */
+  readonly signal: AbortSignal;
 }
 
 /** Which pick strategy to use. */
@@ -351,6 +359,7 @@ export class AccountPool {
     r.inFlight++;
     let released = false;
     let watchdog: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
     const doRelease = () => {
       if (released) return; // idempotent
       released = true;
@@ -360,11 +369,14 @@ export class AccountPool {
     };
     if (this.reservationTimeoutMs > 0) {
       // Watchdog: a reservation that outlives the cap is force-released with
-      // a warning. Real timer (operational lifetime, not injectable-clock
-      // territory): tests use short timeouts.
+      // a warning AND an abort — releasing the slot alone would leave the
+      // upstream request running with real concurrency above the cap. Real
+      // timer (operational lifetime, not injectable-clock territory).
       watchdog = setTimeout(() => {
         if (released) return;
-        console.warn(`pool: reservation watchdog force-released account=${accountId} after ${Math.round(this.reservationTimeoutMs / 1000)}s (leaked slot suspected — hung stream or missing release path)`);
+        const heldSec = Math.round(this.reservationTimeoutMs / 1000);
+        console.warn(`pool: reservation watchdog force-released account=${accountId} held=${heldSec}s (leaked slot suspected — hung stream or missing release path); aborting request`);
+        try { controller.abort(new Error(`reservation watchdog fired after ${heldSec}s (account=${accountId})`)); } catch {}
         doRelease();
       }, this.reservationTimeoutMs);
       watchdog.unref?.();
@@ -373,6 +385,7 @@ export class AccountPool {
       accountId,
       credential: this.accounts.get(accountId)!.credential,
       release: doRelease,
+      signal: controller.signal,
     };
   }
 

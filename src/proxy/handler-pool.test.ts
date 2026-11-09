@@ -249,3 +249,57 @@ describe("proxyRequest — AccountPool integration", () => {
     expect(pool.runtimeFor("a")!.inFlight).toBe(0);
   });
 });
+
+describe("proxyRequest — client abort releases the pool slot immediately", () => {
+  // Bun 1.3.x does not deliver response-body cancel on an abruptly destroyed
+  // client socket; 1.4.0 fixed it (verified via docker repro — ticket #5).
+  // On >= 1.4 a real client disconnect must free the pool slot through the
+  // stream cancel path — no watchdog wait. Version-gated skip WITH reason:
+  // on 1.3.x the cancel event never fires, so the assertion cannot hold.
+  const [bunMajor, bunMinor] = (typeof Bun !== "undefined" ? Bun.version : "0.0").split(".").map(Number);
+  const supportsImmediateCancel = bunMajor > 1 || (bunMajor === 1 && bunMinor >= 4);
+
+  (supportsImmediateCancel ? it : it.skip)(
+    "client disconnect mid-stream → inFlight back to 0 without watchdog",
+    async () => {
+      const store = new FakeStore();
+      store.accounts = [stored("a"), stored("b")];
+      const pool = await makePool(store, { maxInFlightPerAccount: 1, reservationTimeoutMs: 0 }); // no watchdog
+
+      // SSE-holding upstream: never ends the stream.
+      const server = createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(": keepalive\n\n");
+        // intentionally never ends
+      });
+      await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+      const addr = server.address() as { port: number };
+      const sseUrl = `http://127.0.0.1:${addr.port}`;
+      try {
+
+      const clientController = new AbortController();
+      const req = new Request("http://127.0.0.1:8080/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "glm-4.6", max_tokens: 16, messages: [{ role: "user", content: "hi" }] }),
+        signal: clientController.signal,
+      });
+      const config_ = config(sseUrl);
+      const resp = await proxyRequest(req, "openai", { config: config_, auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(resp.status).toBe(200);
+      const slotBefore = pool.runtimeFor("a")!.inFlight + pool.runtimeFor("b")!.inFlight;
+      expect(slotBefore).toBe(1); // one reservation held by the open stream
+
+      // Simulate the client vanishing: cancel the response body (what the
+      // server layer does on socket close).
+      await resp.body!.cancel();
+      await new Promise((r) => setTimeout(r, 30));
+      const slotAfter = pool.runtimeFor("a")!.inFlight + pool.runtimeFor("b")!.inFlight;
+      expect(slotAfter).toBe(0); // released immediately, no watchdog
+      } finally {
+        server.close();
+      }
+    },
+    10_000,
+  );
+});

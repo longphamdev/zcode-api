@@ -362,7 +362,12 @@ export async function proxyRequest(
               headers: Object.fromEntries(outboundPairs),
               body: transformedBody ?? undefined,
             });
-        return sendUpstreamRequest(sendReq, outboundPairs, transformedBody, translateMode, useOrderedTransport, fetchImpl, clientReq.signal, hasCustomFetchImpl);
+        // Watchdog abort must tear down the upstream: combine the client's
+        // abort with the pool reservation's signal.
+        const dispatchSignal = reservation
+          ? AbortSignal.any([clientReq.signal, reservation.signal])
+          : clientReq.signal;
+        return sendUpstreamRequest(sendReq, outboundPairs, transformedBody, translateMode, useOrderedTransport, fetchImpl, dispatchSignal, hasCustomFetchImpl);
       },
     });
   };
@@ -561,20 +566,47 @@ export async function proxyRequest(
   // so double-wiring is safe. `finishWith` is identity in no-pool mode.
   const finishWith = (resp: Response): Response => {
     if (!reservation) return resp;
-    const releaseOnce = () => reservation!.release();
     // Debug-only account attribution — never leaks account ids to clients
     // unless the operator explicitly runs `serve debug`.
     if (debug && !resp.headers.has("x-zcode-account")) {
       resp.headers.set("x-zcode-account", reservation.accountId);
     }
     if (resp.body) {
-      // `pipeTo`'s promise settles on: full read, cancel (client abort), and
-      // error — every way the response body leaves this handler.
-      const [ownedForRelease, clientBody] = resp.body.tee();
-      ownedForRelease.pipeTo(new WritableStream({ write() {} })).catch(() => {}).finally(releaseOnce);
-      return new Response(clientBody, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+      // Wrap (not tee) the body so EVERY consumer path releases the pool
+      // slot: full read (pull exhaustion), client cancel (cancel() hook —
+      // Bun 1.4 semantics: a tee branch's cancel waits for the other branch,
+      // which deadlocks the release when the other consumer is a blackhole
+      // pipeTo on a never-ending stream), and error (pull rethrow + release).
+      const source = resp.body.getReader();
+      let released = false;
+      const releaseOnce = () => {
+        if (released) return;
+        released = true;
+        reservation!.release();
+      };
+      const wrapped = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const { done, value } = await source.read();
+            if (done) {
+              releaseOnce();
+              controller.close();
+            } else {
+              controller.enqueue(value);
+            }
+          } catch (err) {
+            releaseOnce();
+            controller.error(err);
+          }
+        },
+        cancel(reason) {
+          releaseOnce();
+          try { void source.cancel(reason); } catch {}
+        },
+      });
+      return new Response(wrapped, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
     }
-    releaseOnce();
+    reservation.release();
     return resp;
   };
 
