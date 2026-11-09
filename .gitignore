@@ -29,3 +29,4 @@ Android-APP/app/src/main/assets/server_bundle/server.cjs
 # committed.
 src/proxy/captcha-worker-entry.bundle.js
 credentials-backup.json
+data/
