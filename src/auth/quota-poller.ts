@@ -34,12 +34,27 @@ export interface PollerOptions {
   now?: () => number;
 }
 
-/** One account's billing-balance snapshot (shape from routes-quota.ts). */
+/** One model bucket from the billing balance (per-model — buckets are never
+ *  summed across models: GLM-5.3 and GLM-5.3-Flash are separate grants). */
+export interface ModelQuota {
+  /** Capability matcher from upstream, e.g. "model:glm-5.3-flash". */
+  model: string;
+  totalUnits?: number;
+  usedUnits?: number;
+  remainingUnits?: number;
+  /** Bucket expiry (unix ms) — daily grants reset here. */
+  expiresAtMs?: number;
+}
+
+/** One account's billing-balance snapshot. */
 export interface QuotaPollResult {
   ok: boolean;
+  /** Aggregate across models — display only; strategy uses per-model. */
   remainingUnits?: number;
-  /** Entitlement expiry (unix ms) when upstream reports it. */
+  /** Earliest bucket expiry (unix ms) — the daily reset deadline. */
   quotaExpiresAtMs?: number;
+  /** Per-model buckets (the real shape — never sum these for decisions). */
+  models?: ModelQuota[];
   error?: string;
   lastPolledAtMs?: number;
 }

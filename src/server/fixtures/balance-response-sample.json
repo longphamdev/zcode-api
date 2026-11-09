@@ -1,0 +1,112 @@
+{
+  "comment": "Live-captured billing balance response 2026-11-09, redacted (ids are opaque upstream UUIDs, no credentials). Shape: data.plans[] (grant definitions, campaign entitlements with future effective_at) + data.balances[] (per-model buckets with snake_case used/remaining). One bucket PER MODEL — glm-5.3 and glm-5.3-flash are separate grants. The campaign entitlement (zcode-v3-start-plan-1109, 300M flash) has effective_at in the future and therefore NO bucket yet.",
+  "httpStatus": 200,
+  "body": {
+    "code": 0,
+    "msg": "",
+    "data": {
+      "server_time": 1794227969,
+      "plans": [
+        {
+          "user_plan_id": "upl_redacted_1",
+          "plan_id": "zcode-v3-start-plan-1109",
+          "name": "ZCODE GLOBAL BUILD",
+          "description": "",
+          "priority": 111,
+          "status": "active",
+          "starts_at": 1794224181,
+          "ends_at": 1794272400,
+          "entitlements": [
+            {
+              "entitlement_id": "ent-redacted-1",
+              "show_name": "GLM-5.3-Flash",
+              "meter": "model_usage",
+              "unit_type": "token",
+              "capabilities": ["model:glm-5.3-flash"],
+              "grant_units": 300000000,
+              "period": "one_time",
+              "priority": 101,
+              "effective_at": 1794236400
+            }
+          ]
+        },
+        {
+          "user_plan_id": "upl_redacted_2",
+          "plan_id": "zcode-v3-start-plan-0817",
+          "name": "ZCode Start Plan",
+          "description": "免费 GLM 旗舰模型体验",
+          "priority": 90,
+          "status": "active",
+          "starts_at": 1794222938,
+          "ends_at": 1794585599,
+          "entitlements": [
+            {
+              "entitlement_id": "ent_2_0817_glm_5p3",
+              "show_name": "GLM-5.3",
+              "meter": "model_usage",
+              "unit_type": "token",
+              "capabilities": ["model:glm-5.3"],
+              "grant_units": 3000000,
+              "period": "daily",
+              "priority": 110,
+              "effective_at": 0
+            },
+            {
+              "entitlement_id": "ent_2_0817_glm_5p3f",
+              "show_name": "GLM-5.3-Flash",
+              "meter": "model_usage",
+              "unit_type": "token",
+              "capabilities": ["model:glm-5.3-flash"],
+              "grant_units": 5000000,
+              "period": "daily",
+              "priority": 80,
+              "effective_at": 0
+            }
+          ]
+        }
+      ],
+      "balances": [
+        {
+          "bucket_id": "bucket_redacted_1",
+          "user_plan_id": "upl_redacted_2",
+          "plan_id": "zcode-v3-start-plan-0817",
+          "entitlement_id": "ent_2_0817_glm_5p3",
+          "show_name": "GLM-5.3",
+          "meter": "model_usage",
+          "unit_type": "token",
+          "capabilities": ["model:glm-5.3"],
+          "priority": 110,
+          "plan_priority": 90,
+          "entitlement_priority": 110,
+          "total_units": 3000000,
+          "used_units": 0,
+          "remaining_units": 3000000,
+          "available_units": 3000000,
+          "period_start": 1794153600,
+          "period_end": 1794239999,
+          "expires_at": 1794239999
+        },
+        {
+          "bucket_id": "bucket_redacted_2",
+          "user_plan_id": "upl_redacted_2",
+          "plan_id": "zcode-v3-start-plan-0817",
+          "entitlement_id": "ent_2_0817_glm_5p3f",
+          "show_name": "GLM-5.3-Flash",
+          "meter": "model_usage",
+          "unit_type": "token",
+          "capabilities": ["model:glm-5.3-flash"],
+          "priority": 80,
+          "plan_priority": 90,
+          "entitlement_priority": 80,
+          "total_units": 5000000,
+          "used_units": 7194,
+          "remaining_units": 4992806,
+          "available_units": 4992806,
+          "period_start": 1794153600,
+          "period_end": 1794239999,
+          "expires_at": 1794239999
+        }
+      ]
+    }
+  }
+}
