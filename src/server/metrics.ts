@@ -129,6 +129,11 @@ export class MetricsRegistry {
 
   /** Manual/auto claim outcomes per account. */
   claims = new Map<string, { claimed: number; failed: number; lastPlan?: string; lastAt?: number }>();
+  /** Latest claimable plans per account (from the auto-claim preview poll). */
+  claimable = new Map<string, Array<{ planId: string; name: string }>>();
+  recordClaimable(accountId: string, plans: Array<{ planId: string; name: string }>): void {
+    this.claimable.set(accountId, plans);
+  }
   recordClaim(accountId: string, result: "claimed" | "failed", planId?: string): void {
     const c = this.claims.get(accountId) ?? { claimed: 0, failed: 0 };
     c[result === "claimed" ? "claimed" : "failed"]++;
@@ -177,6 +182,7 @@ export class MetricsRegistry {
     pollHistory: Record<string, PollSample[]>;
     transitions: TransitionLog[];
     claims: Record<string, { claimed: number; failed: number; lastPlan?: string; lastAt?: number }>;
+    claimable: Record<string, Array<{ planId: string; name: string }>>;
     busyGlobal: number;
     note: string;
   } {
@@ -185,6 +191,7 @@ export class MetricsRegistry {
       pollHistory: Object.fromEntries([...this.polls.entries()]),
       transitions: [...this.transitions],
       claims: Object.fromEntries([...this.claims.entries()]),
+      claimable: Object.fromEntries([...this.claimable.entries()]),
       busyGlobal: this.busyGlobal,
       note: "In-memory counters — reset on proxy restart. Tokens from response usage where available.",
     };

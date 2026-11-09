@@ -94,16 +94,22 @@ function render(d) {
     const cls = t.quota1005 > 0 ? "warn" : "ok";
     const ci = d.claims[a.id];
     const claimInfo = ci ? ci.claimed + "✓/" + ci.failed + "✗" : "—";
-    h += "<tr><td>" + esc(a.label || a.id.slice(0, 8)) + "</td><td class='" + cls + "'>" + esc(a.status) + "</td><td>" + fmt(t.requests) + "</td><td>" + fmt(t.success) + "</td><td>" + fmt(t.quota1005) + "</td><td>" + fmt(t.rate429) + "</td><td>" + fmt(t.auth401) + "</td><td>" + fmt(t.tokensUsed) + "</td><td><button class='claimbtn' data-acc='" + esc(a.id) + "' style='background:#1f6feb;color:#fff;border:none;padding:2px 8px;cursor:pointer;font-family:inherit;'>Claim</button> <span class='meta'>" + esc(claimInfo) + "</span></td></tr>";
+    const claimable = d.claimable && d.claimable[a.id] && d.claimable[a.id].length > 0;
+    const claimCell = claimable
+      ? "<button class='claimbtn' data-acc='" + esc(a.id) + "' style='background:#1f6feb;color:#fff;border:none;padding:2px 8px;cursor:pointer;font-family:inherit;'>Claim " + d.claimable[a.id].length + "</button> <span class='meta'>" + esc(claimInfo) + "</span>"
+      : "<span class='meta'>" + esc(claimInfo) + " · không có gì claim</span>";
+    h += "<tr><td>" + esc(a.label || a.id.slice(0, 8)) + "</td><td class='" + cls + "'>" + esc(a.status) + "</td><td>" + fmt(t.requests) + "</td><td>" + fmt(t.success) + "</td><td>" + fmt(t.quota1005) + "</td><td>" + fmt(t.rate429) + "</td><td>" + fmt(t.auth401) + "</td><td>" + fmt(t.tokensUsed) + "</td><td>" + claimCell + "</td></tr>";
   }
+  h += "<tr><td><b>busyGlobal</b></td><td colspan='7'>" + fmt(d.busyGlobal) + " (429 từ chính proxy — queue/cap)</td></tr>";
+  document.getElementById("accounts").innerHTML = h;
   document.querySelectorAll(".claimbtn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       btn.textContent = "…";
       try {
-        const resp = await fetch("/admin/claim", {
+        const resp = await authedFetch("/admin/claim", {
           method: "POST",
-          headers: { "content-type": "application/json", authorization: "Bearer " + (sessionStorage.getItem("zcode-admin-key") ?? "") },
+          headers: { "content-type": "application/json" },
           body: JSON.stringify({ accountId: btn.dataset.acc }),
         });
         const j = await resp.json();
@@ -115,8 +121,6 @@ function render(d) {
       }
     });
   });
-  h += "<tr><td><b>busyGlobal</b></td><td colspan='7'>" + fmt(d.busyGlobal) + " (429 từ chính proxy — queue/cap)</td></tr>";
-  document.getElementById("accounts").innerHTML = h;
 
   // Per-model distribution + share %
   h = "<tr><th>acc</th><th>model</th><th>requests</th><th>% phân phối</th><th>success</th><th>1005</th><th>429</th><th>Retry-After cuối</th><th>tokens</th></tr>";

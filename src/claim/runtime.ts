@@ -94,6 +94,7 @@ export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimSch
       if (!token) throw new Error("captcha config flipped to disabled between gate and mint");
       return { verifyParam: token.verifyParam, region: token.region || undefined };
     },
+    onClaimable: (accountId, plans) => metricsRegistry.recordClaimable(accountId, plans),
     captchaRequired: (accountId?: string) =>
       claimCaptchaRequired(config, async () => {
         const accounts: StoredAccount[] = await listAccounts().catch(() => []);

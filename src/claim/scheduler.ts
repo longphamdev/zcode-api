@@ -42,6 +42,9 @@ export interface ClaimSchedulerDeps {
   createClient(jwt: string): ClaimGateway;
   getCaptcha(): Promise<{ verifyParam: string; region?: string }>;
   captchaRequired?: (accountId: string) => Promise<boolean> | boolean;
+  /** Dashboard feed: called after each preview with the claimable plans seen
+   *  for this account (empty array = nothing claimable right now). */
+  onClaimable?: (accountId: string, plans: Array<{ planId: string; name: string }>) => void;
   config: ClaimSchedulerConfig;
   log?: (message: string) => void;
   now?: () => number;
@@ -112,11 +115,17 @@ export class ClaimScheduler {
       // 404 = campaign endpoint not deployed yet (the expected pre-launch state
       // for weekend plans); poll at normal cadence instead of error backoff.
       if (err instanceof ClaimPreviewError && err.status === 404) {
+        this.deps.onClaimable?.(currentAccountId, []);
         this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
         return { action: "idle" };
       }
+      this.deps.onClaimable?.(currentAccountId, []);
       return this.errorBackoff(`preview failed: ${(err as Error).message}`);
     }
+    this.deps.onClaimable?.(
+      currentAccountId,
+      plans.map((p) => ({ planId: p.planId, name: p.name })),
+    );
     if (plans.length === 0) {
       this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
       return { action: "idle" };
