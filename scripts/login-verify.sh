@@ -4,7 +4,7 @@ set -e
 cd /home/longphamdev/codespaces/zcode-api
 LABEL=$1
 echo "=== Login $LABEL — mở URL, authorize, đợi hoàn tất..."
-docker run --rm -it -v /home/longphamdev/codespaces/zcode-api/data/auth:/data/auth zcode-proxy:local bun /app/index.js auth login zai --label "$LABEL"
+docker run --rm -it -e ZCODE_PROXY_STORE_DIR=/data/auth -v /home/longphamdev/codespaces/zcode-api/data/auth:/data/auth zcode-proxy:local bun /app/index.js auth login zai --label "$LABEL"
 if [ -f ./data/auth/credentials.json ]; then
   echo "✓ credentials.json EXISTS in ./data/auth"
   python3 -c "
