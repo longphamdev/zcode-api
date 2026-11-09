@@ -63,6 +63,10 @@ export class AccountsBusyError extends Error {
 
 export type AccountStatus = "healthy" | "cooling" | "exhausted" | "expired";
 
+/** Internal cooling clamp — a weird upstream Retry-After (days) must not lock
+ *  an account out of rotation for that long. Client sees the verbatim header. */
+const MAX_COOLING_MS = 6 * 60 * 60_000;
+
 export interface PoolOptions {
   /**
    * Max concurrent in-flight requests per account. Free-tier accounts 429
@@ -310,7 +314,12 @@ export class AccountPool {
     const r = this.runtime.get(accountId);
     if (!r) return;
     if (r.status === "exhausted" || r.status === "expired") return; // terminal outranks cooling
-    const until = retryAtMs ?? this.now() + this.rateLimitCooldownMs;
+    let until = retryAtMs ?? this.now() + this.rateLimitCooldownMs;
+    // Clamp: a weird upstream Retry-After (days) must not lock an account out
+    // of rotation for that long. The client still sees the verbatim header —
+    // this clamp bounds only the POOL's internal cooling.
+    const maxCooling = this.now() + MAX_COOLING_MS;
+    if (until > maxCooling) until = maxCooling;
     if (until <= this.now()) {
       // Expired cooldown → healthy again.
       r.status = "healthy";
@@ -448,11 +457,18 @@ export class AccountPool {
   }
 
   /** A healthy response resets the consecutive-failure counter and heals a
-   *  half-open probe / poller success (the credential works again). */
+   *  half-open probe / poller success (the credential works again).
+   *
+   *  Ground truth rule: the REQUEST response outranks the balance poll. A
+   *  successful request invalidates a stale "0 remaining" reading (observed
+   *  live: the billing balance can report 0 for an account that serves
+   *  traffic fine — the claimed-plan entitlement does not surface there).
+   */
   noteSuccess(accountId: string): void {
     const r = this.runtime.get(accountId);
     if (r) {
       r.consecutiveFailures = 0;
+      if (r.remainingUnits === 0) r.remainingUnits = undefined; // stale poll — request proved otherwise
       if (r.status === "expired" || r.status === "exhausted") {
         // Healed: a successful authenticated interaction proves the
         // credential works and quota exists.

@@ -333,6 +333,11 @@ export async function handleQuota(
       ...(a.label ? { label: a.label } : {}),
       status: r?.status ?? "healthy",
       ...(r?.remainingUnits !== undefined ? { remainingUnits: r.remainingUnits } : {}),
+      // Billing balance can report 0 for an account that serves traffic fine
+      // (claimed-plan entitlements don't surface there — live finding #7).
+      // A healthy account reading 0 is flagged unreliable rather than
+      // presented as fact.
+      ...(r?.remainingUnits === 0 && (r?.status ?? "healthy") === "healthy" ? { remainingUnreliable: true } : {}),
       ...(lastPolledAtMs !== undefined ? { lastPolledAt: Math.floor(lastPolledAtMs / 1000) } : {}),
       ...(lastPolledAtMs !== undefined && Date.now() - lastPolledAtMs > STALE_MS ? { stale: true } : {}),
       // tokenExpiresAt: credential expiry (OAuth) — JWTs here carry no exp.

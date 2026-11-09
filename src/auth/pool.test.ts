@@ -621,3 +621,30 @@ describe("AccountPool — global-401 escape hatch", () => {
     expect(pool.shouldSuppressExpiredMarking()).toBe(false); // ...but marking allowed
   });
 });
+
+describe("AccountPool — request outranks balance poll (#7 finding)", () => {
+  it("a successful request invalidates a stale remaining=0 poll reading", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    // Poller reports 0 (observed live: claimed-plan entitlement doesn't
+    // surface in the balance endpoint):
+    pool.updateQuota("a", 0, clock.now());
+    expect(pool.runtimeFor("a")!.remainingUnits).toBe(0);
+    // A request succeeds — ground truth: the account HAS quota.
+    pool.noteSuccess("a");
+    expect(pool.runtimeFor("a")!.remainingUnits).toBeUndefined(); // stale 0 cleared
+  });
+
+  it("internal cooling is clamped even with a huge upstream Retry-After", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    // Upstream sends Retry-After = 7 days (weird header):
+    pool.cool("a", clock.now() + 7 * 24 * 3600_000);
+    const retryAt = pool.runtimeFor("a")!.retryAtMs!;
+    expect(retryAt - clock.now()).toBeLessThanOrEqual(6 * 3600_000 + 1000); // clamped to 6h
+  });
+});

@@ -58,6 +58,25 @@ zcode-proxy auth logout                            # clears the PRIMARY only
 | 5xx / connect errors | existing proxy retry policy, no rotation |
 | Unknown 4xx | logged with status + redacted headers + body preview (evidence for matchers); no rotation |
 
+## Balance endpoint caveat (live finding)
+
+The billing-balance endpoint can report `remainingUnits: 0` for an account
+that serves traffic fine (observed with a claimed plan whose entitlement
+does not surface there). Ground truth is the REQUEST response, not the poll:
+
+- a successful request invalidates a stale `0` reading (pool clears it)
+- `/quota` flags a healthy account reading 0 as `remainingUnreliable: true`
+- poller data is a hint, never the sole basis for exhausting an account
+
+## Auto-claim scope
+
+The claim scheduler (auto "weekend plan" claiming) runs for the **PRIMARY
+account only** — `loadCredential()` resolves the primary, and there is exactly
+one scheduler instance. Adding accounts to the pool does NOT extend claiming
+to them; multi-acc auto-claiming was deliberately excluded (captcha from one
+IP across N accounts is a ban risk). If a non-primary account needs quota,
+claim it manually on the web.
+
 ## Accepted limitations
 
 - **Async jobs do not failover mid-job**: the job runs on a copied credential; if the
