@@ -247,6 +247,11 @@ describe("checkForUpdate", () => {
     const result = await checkForUpdate("4.7.5", {
       fetchImpl: respondWith(BODY),
       env: { container: "podman" },
+      // The suite itself may run inside a container (CI): the real marker
+      // probe would see /.dockerenv and answer "docker" before reading the
+      // env. Pin the probe to env-only so this test stays environment-
+      // independent (marker precedence is covered by detectContainerRuntime).
+      containerMarkerExists: () => false,
     });
     expect(result.kind).toBe("update");
     if (result.kind !== "update") return;

@@ -303,3 +303,145 @@ describe("proxyRequest — client abort releases the pool slot immediately", () 
     10_000,
   );
 });
+
+describe("proxyRequest — release wrapper data-path integrity", () => {
+  let serverKillers: Array<() => void> = [];
+  beforeEach(() => { serverKillers = []; });
+  it("byte-for-byte: body through the wrapper matches the upstream body exactly", async () => {
+    // Large body with tricky boundaries: multi-byte UTF-8 split across chunk
+    // edges, SSE-like \n\n sequences, chunked framing handled upstream.
+    const chunks = [
+      Buffer.from('{"id":"msg","content":"'),
+      Buffer.from("tra"),
+      Buffer.from("ẻ Ember—emoji 🎌 splits"),
+      Buffer.from("\n\n"),
+      Buffer.from('"}'),
+    ];
+    const expected = Buffer.concat(chunks);
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      for (const c of chunks) res.write(c);
+      res.end();
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "anthropic", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      const received = Buffer.from(await resp.arrayBuffer());
+      expect(received.equals(expected)).toBe(true);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("backpressure: a slow client does not make the proxy buffer the whole upstream", async () => {
+    // Upstream emits 20 chunks with pauses; the client reads slowly. Assert
+    // the client receives data incrementally (first chunk arrives while the
+    // upstream is still sending), which proves no full-buffering.
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      let i = 0;
+      const timer = setInterval(() => {
+        res.write(`chunk-${i};`);
+        i++;
+        if (i >= 20) {
+          clearInterval(timer);
+          res.end();
+        }
+      }, 30);
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "anthropic", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      const reader = resp.body!.getReader();
+    const t0 = Date.now();
+    const first = await reader.read(); // first chunk
+    const firstArrival = Date.now() - t0;
+    expect(firstArrival).toBeLessThan(200); // upstream total is 600ms — incremental!
+    expect(new TextDecoder().decode(first.value)).toContain("chunk-0");
+    let received = new TextDecoder().decode(first.value);
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += new TextDecoder().decode(value);
+    }
+    expect(received).toContain("chunk-19");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("error after partial stream: releases exactly once, client sees the error (no hang)", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write("data: partial\n\n");
+      // Destroy deterministically AFTER the client has read the first chunk
+      // (the test pulls the trigger) — a fixed timer races the scheduler
+      // under load and makes this test flaky.
+      let killed = false;
+      serverKillers.push(() => {
+        if (killed) return;
+        killed = true;
+        res.destroy();
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "anthropic", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      const reader = resp.body!.getReader();
+    // First read gets the partial data; then upstream dies; the next read
+    // rejects (no hang).
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    for (const kill of serverKillers) kill();
+    await expect(reader.read()).rejects.toThrow();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0); // released exactly once via error path
+    // Idempotency: an extra cancel after error doesn't double-release
+    // (cancel on an already-errored reader rejects — that's fine, the point
+    // is the pool slot stays at 0).
+    await reader.cancel().catch(() => {});
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("cancel + pull-exhaustion together: release still exactly once", async () => {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"done":true}');
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "anthropic", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      // Race full read against an immediate cancel — the wrapper's idempotent
+      // release must keep inFlight at 0 in every interleaving.
+      const reader = resp.body!.getReader();
+      await Promise.allSettled([reader.read(), reader.cancel("race")]);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+    } finally {
+      server.close();
+    }
+  });
+});

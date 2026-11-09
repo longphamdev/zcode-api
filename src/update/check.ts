@@ -86,6 +86,13 @@ export interface UpdateCheckOptions {
   env?: Env;
   /** Container detection override (tests); defaults to probing the markers. */
   containerRuntime?: ContainerRuntime | null;
+  /**
+   * Marker-file probe override for automatic detection (tests). Inject one
+   * that ignores real markers when the suite itself runs inside a container
+   * (`/.dockerenv` present) — otherwise "detects the runtime from the
+   * environment" is environment-dependent and fails in CI containers.
+   */
+  containerMarkerExists?: (path: string) => boolean;
   /** Manual check: ignores `ZCODE_UPDATE_CHECK=off` and the skip list. */
   force?: boolean;
 }
@@ -234,7 +241,7 @@ export async function checkForUpdate(current: string, opts: UpdateCheckOptions =
   if (!release) return { kind: "unavailable" };
   if (!isNewerVersion(current, release.tag)) return { kind: "up-to-date", latest: release.tag };
   if (!opts.force && isSkippedVersion(release.tag, env)) return { kind: "skipped", latest: release.tag };
-  const runtime = opts.containerRuntime !== undefined ? opts.containerRuntime : detectContainerRuntime(env);
+  const runtime = opts.containerRuntime !== undefined ? opts.containerRuntime : detectContainerRuntime(env, opts.containerMarkerExists);
   return { kind: "update", notice: buildUpdateNotice(current, release, runtime) };
 }
 
