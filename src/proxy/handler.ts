@@ -426,10 +426,11 @@ export async function proxyRequest(
     }
     const resp = respOrPromise;
     if (!reservation) return resp;
+    const booked = reservation; // narrowed local: closures see the non-null type
     // Debug-only account attribution — never leaks account ids to clients
     // unless the operator explicitly runs `serve debug`.
     if (debug && !resp.headers.has("x-zcode-account")) {
-      resp.headers.set("x-zcode-account", reservation.accountId);
+      resp.headers.set("x-zcode-account", booked.accountId);
     }
     if (resp.body) {
       // Wrap (not tee) the body so EVERY consumer path releases the pool
@@ -442,7 +443,7 @@ export async function proxyRequest(
       const releaseOnce = () => {
         if (released) return;
         released = true;
-        reservation!.release();
+        booked.release();
       };
       const wrapped = new ReadableStream<Uint8Array>({
         async pull(controller) {
