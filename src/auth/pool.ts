@@ -375,12 +375,19 @@ export class AccountPool {
     return distinct.size >= 2;
   }
 
-  /** Feed poller data (ticket #6). Does not gate picking on staleness. */
+  /** Feed poller data (#6). Does not gate picking on staleness. */
   updateQuota(accountId: string, remainingUnits: number | undefined, polledAtMs: number): void {
     const r = this.runtime.get(accountId);
     if (!r) return;
     r.lastPolledAtMs = polledAtMs;
     if (remainingUnits !== undefined) r.remainingUnits = remainingUnits;
+  }
+
+  /** Poller reports the account's entitlement expiry (quotaExpiresAt). */
+  setQuotaExpiry(accountId: string, expiresAtMs: number): void {
+    const r = this.runtime.get(accountId);
+    if (!r) return;
+    r.quotaExpiresAtMs = expiresAtMs;
   }
 
   /** Note a failure that does not classify (informational counter). */
@@ -390,12 +397,20 @@ export class AccountPool {
   }
 
   /** A healthy response resets the consecutive-failure counter and heals a
-   *  half-open probe (the account's credential works again). */
+   *  half-open probe / poller success (the credential works again). */
   noteSuccess(accountId: string): void {
     const r = this.runtime.get(accountId);
     if (r) {
       r.consecutiveFailures = 0;
-      if (r.status === "expired" || r.status === "healthy") r.retryAtMs = undefined;
+      if (r.status === "expired" || r.status === "exhausted") {
+        // Healed: a successful authenticated interaction proves the
+        // credential works and quota exists.
+        r.status = "healthy";
+        r.retryAtMs = undefined;
+        r.quotaExpiresAtMs = undefined;
+      } else {
+        r.retryAtMs = undefined;
+      }
     }
   }
 

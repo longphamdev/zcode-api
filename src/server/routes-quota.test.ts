@@ -319,3 +319,153 @@ describe("collectQuotaSnapshot coding plane", () => {
     expect(snap.errors).toEqual([]);
   });
 });
+
+describe("handleQuota — multi-account fixed schema (#6)", () => {
+  const makeConfig = () => ({
+    server: { port: 8080, host: "127.0.0.1" },
+    auth: {},
+    provider: "zai" as const,
+    plan: "coding-plan" as const,
+    providers: {
+      zai: { anthropicBase: "http://x", openaiBase: "http://x" },
+      bigmodel: { anthropicBase: "http://x", openaiBase: "http://x" },
+    },
+    defaultModel: "glm-5.3",
+    models: ["glm-5.3"],
+    identity: { appVersion: "t", sourceTitle: "t", userAgent: "t", refererOrigin: "https://t", deviceMid: "m" },
+    clientIdentity: { mode: "off" as const, ttlSeconds: 900, maxSessions: 1024 },
+    responses: { enabled: false, storeMaxEntries: 10, storeTtlMs: 1000 },
+    endpointRouting: { enabled: false, origin: "" },
+    clientSigning: { enabled: false },
+    highspeed: { enabled: false, origin: "", models: [] },
+    mcp: { enabled: false, webSearch: false, webReader: false, zread: false, gateway: { enabled: false, upstreamOrigin: "" } },
+    async: { enabled: false, origin: "", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
+    claim: { enabled: false, auto: false, origin: "", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+    accounts: { maxInFlightPerAccount: 4, queueTimeoutMs: 5000, rateLimitCooldownMs: 30000, reservationTimeoutMs: 900000 },
+    logging: { level: "info" as const },
+  });
+
+  const stored = (id: string, label?: string) => ({
+    id,
+    credential: { apiKey: `k-${id}`, provider: "zai" as const, userId: id },
+    addedAt: 0,
+    ...(label ? { label } : {}),
+  });
+
+  it("always returns {accounts, aggregate, legacy} — same shape for 1 and 2 accounts", async () => {
+    const { AccountPool } = await import("../auth/pool.js");
+    const store = { accounts: [stored("a", "Main"), stored("b")] };
+    const listAccountsImpl = async () => store.accounts;
+    const pool = new AccountPool({ listAccounts: listAccountsImpl });
+    await pool.syncWithStore();
+    pool.updateQuota("a", 100, Date.now());
+    pool.updateQuota("b", 250, Date.now());
+
+    const resp = await handleQuota(makeConfig(), fetch, async () => store.accounts[0].credential, pool, listAccountsImpl);
+    const body = await resp.json();
+    expect(body.accounts).toHaveLength(2);
+    expect(body.aggregate.accountCount).toBe(2);
+    expect(body.aggregate.healthyCount).toBe(2);
+    expect(body.aggregate.accountsReporting).toBe(2);
+    expect(body.aggregate.totalRemainingUnits).toBe(350); // 100 + 250
+    expect(body.aggregate.unitType).toBe("token");
+    // legacy = PRIMARY account (store order first) — exact old snapshot shape
+    expect(body.legacy).not.toBeNull();
+    expect(body.legacy.balances).toBeDefined();
+    expect(body.legacy.claimablePlans).toBeDefined();
+    expect(body.legacy.errors).toBeDefined();
+    // Per-account fields
+    const a = body.accounts.find((x: any) => x.id === "a");
+    expect(a.label).toBe("Main");
+    expect(a.status).toBe("healthy");
+    expect(a.remainingUnits).toBe(100);
+    expect(a.lastPolledAt).toBeDefined();
+    // NO credentials in the response
+    expect(JSON.stringify(body)).not.toContain("k-a");
+    expect(JSON.stringify(body)).not.toContain("k-b");
+  });
+
+  it("same shape with ONE account (consumer never guesses)", async () => {
+    const { AccountPool } = await import("../auth/pool.js");
+    const store = { accounts: [stored("solo")] };
+    const listAccountsImpl = async () => store.accounts;
+    const pool = new AccountPool({ listAccounts: listAccountsImpl });
+    await pool.syncWithStore();
+    pool.updateQuota("solo", 77, Date.now());
+    const resp = await handleQuota(makeConfig(), fetch, async () => store.accounts[0].credential, pool, listAccountsImpl);
+    const body = await resp.json();
+    expect(body.accounts).toHaveLength(1);
+    expect(body.aggregate.accountCount).toBe(1);
+    expect(body.legacy).not.toBeNull();
+  });
+
+  it("legacy poll failure → legacyStale flag, never stale-as-fresh numbers", async () => {
+    const { AccountPool } = await import("../auth/pool.js");
+    const store = { accounts: [stored("a")] };
+    const listAccountsImpl = async () => store.accounts;
+    const pool = new AccountPool({ listAccounts: listAccountsImpl });
+    await pool.syncWithStore();
+    const resp = await handleQuota(
+      makeConfig(),
+      // fetch that always throws → collectQuotaSnapshot fails
+      (async () => { throw new Error("network down"); }) as typeof fetch,
+      async () => store.accounts[0].credential,
+      pool,
+      listAccountsImpl,
+    );
+    const body = await resp.json();
+    // The collector embeds the fetch failure in legacy.errors with empty
+    // balances — flagged stale, not fresh-looking.
+    expect(body.legacy.balances).toHaveLength(0);
+    expect(body.legacyStale).toBe(true);
+  });
+
+  it("partial poll data → aggregate.stale flag; accounts without data omit quota fields", async () => {
+    const { AccountPool } = await import("../auth/pool.js");
+    const store = { accounts: [stored("a"), stored("b")] };
+    const listAccountsImpl = async () => store.accounts;
+    const pool = new AccountPool({ listAccounts: listAccountsImpl });
+    await pool.syncWithStore();
+    pool.updateQuota("a", 100, Date.now()); // b never polled
+    const resp = await handleQuota(makeConfig(), fetch, async () => store.accounts[0].credential, pool, listAccountsImpl);
+    const body = await resp.json();
+    expect(body.aggregate.accountsReporting).toBe(1);
+    expect(body.aggregate.stale).toBe(true);
+    const b = body.accounts.find((x: any) => x.id === "b");
+    expect(b.remainingUnits).toBeUndefined();
+    expect(b.lastPolledAt).toBeUndefined();
+  });
+
+  it("tokenExpiresAt (credential) and quotaExpiresAt (entitlement) are separate fields", async () => {
+    const { AccountPool } = await import("../auth/pool.js");
+    const store = {
+      accounts: [{
+        id: "a",
+        credential: { apiKey: "k", provider: "zai" as const, userId: "a", expiresAt: 1_800_000_000_000 },
+        addedAt: 0,
+      }],
+    };
+    const listAccountsImpl = async () => store.accounts;
+    const pool = new AccountPool({ listAccounts: listAccountsImpl });
+    await pool.syncWithStore();
+    pool.updateQuota("a", 10, Date.now());
+    pool.setQuotaExpiry("a", 1_700_000_050_000);
+    const resp = await handleQuota(makeConfig(), fetch, async () => store.accounts[0].credential, pool, listAccountsImpl);
+    const body = await resp.json();
+    const a = body.accounts[0];
+    expect(a.tokenExpiresAt).toBe(1_800_000_000); // seconds — credential
+    expect(a.quotaExpiresAt).toBe(1_700_000_050); // seconds — entitlement
+  });
+
+  it("stale poll data (older than 15min) is flagged per-account", async () => {
+    const { AccountPool } = await import("../auth/pool.js");
+    const store = { accounts: [stored("a")] };
+    const listAccountsImpl = async () => store.accounts;
+    const pool = new AccountPool({ listAccounts: listAccountsImpl });
+    await pool.syncWithStore();
+    pool.updateQuota("a", 100, Date.now() - 16 * 60_000); // 16 min old
+    const resp = await handleQuota(makeConfig(), fetch, async () => store.accounts[0].credential, pool, listAccountsImpl);
+    const body = await resp.json();
+    expect(body.accounts[0].stale).toBe(true);
+  });
+});

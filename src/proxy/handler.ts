@@ -496,6 +496,7 @@ export async function proxyRequest(
       && contentType.includes("application/json")
       && !contentType.includes("text/event-stream")
       && (contentLength === 0 || contentLength <= 2048);
+    let classifiedQuotaExhausted = false;
     if (isScannable) {
       const bodyText = await upstreamResp.clone().text().catch(() => "");
       // Never let the peek exceed the cap (chunked responses w/o length).
@@ -505,6 +506,7 @@ export async function proxyRequest(
         if (parsed?.code === 1005 || (typeof parsed?.msg === "string" && parsed.msg.includes("exceed quota limit"))) {
           // Single-account pass-through parity: the only account is not
           // marked exhausted (the client sees the 1005 body and decides).
+          classifiedQuotaExhausted = true;
           if (pool.accountCount() > 1) pool.markExhausted(reservation.accountId);
           if (debug) debugError(reqId, "account_quota_exhausted", `${reservation.accountId} biz 1005 exceed quota limit`);
           console.log(`${reqId} pool: account ${reservation.accountId} quota exhausted (biz 1005)`);
@@ -555,7 +557,9 @@ export async function proxyRequest(
           if (debug) debugError(reqId, "account_rate_limited", `${reservation.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
         }
       }
-    } else if (upstreamResp.ok) {
+    } else if (upstreamResp.ok && !classifiedQuotaExhausted) {
+      // A 200-with-1005 is NOT a success (it heals exhausted — the exact
+      // opposite of what the classification just decided).
       pool.noteSuccess(reservation.accountId);
     } else if (upstreamResp.status >= 400) {
       // Unknown error — log status + biz code + redacted headers so real

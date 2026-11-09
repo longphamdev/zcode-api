@@ -18,6 +18,8 @@
  */
 import os from "node:os";
 import { loadCredential } from "../auth/store.js";
+import { listAccounts } from "../auth/accounts.js";
+import type { AccountPool } from "../auth/pool.js";
 import { buildIdentityHeaders, normalizePrintableHeaderValue } from "../proxy/identity.js";
 import { inspectJwt } from "../auth/jwt-age.js";
 import { credentialString, type Credential } from "../auth/types.js";
@@ -147,13 +149,15 @@ function toFiniteNumber(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-/** Build the quota snapshot. Exported for tests. `loadCredentialImpl` is injectable for tests. */
+/** Build the quota snapshot. Exported for tests. `loadCredentialImpl` is injectable for tests.
+ *  `credentialOverride` (multi-account) polls a SPECIFIC account instead of the primary. */
 export async function collectQuotaSnapshot(
   config: ProxyConfig,
   fetchImpl: typeof fetch = fetch,
   loadCredentialImpl: typeof loadCredential = loadCredential,
+  credentialOverride?: Credential,
 ): Promise<QuotaSnapshot> {
-  const cred = await loadCredentialImpl();
+  const cred = credentialOverride ?? await loadCredentialImpl();
   if (!cred) {
     throw new Error("not logged in (run: zcode-proxy auth login)");
   }
@@ -263,18 +267,96 @@ export async function collectQuotaSnapshot(
 }
 
 /** Handle GET /quota — JSON snapshot with the proxy error envelope on failure. `loadCredentialImpl` is injectable for tests. */
+/**
+ * Fixed multi-account schema (review requirement): the response shape NEVER
+ * changes with account count — consumers never guess.
+ *
+ * {
+ *   accounts:  [{ id, label, status, remainingUnits?, lastPolledAt?,
+ *                 tokenExpiresAt?, quotaExpiresAt?, stale? }],
+ *   aggregate: { accountCount, healthyCount, accountsReporting, accountsTotal,
+ *                totalRemainingUnits? (only when all reporting accounts share
+ *                unitType), unitType?, stale? },
+ *   legacy:    <the exact pre-multi-account snapshot of the PRIMARY account,
+ *               or null — stable, never the round-robin pick>
+ * }
+ */
 export async function handleQuota(
   config: ProxyConfig,
   fetchImpl: typeof fetch = fetch,
   loadCredentialImpl: typeof loadCredential = loadCredential,
+  pool?: AccountPool,
+  listAccountsImpl: typeof listAccounts = listAccounts,
 ): Promise<Response> {
-  try {
-    const snapshot = await collectQuotaSnapshot(config, fetchImpl, loadCredentialImpl);
-    return new Response(JSON.stringify(snapshot, null, 1), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  } catch (e) {
-    return errorResponse(503, "quota_unavailable", `quota query failed: ${(e as Error).message}`);
+  const accounts = await listAccountsImpl();
+  const STALE_MS = 15 * 60_000;
+
+  // Legacy single-credential mode (no pool wired): unchanged response.
+  if (!pool || accounts.length === 0) {
+    try {
+      const snapshot = await collectQuotaSnapshot(config, fetchImpl, loadCredentialImpl);
+      return new Response(JSON.stringify(snapshot, null, 1), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    } catch (e) {
+      return errorResponse(503, "quota_unavailable", `quota query failed: ${(e as Error).message}`);
+    }
   }
+
+  // Multi-account: primary account = legacy payload; the rest come from the
+  // pool runtime (poller data) without extra upstream calls.
+  // Primary = store order's first entry (same resolution loadCredential uses —
+  // the facade reads the primary account, which the store defines as first).
+  const primary = accounts[0];
+  let legacy: QuotaSnapshot | null = null;
+  let legacyStale = false;
+  try {
+    legacy = await collectQuotaSnapshot(config, fetchImpl, loadCredentialImpl, primary.credential);
+    // The collector embeds upstream failures in `errors` instead of throwing —
+    // a snapshot with no balances AND errors is stale, never fresh-looking.
+    if (legacy && legacy.balances.length === 0 && legacy.errors.length > 0) {
+      legacyStale = true;
+    }
+  } catch {
+    legacy = null;
+    legacyStale = true; // explicit: null/flagged, never stale-as-fresh numbers
+  }
+
+  const runtime = pool.snapshot();
+  const byId = new Map(runtime.map((r) => [r.id, r]));
+  const accountEntries = accounts.map((a) => {
+    const r = byId.get(a.id);
+    const lastPolledAtMs = r?.lastPolledAtMs;
+    return {
+      id: a.id,
+      ...(a.label ? { label: a.label } : {}),
+      status: r?.status ?? "healthy",
+      ...(r?.remainingUnits !== undefined ? { remainingUnits: r.remainingUnits } : {}),
+      ...(lastPolledAtMs !== undefined ? { lastPolledAt: Math.floor(lastPolledAtMs / 1000) } : {}),
+      ...(lastPolledAtMs !== undefined && Date.now() - lastPolledAtMs > STALE_MS ? { stale: true } : {}),
+      // tokenExpiresAt: credential expiry (OAuth) — JWTs here carry no exp.
+      ...(a.credential.expiresAt !== undefined ? { tokenExpiresAt: Math.floor(a.credential.expiresAt / 1000) } : {}),
+      ...(r?.quotaExpiresAtMs !== undefined ? { quotaExpiresAt: Math.floor(r.quotaExpiresAtMs / 1000) } : {}),
+    };
+  });
+
+  const reporting = accountEntries.filter((a) => a.lastPolledAt !== undefined && a.remainingUnits !== undefined);
+  const unitTypesUnique = new Set(reporting.map(() => "token")); // this plane's unit is always tokens
+  const aggregate: Record<string, unknown> = {
+    accountCount: accounts.length,
+    healthyCount: accountEntries.filter((a) => a.status === "healthy").length,
+    accountsReporting: reporting.length,
+    accountsTotal: accounts.length,
+  };
+  if (reporting.length > 0 && unitTypesUnique.size === 1) {
+    aggregate.totalRemainingUnits = reporting.reduce((sum, a) => sum + (a.remainingUnits ?? 0), 0);
+    aggregate.unitType = "token";
+    if (reporting.length < accounts.length) aggregate.stale = true; // partial data
+  }
+
+  return new Response(JSON.stringify({ accounts: accountEntries, aggregate, legacy, ...(legacyStale ? { legacyStale } : {}) }, null, 1), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
 }

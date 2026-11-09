@@ -108,7 +108,7 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     }
 
     if (path === "/quota" && method === "GET") {
-      return handleQuota(config, opts.fetchImpl);
+      return handleQuota(config, opts.fetchImpl, undefined, opts.accountPool);
     }
 
     if (path === "/v1/messages" && method === "POST") {
@@ -176,6 +176,7 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
     const syncTimer = setInterval(() => { void opts.accountPool?.syncWithStore().catch(() => {}); }, 5_000);
     syncTimer.unref?.();
   }
+  opts.quotaPoller?.start();
   const handler = createFetchHandler(opts);
   const { port: requestedPort, host } = opts.config.server;
   const cors = corsHeaders(Boolean(opts.config.auth.proxyApiKey));
