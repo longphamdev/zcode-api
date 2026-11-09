@@ -712,8 +712,10 @@ function authCommand(args: string[]): void {
     authLogout();
   } else if (sub === "status") {
     authStatus();
+  } else if (sub === "list") {
+    void authList();
   } else {
-    console.error("Usage: zcode-proxy auth <login|logout|status>");
+    console.error("Usage: zcode-proxy auth <login|logout|status|list>");
     process.exit(1);
   }
 }
@@ -902,6 +904,54 @@ function authLogout(): void {
   }
   clearCredential();
   console.log("Logged out. Credentials removed.");
+}
+
+/**
+ * `auth list` (#6): one row per stored account — static fields plus live
+ * status/quota from a synchronous balance read (no server required). Never
+ * prints credentials; userId is masked.
+ */
+async function authList(): Promise<void> {
+  const { listAccounts } = await import("./auth/accounts.js");
+  const { fetchBalanceForCredential } = await import("./server/quota-balance.js");
+  const { loadConfig } = await import("./config/loader.js");
+  const accounts = await listAccounts().catch(() => []);
+  if (accounts.length === 0) {
+    console.log("No accounts stored.");
+    console.log("Run: zcode-proxy auth login <zai|bigmodel>");
+    return;
+  }
+  let config: import("./config/types.js").ProxyConfig;
+  try {
+    config = loadConfig(process.env.ZCODE_PROXY_CONFIG ?? "config.yaml");
+  } catch {
+    config = null as unknown as import("./config/types.js").ProxyConfig;
+  }
+  console.log(`Accounts (${accounts.length}):`);
+  for (const a of accounts) {
+    const masked = a.credential.userId ? `${String(a.credential.userId).slice(0, 4)}…${String(a.credential.userId).slice(-4)}` : "(no id)";
+    const label = a.label ? ` (${a.label})` : "";
+    const auth = a.credential.jwt ? "start-plan" : "coding-plan";
+    let quota = "n/a (config load failed)";
+    if (config) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(new Error("timeout")), 10_000);
+        const r = await fetchBalanceForCredential(config, a.credential, controller.signal, fetch).finally(() => clearTimeout(timer));
+        quota = r.ok
+          ? `${r.remainingUnits ?? "?"} units${r.quotaExpiresAtMs ? `, resets ${new Date(r.quotaExpiresAtMs).toISOString().slice(0, 10)}` : ""}`
+          : `unavailable (${r.error ?? "unknown"})`;
+      } catch (e) {
+        quota = `unavailable (${(e as Error).message})`;
+      }
+    }
+    console.log(`  [${a.id}]${label}`);
+    console.log(`    user:     ${masked}`);
+    console.log(`    auth:     ${auth}`);
+    console.log(`    added:    ${new Date(a.addedAt || 0).toISOString().slice(0, 10)}`);
+    console.log(`    quota:    ${quota}`);
+    console.log(`    lastUsed: ${a.lastUsedAt ? new Date(a.lastUsedAt).toISOString().slice(0, 16).replace("T", " ") : "never"}`);
+  }
 }
 
 async function authStatus(): Promise<void> {
