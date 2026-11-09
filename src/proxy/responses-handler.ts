@@ -93,6 +93,8 @@ export interface ResponsesHandlerOptions {
   highspeed?: HighspeedManager | null;
   /** Override the lazily-imported captcha module (for testing). */
   captcha?: CaptchaModule;
+  /** Multi-account pool. Absent → legacy single-credential path. */
+  accountPool?: import("../auth/pool.js").AccountPool;
 }
 
 /** Handle POST /v1/responses. */
@@ -168,10 +170,30 @@ export async function handleResponses(
 
   // ── 4. credential + provider ──
   let cred;
-  try {
-    cred = await opts.auth.getCredential();
-  } catch (err) {
-    return errorResponse(503, "credential_unavailable", (err as Error).message);
+  let reservation: import("../auth/pool.js").Reservation | null = null;
+  if (opts.accountPool) {
+    try {
+      reservation = await opts.accountPool.reserve({ signal: clientReq.signal });
+      cred = reservation.credential;
+    } catch (err) {
+      if (err instanceof AllAccountsCoolingError) {
+        const retryAfterSec = Math.max(1, Math.ceil((err.retryAtMs - Date.now()) / 1000));
+        return errorResponse(429, "all_accounts_cooling", `${err.message}. Retry after ${retryAfterSec}s.`, { "retry-after": String(retryAfterSec) });
+      }
+      if (err instanceof NoAccountAvailableError) {
+        return errorResponse(503, "no_account_available", err.message);
+      }
+      if (err instanceof AccountsBusyError) {
+        return errorResponse(429, "accounts_busy", err.message, { "retry-after": String(err.retryAfterSec) });
+      }
+      throw err;
+    }
+  } else {
+    try {
+      cred = await opts.auth.getCredential();
+    } catch (err) {
+      return errorResponse(503, "credential_unavailable", (err as Error).message);
+    }
   }
   const providerDef = resolveProviderDef(opts.config);
 
@@ -246,6 +268,7 @@ export async function handleResponses(
       });
     } catch (err) {
       if (debug) console.log(`[responses] ERROR captcha_solver_failed: ${(err as Error).message}`);
+      reservation?.release();
       return errorResponse(503, "captcha_solver_failed", `Captcha acquisition failed: ${(err as Error).message}. The start-plan edge rejects captcha-less requests — retry shortly.`);
     }
   }
@@ -361,6 +384,7 @@ export async function handleResponses(
 
   if (!upstreamResp.ok) {
     const errText = await upstreamResp.text().catch(() => "");
+    reservation?.release();
     return errorResponse(upstreamResp.status, "upstream_error", errText.slice(0, 500) || `upstream returned ${upstreamResp.status}`);
   }
 
@@ -369,6 +393,7 @@ export async function handleResponses(
     // downstream Responses translators already consume (SSE + batch)
     if (stream) {
       if (!upstreamResp.body) {
+        reservation?.release();
         return errorResponse(502, "translation_failed", "upstream returned no body for stream");
       }
       upstreamResp = new Response(anthropicSseToOpenaiSse(upstreamResp.body, req.model), {
@@ -381,6 +406,7 @@ export async function handleResponses(
       try {
         parsedAnthropic = JSON.parse(rawAnthropic) as AnthropicMessagesResponse;
       } catch (err) {
+        reservation?.release();
         return errorResponse(502, "translation_failed", `upstream returned non-JSON body: ${(err as Error).message}`);
       }
       const openaiResp = translateResponseAnthropicToOpenAI(parsedAnthropic, req.model);
@@ -396,7 +422,7 @@ export async function handleResponses(
   const meta = { customToolNames, namespaceMap, hasToolSearch };
 
   if (stream) {
-    return streamResponse(upstreamResp, { responseId, model: req.model, meta, request: req, input, options: opts, onStreamEnd: noteInFlightEnded });
+    return streamResponse(upstreamResp, { responseId, model: req.model, meta, request: req, input, options: opts, onStreamEnd: noteInFlightEnded, onRelease: () => reservation?.release() });
   }
 
   const rawChatResp = await upstreamResp.text();
@@ -422,6 +448,7 @@ export async function handleResponses(
   if (debug) console.log(`[responses] ← ${responsesResp.status} (${Date.now() - start}ms)`);
 
   noteInFlightEnded();
+  reservation?.release();
   return new Response(JSON.stringify(responsesResp), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -441,6 +468,8 @@ interface StreamResponseContext {
   options: ResponsesHandlerOptions;
   /** Fired once when the client stream completes, errors, or is cancelled. */
   onStreamEnd?: () => void;
+  /** Pool slot release (idempotent); absent in single-credential mode. */
+  onRelease?: () => void;
 }
 
 function streamResponse(upstreamResp: Response, context: StreamResponseContext): Response {
@@ -453,6 +482,7 @@ function streamResponse(upstreamResp: Response, context: StreamResponseContext):
     if (onStreamEnded) return;
     onStreamEnded = true;
     try { context.onStreamEnd?.(); } catch {}
+    try { context.onRelease?.(); } catch {} // pool slot release; idempotent
   };
 
   const stream = new ReadableStream<Uint8Array>({
@@ -513,7 +543,7 @@ function streamResponse(upstreamResp: Response, context: StreamResponseContext):
     },
     cancel(reason) {
       context.options.debug === true && console.log(`[responses] stream cancelled: ${String(reason)}`);
-      fireStreamEnd();
+      fireStreamEnd(); // releases via context.onRelease
       try { upstreamResp.body?.cancel(); } catch {}
     },
   });

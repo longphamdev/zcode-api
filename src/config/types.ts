@@ -158,6 +158,20 @@ export interface AsyncConfig {
  *
  * @see _reverse/NOTEPAD.md "Manual Claim Plan" section for the protocol.
  */
+/**
+ * Multi-account pool tuning. With a single account the pool degrades to
+ * pass-through (no inflight cap, no queue) so behavior matches the pre-pool
+ * proxy exactly.
+ */
+export interface AccountsConfig {
+  /** Max concurrent in-flight requests per account. Ignored when only one account is stored. Default `4`. */
+  maxInFlightPerAccount: number;
+  /** Queue wait cap (ms) when all accounts sit at their inflight cap. Default `5000`. `0` disables queueing. */
+  queueTimeoutMs: number;
+  /** Fallback cooling for a 429 without Retry-After (ms). Default `30000`. */
+  rateLimitCooldownMs: number;
+}
+
 export interface ClaimConfig {
   /** Enable the claim subsystem (CLI `claim` command + auto scheduler). Default `true`. */
   enabled: boolean;
@@ -261,6 +275,8 @@ export interface ProxyConfig {
   async: AsyncConfig;
   /** Manual claim ("weekend plan") configuration. */
   claim: ClaimConfig;
+  /** Multi-account pool tuning. Defaults serve a single account with pool semantics disabled. */
+  accounts: AccountsConfig;
   logging: {
     level: "debug" | "info" | "warn" | "error";
   };

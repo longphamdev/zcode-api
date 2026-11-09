@@ -56,6 +56,7 @@ import { dumpPhase, dumpHeaders, dumpBody, dumpEnabled } from "./dump.js";
 import { StreamMetrics } from "./stream-metrics.js";
 import { inflateWithCap } from "./inflate.js";
 import { buildAnthropicMetadataUserId } from "./trace-headers.js";
+import { AccountPool, AllAccountsCoolingError, AccountsBusyError, NoAccountAvailableError, type Reservation } from "../auth/pool.js";
 
 /** Options for the proxy handler. */
 export interface ProxyHandlerOptions {
@@ -77,6 +78,12 @@ export interface ProxyHandlerOptions {
   highspeed?: HighspeedManager | null;
   /** Override the lazily-imported captcha module (for testing). */
   captcha?: CaptchaModule;
+  /**
+   * Multi-account pool. When absent, the handler falls back to the legacy
+   * single-credential path (`auth.getCredential()`), preserving behavior for
+   * existing callers and tests.
+   */
+  accountPool?: AccountPool;
 }
 
 /**
@@ -135,12 +142,41 @@ export async function proxyRequest(
   };
 
   let cred;
-  try {
-    cred = await auth.getCredential();
-  } catch (err) {
-    if (debug) debugError(reqId, "credential_unavailable", (err as Error).message);
-    printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
-    return errorResponse(503, "credential_unavailable", (err as Error).message);
+  let reservation: Reservation | null = null;
+  if (opts.accountPool) {
+    // Multi-account path: pick an account via the pool. Single-account pools
+    // pass through (no cap/queue), matching the legacy behavior exactly.
+    try {
+      reservation = await opts.accountPool.reserve({ signal: clientReq.signal });
+      cred = reservation.credential;
+    } catch (err) {
+      if (err instanceof AllAccountsCoolingError) {
+        const retryAfterSec = Math.max(1, Math.ceil((err.retryAtMs - Date.now()) / 1000));
+        if (debug) debugError(reqId, "all_accounts_cooling", `${err.message}; retry in ${retryAfterSec}s`);
+        printRow(reqId, format, meta, 429, started, Date.now(), 0, 0, 0);
+        return errorResponse(429, "all_accounts_cooling", `${err.message}. Retry after ${retryAfterSec}s.`, { "retry-after": String(retryAfterSec) });
+      }
+      if (err instanceof NoAccountAvailableError) {
+        if (debug) debugError(reqId, "no_account_available", err.message);
+        printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
+        return errorResponse(503, "no_account_available", err.message);
+      }
+      if (err instanceof AccountsBusyError) {
+        if (debug) debugError(reqId, "accounts_busy", err.message);
+        printRow(reqId, format, meta, 429, started, Date.now(), 0, 0, 0);
+        return errorResponse(429, "accounts_busy", err.message, { "retry-after": String(err.retryAfterSec) });
+      }
+      throw err;
+    }
+    if (debug) debugLine(reqId, `account=${reservation.accountId} (pool)`);
+  } else {
+    try {
+      cred = await auth.getCredential();
+    } catch (err) {
+      if (debug) debugError(reqId, "credential_unavailable", (err as Error).message);
+      printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
+      return errorResponse(503, "credential_unavailable", (err as Error).message);
+    }
   }
 
   // v2.6: both plans use the Anthropic upstream. coding-plan mirrors the real
@@ -409,9 +445,40 @@ export async function proxyRequest(
     });
   }
 
+  // ── Pool health bookkeeping + unknown-error evidence logging ──
+  // Runs before the plan-specific branches. Full failover (retry on another
+  // account) is ticket #5; here we only keep the pool's picture accurate and
+  // accumulate real error samples for that ticket's matchers.
+  if (reservation) {
+    const pool = opts.accountPool!;
+    if (upstreamResp.status === 429) {
+      const ra = upstreamResp.headers.get("retry-after");
+      const retryAtMs = ra !== null && Number.isFinite(Number(ra))
+        ? Date.now() + Number(ra) * 1000
+        : undefined;
+      pool.cool(reservation.accountId, retryAtMs);
+      if (debug) debugError(reqId, "account_rate_limited", `${reservation.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
+    } else if (upstreamResp.ok) {
+      pool.noteSuccess(reservation.accountId);
+    } else if (upstreamResp.status >= 400) {
+      // Unknown error — log status + biz code + redacted headers so real
+      // samples accumulate for ticket #5's matchers. Never rotate here.
+      pool.noteFailure(reservation.accountId);
+      const redacted = new Headers(upstreamResp.headers);
+      for (const h of [...redacted.keys()]) {
+        if (/authorization|x-api-key|cookie|set-cookie|x-client-sig/i.test(h)) redacted.set(h, "[redacted]");
+      }
+      const bodyPreview = await upstreamResp.clone().text().then((t) => t.slice(0, 400)).catch(() => "<unreadable>");
+      console.log(`${reqId} pool: unknown upstream error status=${upstreamResp.status} account=${reservation.accountId} headers=${JSON.stringify([...redacted])} body=${bodyPreview}`);
+    }
+  }
+
   if (upstreamResp.status === 401 && startPlan) {
     if (debug) debugError(reqId, "start_plan_jwt_invalid", "JWT rejected upstream");
     printRow(reqId, format, meta, 401, started, headersAt, 0, 0, 0);
+    // Pool mode: a 401 is account-level auth rejection. Mark it so the NEXT
+    // request skips this account (full refresh+failover is ticket #5).
+    if (reservation && !startPlan) opts.accountPool!.markExpired(reservation.accountId);
     return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
   }
 
@@ -478,51 +545,73 @@ export async function proxyRequest(
         return errorResponse(502, "upstream_unreachable", err.message);
       },
     });
-    if (!outcome.ok) return outcome.resp;
+    if (!outcome.ok) return finishWith(outcome.resp);
     upstreamResp = outcome.resp;
   }
 
   const isSSE = upstreamResp.headers.get("content-type")?.includes("text/event-stream") ?? false;
 
+  // Pool release on EVERY exit path: attach to the response body (stream end,
+  // client abort → stream cancel, upstream error) — release() is idempotent,
+  // so double-wiring is safe. `finishWith` is identity in no-pool mode.
+  const finishWith = (resp: Response): Response => {
+    if (!reservation) return resp;
+    const releaseOnce = () => reservation!.release();
+    // Debug-only account attribution — never leaks account ids to clients
+    // unless the operator explicitly runs `serve debug`.
+    if (debug && !resp.headers.has("x-zcode-account")) {
+      resp.headers.set("x-zcode-account", reservation.accountId);
+    }
+    if (resp.body) {
+      // `pipeTo`'s promise settles on: full read, cancel (client abort), and
+      // error — every way the response body leaves this handler.
+      const [ownedForRelease, clientBody] = resp.body.tee();
+      ownedForRelease.pipeTo(new WritableStream({ write() {} })).catch(() => {}).finally(releaseOnce);
+      return new Response(clientBody, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+    }
+    releaseOnce();
+    return resp;
+  };
+
   if (translateOpenAIToAnthropic) {
     if (!upstreamResp.ok) {
-      return upstreamErrorPassthrough(reqId, format, meta, upstreamResp, started, headersAt);
+      return finishWith(upstreamErrorPassthrough(reqId, format, meta, upstreamResp, started, headersAt));
     }
     if (isSSE && upstreamResp.body) {
       const translated = anthropicSseToOpenaiSse(upstreamResp.body, meta.model);
       const [clientBody, statsBody] = translated.tee();
       observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, null, noteInFlightEnded);
-      return translatedSseResponse(clientBody);
+      return finishWith(translatedSseResponse(clientBody));
     }
     const batchResp = await translatedBatchResponse(clientReq, upstreamResp, meta.model, reqId, format, meta, started, headersAt);
     noteInFlightEnded();
-    return batchResp;
+    return finishWith(batchResp);
   }
 
   if (translateAnthropicToOpenAI) {
     if (!upstreamResp.ok) {
-      return upstreamErrorPassthrough(reqId, format, meta, upstreamResp, started, headersAt);
+      return finishWith(upstreamErrorPassthrough(reqId, format, meta, upstreamResp, started, headersAt));
     }
     if (isSSE && upstreamResp.body) {
       const translated = openaiSseToAnthropicSse(upstreamResp.body, meta.model);
       const [clientBody, statsBody] = translated.tee();
       observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, null, noteInFlightEnded);
-      return translatedSseResponse(clientBody);
+      return finishWith(translatedSseResponse(clientBody));
     }
     const batchResp = await translatedOpenAIToAnthropicBatchResponse(clientReq, upstreamResp, reqId, format, meta, started, headersAt);
     noteInFlightEnded();
-    return batchResp;
+    return finishWith(batchResp);
   }
 
   if (isSSE && upstreamResp.body) {
     const [clientBody, statsBody] = upstreamResp.body.tee();
     observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, upstreamResp.headers.get("content-encoding"), noteInFlightEnded);
-    return passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq), clientBody);
+    return finishWith(passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq), clientBody));
   }
 
   printRow(reqId, format, meta, upstreamResp.status, started, headersAt, 0, 0, 0);
   noteInFlightEnded();
-  return passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq));
+  return finishWith(passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq)));
 }
 
 export function shouldUseOrderedTransport(clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {
@@ -764,13 +853,13 @@ function passthroughResponse(
 }
 
 /** Build a JSON error response. */
-export function errorResponse(status: number, type: string, message: string): Response {
+export function errorResponse(status: number, type: string, message: string, extraHeaders: Record<string, string> = {}): Response {
   const body = JSON.stringify({
     error: { type, message },
   });
   return new Response(body, {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...extraHeaders },
   });
 }
 

@@ -78,6 +78,9 @@ const DEFAULTS = {
   CLAIM_POLL_INTERVAL_MS: 300000,
   CLAIM_COOLDOWN_MS: 600000,
   CLAIM_PLAN_ID: "",
+  ACCOUNTS_MAX_IN_FLIGHT: 4,
+  ACCOUNTS_QUEUE_TIMEOUT_MS: 5000,
+  ACCOUNTS_RATE_LIMIT_COOLDOWN_MS: 30000,
   ENDPOINT_ROUTING_ENABLED: true,
   ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
   CLIENT_SIGNING_ENABLED: true,
@@ -141,6 +144,7 @@ export function loadConfig(path: string): ProxyConfig {
   const mcp = resolveMcpConfig(parsed?.mcp);
   const asyncCfg = resolveAsyncConfig(parsed?.async);
   const claimCfg = resolveClaimConfig(parsed?.claim);
+  const accountsCfg = resolveAccountsConfig(parsed?.accounts);
   const endpointRouting = resolveEndpointRoutingConfig(parsed?.endpointRouting);
   const clientSigning = resolveClientSigningConfig(parsed?.clientSigning);
   const highspeed = resolveHighspeedConfig(parsed?.highspeed);
@@ -162,6 +166,7 @@ export function loadConfig(path: string): ProxyConfig {
     mcp,
     async: asyncCfg,
     claim: claimCfg,
+    accounts: accountsCfg,
     logging: { level: logLevel },
   };
 
@@ -391,6 +396,21 @@ function resolveIdentity(inp: IdentityInputs): ProxyIdentity {
 }
 
 /** Cross-field validation after all fields are resolved. */
+function resolveAccountsConfig(raw: unknown): AccountsConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  return {
+    maxInFlightPerAccount: resolvePositiveInt(
+      process.env.ACCOUNTS_MAX_IN_FLIGHT ?? obj.maxInFlightPerAccount,
+      DEFAULTS.ACCOUNTS_MAX_IN_FLIGHT, "accounts.maxInFlightPerAccount"),
+    queueTimeoutMs: resolveNonNegativeInt(
+      process.env.ACCOUNTS_QUEUE_TIMEOUT_MS ?? obj.queueTimeoutMs,
+      DEFAULTS.ACCOUNTS_QUEUE_TIMEOUT_MS, "accounts.queueTimeoutMs"),
+    rateLimitCooldownMs: resolveNonNegativeInt(
+      process.env.ACCOUNTS_RATE_LIMIT_COOLDOWN_MS ?? obj.rateLimitCooldownMs,
+      DEFAULTS.ACCOUNTS_RATE_LIMIT_COOLDOWN_MS, "accounts.rateLimitCooldownMs"),
+  };
+}
+
 function resolveClaimConfig(raw: unknown): ClaimConfig {
   const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
   const enabledEnv = process.env[ENV.CLAIM_ENABLED];

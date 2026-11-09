@@ -30,6 +30,8 @@ interface ServerOptions {
   debug?: boolean;
   /** Responses-API state store. When absent, `/v1/responses` runs stateless (`previous_response_id` returns 404). */
   responseStore?: ResponseStore;
+  /** Multi-account pool. When absent, the proxy falls back to the single-credential path. */
+  accountPool?: import("../auth/pool.js").AccountPool;
 }
 
 /** Minimal server handle: what the caller needs to print URLs and shut down. */
@@ -45,13 +47,14 @@ export interface ProxyServer {
 /** Create a fetch-style handler that routes the request through the proxy. */
 export function createFetchHandler(opts: ServerOptions): (req: Request) => Promise<Response> {
   const { config, auth } = opts;
-  const proxyOpts = { config, auth, fetchImpl: opts.fetchImpl, debug: opts.debug === true };
+  const proxyOpts = { config, auth, fetchImpl: opts.fetchImpl, debug: opts.debug === true, ...(opts.accountPool ? { accountPool: opts.accountPool } : {}) };
   const responsesOpts = {
     config,
     auth,
     fetchImpl: opts.fetchImpl,
     debug: opts.debug === true,
     ...(opts.responseStore ? { responseStore: opts.responseStore } : {}),
+    ...(opts.accountPool ? { accountPool: opts.accountPool } : {}),
   };
   const asyncOpts = {
     config,
@@ -164,6 +167,13 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
  * timeouts.
  */
 export function startServer(opts: ServerOptions): Promise<ProxyServer> {
+  // Warm the pool before the first request; keep it hot-reload synced (mtime+size)
+  // so accounts added via CLI mid-run appear without a restart.
+  if (opts.accountPool) {
+    void opts.accountPool.syncWithStore().catch(() => {});
+    const syncTimer = setInterval(() => { void opts.accountPool?.syncWithStore().catch(() => {}); }, 5_000);
+    syncTimer.unref?.();
+  }
   const handler = createFetchHandler(opts);
   const { port: requestedPort, host } = opts.config.server;
   const cors = corsHeaders(Boolean(opts.config.auth.proxyApiKey));

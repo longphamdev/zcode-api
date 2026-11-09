@@ -231,8 +231,8 @@ export class AccountPool {
 
   // -- picking ----------------------------------------------------------------
 
-  /** Accounts that are pickable right now (healthy, not at cap). */
-  private pickable(): string[] {
+  /** Accounts that are pickable right now (healthy, under the cap). */
+  private pickable(cap: number = this.maxInFlight): string[] {
     const t = this.now();
     const out: string[] = [];
     for (const [id, r] of this.runtime) {
@@ -244,7 +244,7 @@ export class AccountPool {
         r.status = "healthy"; // quota window over — lazily revive
         r.quotaExpiresAtMs = undefined;
       }
-      if (r.status === "healthy" && r.inFlight < this.maxInFlight) out.push(id);
+      if (r.status === "healthy" && r.inFlight < cap) out.push(id);
     }
     return out;
   }
@@ -252,9 +252,20 @@ export class AccountPool {
   /**
    * Reserve the next account for a request. Throws (do NOT wait) when the
    * pool cannot serve immediately and queueing is disabled or impossible.
+   *
+   * Pass-through mode: when the store holds exactly ONE account, no inflight
+   * cap and no queue are applied — behavior matches the pre-pool proxy
+   * exactly (a coding agent runs many subagent requests concurrently).
+   *
+   * `signal`: abort while queued removes the waiter (no leaked slot later);
+   * an already-aborted signal rejects immediately.
    */
-  async reserve(opts: { queueTimeoutMs?: number } = {}): Promise<Reservation> {
-    const id = this.pickImmediate();
+  async reserve(opts: { queueTimeoutMs?: number; signal?: AbortSignal } = {}): Promise<Reservation> {
+    if (opts.signal?.aborted) {
+      throw new AccountsBusyError(1, "request already aborted");
+    }
+    const singleAccount = this.accounts.size === 1;
+    const id = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined);
     if (id) return this.makeReservation(id);
 
     // Nothing immediate. Distinguish the three failure shapes first.
@@ -265,9 +276,9 @@ export class AccountPool {
     if (timeoutMs <= 0) {
       throw new AccountsBusyError(1, "all accounts at in-flight cap (queueing disabled)");
     }
-    await this.enqueueWait(timeoutMs);
+    await this.enqueueWait(timeoutMs, opts.signal);
     // Woken by a release() (or timeout-throw above). Try again.
-    const retryId = this.pickImmediate();
+    const retryId = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined);
     if (retryId) return this.makeReservation(retryId);
     this.throwForPoolState();
     // release() woke us but another waiter took the slot — one more queued
@@ -275,8 +286,9 @@ export class AccountPool {
     throw new AccountsBusyError(1, "all accounts still busy after queue wake");
   }
 
-  private pickImmediate(): string | null {
-    const ids = this.pickable();
+  private pickImmediate(capOverride?: number): string | null {
+    const cap = capOverride ?? this.maxInFlight;
+    const ids = this.pickable(cap);
     if (ids.length === 0) return null;
     let picked: string;
     if (this.strategy === "most-remaining-quota") {
@@ -350,25 +362,36 @@ export class AccountPool {
     }
   }
 
-  private enqueueWait(timeoutMs: number): Promise<void> {
+  private enqueueWait(timeoutMs: number, signal?: AbortSignal): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const waiter: QueueWaiter = { resolve, timer: null };
-      const timer = setTimeout(() => {
+      const cleanup = (err: Error) => {
         const i = this.queue.indexOf(waiter);
-        if (i >= 0) this.queue.splice(i, 1);
-        reject(new AccountsBusyError(1, `queue wait exceeded ${timeoutMs}ms`));
+        if (i >= 0) this.queue.splice(i, 1); // aborted → never woken, never leaks a slot
+        if (waiter.timer) clearTimeout(waiter.timer);
+        reject(err);
+      };
+      waiter.timer = setTimeout(() => {
+        cleanup(new AccountsBusyError(1, `queue wait exceeded ${timeoutMs}ms`));
       }, timeoutMs);
-      waiter.timer = timer;
+      if (signal) {
+        if (signal.aborted) {
+          cleanup(new AccountsBusyError(1, "request aborted while queued"));
+          return;
+        }
+        signal.addEventListener("abort", () => cleanup(new AccountsBusyError(1, "request aborted while queued")), { once: true });
+      }
       this.queue.push(waiter);
     });
   }
 
   /**
    * Immediate non-async check for tests/diagnostics: is any account
-   * pickable right now?
+   * pickable right now? (Single-account pools are always pickable unless
+   * unhealthy — pass-through mode has no cap.)
    */
   hasPickable(): boolean {
-    return this.pickable().length > 0;
+    return this.pickable(this.accounts.size === 1 ? Number.MAX_SAFE_INTEGER : undefined).length > 0;
   }
 
   /** Test/ops helper: a reservation's runtime entry. */

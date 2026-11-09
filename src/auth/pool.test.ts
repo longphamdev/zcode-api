@@ -191,21 +191,33 @@ describe("AccountPool — all-unhealthy error shapes", () => {
 });
 
 describe("AccountPool — inFlight cap, reserve/release", () => {
-  it("respects the inFlight cap; release frees the slot", async () => {
+  it("respects the inFlight cap; release frees the slot (2 accounts — cap only applies multi-account)", async () => {
     const store = new FakeStore();
-    store.accounts = [stored("a")];
+    store.accounts = [stored("a"), stored("b")];
     const clock = new FakeClock();
-    const pool = await makePool(store, clock, { maxInFlightPerAccount: 2, queueTimeoutMs: 0 });
+    const pool = await makePool(store, clock, { maxInFlightPerAccount: 1, queueTimeoutMs: 0 });
     const r1 = await pool.reserve();
     const r2 = await pool.reserve();
-    expect(pool.runtimeFor("a")!.inFlight).toBe(2);
-    await expect(pool.reserve()).rejects.toBeInstanceOf(AccountsBusyError);
-    r1.release();
     expect(pool.runtimeFor("a")!.inFlight).toBe(1);
+    expect(pool.runtimeFor("b")!.inFlight).toBe(1);
+    await expect(pool.reserve()).rejects.toBeInstanceOf(AccountsBusyError); // both at cap
+    r1.release();
     const r3 = await pool.reserve(); // slot freed
     expect(r3.accountId).toBe("a");
     r2.release();
     r3.release();
+  });
+
+  it("SINGLE account = pass-through: no cap, no queue — 20 concurrent reserves all succeed", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock, { maxInFlightPerAccount: 4, queueTimeoutMs: 0 }); // cap would reject
+    const rs = await Promise.all(Array.from({ length: 20 }, () => pool.reserve()));
+    expect(rs.every((r) => r.accountId === "a")).toBe(true);
+    expect(pool.runtimeFor("a")!.inFlight).toBe(20);
+    for (const r of rs) r.release();
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0);
   });
 
   it("release is idempotent: double release never drives inFlight negative", async () => {
@@ -233,10 +245,11 @@ describe("AccountPool — inFlight cap, reserve/release", () => {
 describe("AccountPool — queue (woken by release, no polling)", () => {
   it("waiters are woken by release() and get the freed slot", async () => {
     const store = new FakeStore();
-    store.accounts = [stored("a")];
+    store.accounts = [stored("a"), stored("b")];
     const clock = new FakeClock();
     const pool = await makePool(store, clock, { maxInFlightPerAccount: 1, queueTimeoutMs: 5_000 });
     const r1 = await pool.reserve();
+    const r2 = await pool.reserve(); // both slots busy → waiter must queue
 
     let woken: Awaited<ReturnType<AccountPool["reserve"]>> | null = null;
     let wokenErr: unknown = null;
@@ -253,25 +266,31 @@ describe("AccountPool — queue (woken by release, no polling)", () => {
     await waiter;
     expect(wokenErr).toBeNull();
     expect(woken).not.toBeNull();
-    expect((woken as unknown as { accountId: string }).accountId).toBe("a");
+    // The woken reservation is for a healthy account (round-robin decides
+    // which) and holds a real slot.
+    const wokenAccount = (woken as unknown as { accountId: string }).accountId;
+    expect(["a", "b"]).toContain(wokenAccount);
     (woken as unknown as { release: () => void }).release();
+    r2.release();
   });
 
   it("queue timeout → AccountsBusyError with short Retry-After", async () => {
     const store = new FakeStore();
-    store.accounts = [stored("a")];
+    store.accounts = [stored("a"), stored("b")];
     const clock = new FakeClock();
     const pool = await makePool(store, clock, { maxInFlightPerAccount: 1, queueTimeoutMs: 50 });
     const r1 = await pool.reserve();
+    const r2 = await pool.reserve(); // both accounts now at cap
     const t0 = Date.now();
     await expect(pool.reserve()).rejects.toBeInstanceOf(AccountsBusyError);
     expect(Date.now() - t0).toBeGreaterThanOrEqual(45); // waited the timeout, no wake
     r1.release();
+    r2.release();
   });
 
   it("FIFO: first waiter wins the freed slot", async () => {
     const store = new FakeStore();
-    store.accounts = [stored("a")];
+    store.accounts = [stored("a"), stored("b")];
     const pool = await makePool(store, new FakeClock(), { maxInFlightPerAccount: 1, queueTimeoutMs: 5_000 });
     const r1 = await pool.reserve();
     const order: number[] = [];
@@ -280,21 +299,23 @@ describe("AccountPool — queue (woken by release, no polling)", () => {
     await new Promise((r) => setTimeout(r, 20));
     r1.release();
     await Promise.all([w1, w2]);
-    expect(order).toEqual([1, 2]);
+    expect(order).toEqual([1, 2]); // FIFO regardless of which account each got
   });
 
   it("failing waiter (timeout) does not consume a future wake", async () => {
     const store = new FakeStore();
-    store.accounts = [stored("a")];
+    store.accounts = [stored("a"), stored("b")];
     const pool = await makePool(store, new FakeClock(), { maxInFlightPerAccount: 1, queueTimeoutMs: 30 });
     const r1 = await pool.reserve();
+    const r2 = await pool.reserve(); // fill both slots
     const doomed = pool.reserve().catch((e) => e);
-    await new Promise((r) => setTimeout(r, 50)); // doomed times out, leaves queue
-    // New waiter joins and gets woken by the ORIGINAL reservation's release.
+    await new Promise((r) => setTimeout(r, 60)); // doomed times out, leaves queue
+    // New waiter joins and gets woken by an original reservation's release.
     const late = pool.reserve().then((r) => r.accountId);
     await new Promise((r) => setTimeout(r, 10));
     r1.release();
     expect(await late).toBe("a");
+    r2.release();
   });
 });
 
