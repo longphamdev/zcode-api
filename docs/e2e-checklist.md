@@ -11,6 +11,13 @@
 - [ ] **Backup `credentials.json`** từ docker volume:
   `docker cp zcode-api-zcode-proxy-1:/data/auth/credentials.json ./credentials-backup.json`
 - [ ] **Backup `ZCODE_PROXY_CREDENTIAL_SECRET`** vào password manager — **KHÔNG** để cạnh file backup (không secret = không giải mã được)
+- [ ] **Kiểm chứng backup** (backup chưa decode = chưa phải backup):
+  ```bash
+  BACKUP_FILE=./credentials-backup.json \
+  ZCODE_PROXY_CREDENTIAL_SECRET=<secret-từ-password-manager> \
+  bun run scripts/verify-credentials-backup.ts
+  ```
+  Phải in `OK` + danh sách account (userId masked). Exit ≠ 0 = cặp file/secret không khớp.
 - [ ] Deploy bản mới với 1 acc → chạy vài request thường, xác nhận hành vi y như cũ (pass-through)
 - [ ] Bật debug
 - [ ] Claim quota acc thứ hai trên web ZAI (bằng tay)
@@ -118,5 +125,8 @@ curl -s localhost:18080/quota | jq
 ## Nếu có gì đó sai
 
 1. `auth remove` acc2 → quay về 1-acc pass-through (hành vi cũ, đã verify)
-2. Rollback: dùng lại image cũ + restore `credentials.json` backup + secret
+2. **Rollback LƯU Ý QUAN TRỌNG**: image cũ **không đọc được file v2** — quay về
+   image cũ mà không khôi phục file thì proxy cũ không đăng nhập được. Rollback
+   đúng = (1) quay image cũ VÀ (2) khôi phục `credentials.json` từ `.bak` hoặc
+   backup tay (file v1 gốc, cùng secret)
 3. Mở issue với log unknown-error đã redact
