@@ -1,5 +1,15 @@
 # Multi-Account Guide
 
+## Before deploying (one-time)
+
+1. **Back up the store AND the secret separately**: copy `credentials.json`
+   (docker volume `/data/auth/credentials.json`) somewhere safe — but the
+   backup is useless without `ZCODE_PROXY_CREDENTIAL_SECRET` (AES-GCM key).
+   Store the secret in a password manager, NOT next to the backup file.
+2. Roll out with a single account first: the pool is pass-through there and
+   behavior is identical to the pre-multi-account proxy. Add the second
+   account only after a few clean days.
+
 ## Adding / removing accounts
 
 ```bash
