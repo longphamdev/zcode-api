@@ -82,6 +82,17 @@ export interface PoolOptions {
    */
   rateLimitCooldownMs?: number;
   /**
+   * Half-open delay for expired (401-marked) accounts, in ms. After this,
+   * one probe request is allowed; 401 re-arms, 2xx heals. Default 10 min.
+   * Config: `accounts.expiredHalfOpenMs`. `0` makes the probe immediate.
+   */
+  expiredHalfOpenMs?: number;
+  /**
+   * Window (ms) for the global-401 detector: >= 2 distinct accounts 401ing
+   * within this window is treated as an upstream-wide incident. Default 30s.
+   */
+  global401WindowMs?: number;
+  /**
    * Reservation watchdog: a reservation held longer than this is force-
    * released with a warning (protects the cap against leaked slots — e.g.
    * a runtime that never delivers body-stream completion events, or a
@@ -144,7 +155,11 @@ export class AccountPool {
   private readonly queueTimeoutMs: number;
   private readonly rateLimitCooldownMs: number;
   private readonly reservationTimeoutMs: number;
+  private readonly expiredHalfOpenMs: number;
+  private readonly global401WindowMs: number;
   private readonly now: () => number;
+  /** Recent 401 timestamps per account — the global-outage detector. */
+  private recent401s: Array<{ id: string; at: number }> = [];
 
   private accounts = new Map<string, StoredAccount>();
   private runtime = new Map<string, AccountRuntime>();
@@ -160,6 +175,8 @@ export class AccountPool {
     this.queueTimeoutMs = opts.queueTimeoutMs ?? 5_000;
     this.rateLimitCooldownMs = opts.rateLimitCooldownMs ?? 30_000;
     this.reservationTimeoutMs = opts.reservationTimeoutMs ?? 15 * 60_000;
+    this.expiredHalfOpenMs = opts.expiredHalfOpenMs ?? 10 * 60_000;
+    this.global401WindowMs = opts.global401WindowMs ?? 30_000;
     this.now = opts.now ?? Date.now;
   }
 
@@ -225,6 +242,11 @@ export class AccountPool {
     return [...this.runtime.values()].map((r) => ({ ...r }));
   }
 
+  /** Account labels (safe to surface in error messages — never credentials). */
+  labels(): Array<{ id: string; label?: string }> {
+    return [...this.accounts.values()].map((a) => ({ id: a.id, ...(a.label ? { label: a.label } : {}) }));
+  }
+
   accountCount(): number {
     return this.accounts.size;
   }
@@ -255,12 +277,36 @@ export class AccountPool {
     if (quotaExpiresAtMs !== undefined) r.quotaExpiresAtMs = quotaExpiresAtMs;
   }
 
-  /** Auth dead (refresh confirmed invalid upstream) — not pickable. */
-  markExpired(accountId: string): void {
+  /**
+   * Auth rejected upstream (401, account-level). Not pickable until the
+   * half-open delay elapses — then one probe request is allowed (see
+   * `pickable`). Because this system's JWTs carry no `exp`, `expired` can
+   * also mean a transient upstream auth incident; half-open bounds that
+   * blast radius.
+   */
+  markExpired(accountId: string, halfOpenDelayMs?: number): void {
     const r = this.runtime.get(accountId);
     if (!r) return;
     r.status = "expired";
-    r.retryAtMs = undefined;
+    r.retryAtMs = this.now() + (halfOpenDelayMs ?? this.expiredHalfOpenMs);
+  }
+
+  /**
+   * Record a 401 for `accountId` at `atMs` and prune the window. When many
+   * DISTINCT accounts get 401 within `global401WindowMs`, the outage is
+   * almost certainly upstream-wide (gateway/auth incident) — callers should
+   * stop marking accounts expired and surface the error instead.
+   */
+  note401(accountId: string, atMs: number): void {
+    this.recent401s.push({ id: accountId, at: atMs });
+    this.recent401s = this.recent401s.filter((e) => atMs - e.at < this.global401WindowMs);
+  }
+
+  /** True when >= 2 distinct accounts saw a 401 inside the recent window. */
+  isGlobal401(): boolean {
+    const cutoff = this.now() - this.global401WindowMs;
+    const distinct = new Set(this.recent401s.filter((e) => e.at >= cutoff).map((e) => e.id));
+    return distinct.size >= 2;
   }
 
   /** Feed poller data (ticket #6). Does not gate picking on staleness. */
@@ -277,10 +323,14 @@ export class AccountPool {
     if (r) r.consecutiveFailures++;
   }
 
-  /** A healthy response resets the consecutive-failure counter. */
+  /** A healthy response resets the consecutive-failure counter and heals a
+   *  half-open probe (the account's credential works again). */
   noteSuccess(accountId: string): void {
     const r = this.runtime.get(accountId);
-    if (r) r.consecutiveFailures = 0;
+    if (r) {
+      r.consecutiveFailures = 0;
+      if (r.status === "expired" || r.status === "healthy") r.retryAtMs = undefined;
+    }
   }
 
   // -- picking ----------------------------------------------------------------
@@ -298,6 +348,20 @@ export class AccountPool {
         r.status = "healthy"; // quota window over — lazily revive
         r.quotaExpiresAtMs = undefined;
       }
+      // Half-open: an expired account (401-marked) gets one probe request
+      // after the half-open delay. A 401 re-arms the delay; a 2xx returns
+      // it to healthy. JWTs have no exp in this system, so "expired" can
+      // also mean a transient upstream auth incident — without half-open a
+      // single flapped 401 would lock the account until a manual re-login.
+      if (r.status === "expired") {
+        const halfOpenAt = r.retryAtMs ?? 0;
+        if (t >= halfOpenAt && r.inFlight === 0) {
+          r.status = "healthy"; // probe — noteSuccess/markExpired will settle it
+          r.retryAtMs = undefined;
+        } else {
+          continue;
+        }
+      }
       if (r.status === "healthy" && r.inFlight < cap) out.push(id);
     }
     return out;
@@ -314,7 +378,7 @@ export class AccountPool {
    * `signal`: abort while queued removes the waiter (no leaked slot later);
    * an already-aborted signal rejects immediately.
    */
-  async reserve(opts: { queueTimeoutMs?: number; signal?: AbortSignal } = {}): Promise<Reservation> {
+  async reserve(opts: { queueTimeoutMs?: number; signal?: AbortSignal; exclude?: ReadonlySet<string> } = {}): Promise<Reservation> {
     if (opts.signal?.aborted) {
       throw new AccountsBusyError(1, "request already aborted");
     }
@@ -322,7 +386,7 @@ export class AccountPool {
     // store via lockfile; pick from a store read at most 1s old.
     await this.syncIfStale();
     const singleAccount = this.accounts.size === 1;
-    const id = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined);
+    const id = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined, opts.exclude);
     if (id) return this.makeReservation(id);
 
     // Nothing immediate. Distinguish the three failure shapes first.
@@ -335,7 +399,7 @@ export class AccountPool {
     }
     await this.enqueueWait(timeoutMs, opts.signal);
     // Woken by a release() (or timeout-throw above). Try again.
-    const retryId = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined);
+    const retryId = this.pickImmediate(singleAccount ? Number.MAX_SAFE_INTEGER : undefined, opts.exclude);
     if (retryId) return this.makeReservation(retryId);
     this.throwForPoolState();
     // release() woke us but another waiter took the slot — one more queued
@@ -343,9 +407,9 @@ export class AccountPool {
     throw new AccountsBusyError(1, "all accounts still busy after queue wake");
   }
 
-  private pickImmediate(capOverride?: number): string | null {
+  private pickImmediate(capOverride?: number, exclude?: ReadonlySet<string>): string | null {
     const cap = capOverride ?? this.maxInFlight;
-    const ids = this.pickable(cap);
+    const ids = this.pickable(cap).filter((id) => !exclude?.has(id));
     if (ids.length === 0) return null;
     let picked: string;
     if (this.strategy === "most-remaining-quota") {

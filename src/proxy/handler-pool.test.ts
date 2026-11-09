@@ -505,7 +505,9 @@ describe("proxyRequest — 401 failover + credential freshness (#5)", () => {
       expect(resp.status).toBe(401);
       const body = (await resp.json()) as { error: { message: string } };
       expect(body.error.message).toContain("auth login");
-      expect(pool.runtimeFor("a")!.status).toBe("expired");
+      // Pass-through parity: the ONLY account is NOT marked expired — legacy
+      // behavior passes the 401 through and lets the client decide.
+      expect(pool.runtimeFor("a")!.status).toBe("healthy");
     } finally {
       server.close();
     }
@@ -552,5 +554,119 @@ describe("proxyRequest — 401 failover + credential freshness (#5)", () => {
     pool.markExpired("a");
     await pool.syncWithStore(); // same credential — state must survive
     expect(pool.runtimeFor("a")!.status).toBe("expired");
+  });
+});
+
+describe("proxyRequest — 401 failover edge cases (#5 step 1 review)", () => {
+  it("body re-dispatch: upstream B receives the EXACT body A received", async () => {
+    const bodies: string[] = [];
+    const server = createServer((req, res) => {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => {
+        bodies.push(data);
+        const key = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+        if (key === "a") {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end('{"error":{"type":"invalid_api_key"}}');
+        } else {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end('{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"glm-4.6","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}');
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a"), stored("b")];
+      const pool = await makePool(store);
+      const bigBody = JSON.stringify({
+        model: "glm-4.6",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "é".repeat(2000) + " 🎌 boundary" }],
+      });
+      const req = new Request("http://127.0.0.1:8080/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: bigBody,
+      });
+      const resp = await proxyRequest(req, "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(resp.status).toBe(200);
+      await resp.text();
+      expect(bodies.length).toBe(2);
+      // Both upstreams got the same (translated) body — no truncation/duplication.
+      expect(bodies[0]).toBe(bodies[1]);
+      expect(bodies[1].length).toBeGreaterThan(1000);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("never re-picks the 401'd account within the same request (tried-set)", async () => {
+    const apiKeys: string[] = [];
+    const server = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        const key = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+        apiKeys.push(key);
+        if (key === "a") {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end('{"error":"nope"}');
+        } else if (key === "b") {
+          // B also 401s — with only A+B, no account remains → client gets 401.
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end('{"error":"nope"}');
+        } else {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end('{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"glm-4.6","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}');
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a"), stored("b")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(resp.status).toBe(401);
+      await resp.text();
+      // Exactly 2 upstream calls: A then B. A is never re-tried (round-robin
+      // would otherwise loop back to A after B).
+      expect(apiKeys).toEqual(["a", "b"]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("single-account 401: pass-through parity (not marked expired)", async () => {
+    let count = 0;
+    const server = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        count++;
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end('{"error":"nope"}');
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a")];
+      const pool = await makePool(store);
+      const r1 = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(r1.status).toBe(401);
+      await r1.text();
+      expect(pool.runtimeFor("a")!.status).toBe("healthy"); // NOT locked out
+      // A second request still reaches upstream (legacy behavior).
+      const r2 = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(r2.status).toBe(401);
+      await r2.text();
+      expect(count).toBe(2);
+    } finally {
+      server.close();
+    }
   });
 });

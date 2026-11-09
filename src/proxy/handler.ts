@@ -159,7 +159,13 @@ export async function proxyRequest(
       if (err instanceof NoAccountAvailableError) {
         if (debug) debugError(reqId, "no_account_available", err.message);
         printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
-        return errorResponse(503, "no_account_available", err.message);
+        // Operator-facing: name the accounts (labels, never credentials) and
+        // the actual fix — every path back to capacity is an interactive
+        // re-login in this system.
+        const accountList = opts.accountPool!.labels()
+          .map((a) => `${a.label ?? a.id}`)
+          .join(", ");
+        return errorResponse(503, "no_account_available", `${err.message}. Accounts: ${accountList}. Re-login an account: zcode-proxy auth login <provider> --add`);
       }
       if (err instanceof AccountsBusyError) {
         if (debug) debugError(reqId, "accounts_busy", err.message);
@@ -407,6 +413,8 @@ export async function proxyRequest(
   let upstreamResp: Response;
   const failoverAttempts = reservation ? opts.accountPool!.accountCount() : 1;
   let attemptIndex = 0;
+  /** Accounts already tried in this request — a 401'd account is never re-picked. */
+  const triedAccounts = new Set<string>(reservation ? [reservation.accountId] : []);
   while (true) {
     attemptIndex += 1;
     try {
@@ -510,14 +518,31 @@ export async function proxyRequest(
     // account NOW (headers not yet sent downstream; the request is replayable).
     if (reservation) {
       const pool = opts.accountPool!;
-      pool.markExpired(reservation.accountId);
-      if (debug) debugError(reqId, "account_expired", `${reservation.accountId} credential rejected upstream`);
+      // Single-account pass-through parity (mirrors the 429 rule): a 401 on
+      // the only account must not lock the pool into "expired" — the client
+      // gets the 401 and decides (legacy behavior).
+      const failedAccountId = reservation.accountId;
+      if (pool.accountCount() > 1) {
+        // Global-401 guard: when EVERY account has been rejected in a short
+        // window, the outage is upstream-wide (gateway/auth incident), not
+        // per-account — don't burn the whole pool into "expired"; the client
+        // gets the 401 and the incident is visible in logs.
+        pool.note401(failedAccountId, Date.now());
+        if (!pool.isGlobal401()) {
+          pool.markExpired(failedAccountId);
+          if (debug) debugError(reqId, "account_expired", `${failedAccountId} credential rejected upstream`);
+        } else if (debug) {
+          debugError(reqId, "global_401_suspected", `${failedAccountId} 401 — many accounts rejected in a short window; not marking expired`);
+        }
+      }
+      if (debug) debugError(reqId, "account_401", `${failedAccountId} upstream 401`);
+      triedAccounts.add(failedAccountId);
       reservation.release();
       reservation = null;
       if (attemptIndex < failoverAttempts) {
-        console.log(`${reqId} 401 on account — failing over (attempt ${attemptIndex + 1}/${failoverAttempts})`);
+        console.log(`${reqId} 401 on account ${failedAccountId} — failing over (attempt ${attemptIndex + 1}/${failoverAttempts})`);
         try {
-          const next = await pool.reserve({ signal: clientReq.signal });
+          const next = await pool.reserve({ signal: clientReq.signal, exclude: triedAccounts });
           reservation = next;
           cred = next.credential;
           upstreamHeaderPairs = buildPairs();

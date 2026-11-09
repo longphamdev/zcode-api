@@ -491,3 +491,92 @@ describe("AccountPool — watchdog aborts the request", () => {
     expect(r.signal.aborted).toBe(false);
   });
 });
+
+describe("AccountPool — expired half-open recovery", () => {
+  it("expired account gets one probe after the half-open delay; 2xx heals", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock, { expiredHalfOpenMs: 60_000 });
+    pool.markExpired("a");
+    expect(pool.hasPickable()).toBe(false); // within the delay
+    clock.advance(60_001);
+    expect(pool.hasPickable()).toBe(true); // probe allowed
+    const r = await pool.reserve();
+    expect(r.accountId).toBe("a");
+    r.release();
+    pool.noteSuccess("a"); // upstream says 2xx
+    expect(pool.runtimeFor("a")!.status).toBe("healthy");
+  });
+
+  it("probe 401 re-arms the half-open delay", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock, { expiredHalfOpenMs: 60_000 });
+    pool.markExpired("a");
+    clock.advance(60_001);
+    const r = await pool.reserve(); // probe
+    r.release();
+    clock.advance(1000);
+    pool.markExpired("a"); // probe failed with 401 → re-arm
+    expect(pool.hasPickable()).toBe(false); // locked again for the full delay
+    clock.advance(59_000);
+    expect(pool.hasPickable()).toBe(false);
+    clock.advance(1_001);
+    expect(pool.hasPickable()).toBe(true);
+  });
+});
+
+describe("AccountPool — global-401 detector", () => {
+  it("2 distinct accounts 401ing in the window → isGlobal401", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock, { global401WindowMs: 30_000 });
+    pool.note401("a", clock.now());
+    expect(pool.isGlobal401()).toBe(false);
+    pool.note401("b", clock.now() + 1000);
+    expect(pool.isGlobal401()).toBe(true);
+  });
+
+  it("same account twice does NOT trigger global", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock, { global401WindowMs: 30_000 });
+    pool.note401("a", clock.now());
+    pool.note401("a", clock.now() + 5000);
+    expect(pool.isGlobal401()).toBe(false);
+  });
+
+  it("401s outside the window are pruned", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock, { global401WindowMs: 30_000 });
+    pool.note401("a", clock.now());
+    clock.advance(31_000);
+    pool.note401("b", clock.now());
+    expect(pool.isGlobal401()).toBe(false);
+  });
+});
+
+describe("AccountPool — re-login state reset preserves inFlight", () => {
+  it("credential change does NOT reset an account with in-flight reservations", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    const r = await pool.reserve();
+    expect(pool.runtimeFor("a")!.inFlight).toBe(1);
+    pool.markExpired("a"); // somehow expired while in flight
+    // Re-login changes the credential:
+    store.accounts = [{ id: "a", credential: cred("a-new"), addedAt: 0 }];
+    await pool.syncWithStore();
+    // inFlight must survive (the release path depends on it):
+    expect(pool.runtimeFor("a")!.inFlight).toBe(1);
+    r.release();
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+  });
+});
