@@ -231,6 +231,7 @@ export class AccountPool {
           prevCred.secret !== existingCred.secret ||
           prevCred.jwt !== existingCred.jwt);
       if (credentialChanged && existingRuntime && existingRuntime.status !== "healthy" && existingRuntime.inFlight === 0) {
+        this.logTransition(id, existingRuntime.status, "healthy", "credential changed (re-login)");
         // A re-login replaced the credential for a sick account — reset its
         // runtime state so it rejoins the pool (expired/cooling/exhausted
         // referred to the OLD credential).
@@ -294,6 +295,16 @@ export class AccountPool {
   // -- state transitions ----------------------------------------------------
 
   /**
+   * Grep-able state transition log (#8 watchlist metric 2): one line per
+   * transition, `account=<id> from=<x> to=<y> reason=<z>` — count with
+   * `grep -c "from=healthy to=exhausted"` etc. No credential material.
+   */
+  private logTransition(accountId: string, from: AccountStatus, to: AccountStatus, reason: string): void {
+    if (from === to) return;
+    console.log(`pool: account=${accountId} from=${from} to=${to} reason=${reason}`);
+  }
+
+  /**
    * Rate-limited from an upstream `Retry-After` in SECONDS — the deadline is
    * computed with the pool's own clock (handlers must not mix Date.now()
    * with an injectable pool clock).
@@ -319,6 +330,7 @@ export class AccountPool {
     const r = this.runtime.get(accountId);
     if (!r) return;
     if (r.status === "exhausted" || r.status === "expired") return; // terminal outranks cooling
+    const from = r.status;
     let until = retryAtMs ?? this.now() + this.rateLimitCooldownMs;
     // Clamp: a weird upstream Retry-After (days) must not lock an account out
     // of rotation for that long. The client still sees the verbatim header —
@@ -327,9 +339,11 @@ export class AccountPool {
     if (until > maxCooling) until = maxCooling;
     if (until <= this.now()) {
       // Expired cooldown → healthy again.
+      this.logTransition(accountId, from, "healthy", "cooling elapsed");
       r.status = "healthy";
       r.retryAtMs = undefined;
     } else {
+      this.logTransition(accountId, from, "cooling", "upstream 429");
       r.status = "cooling";
       r.retryAtMs = until;
     }
@@ -345,6 +359,7 @@ export class AccountPool {
   markExhausted(accountId: string, quotaExpiresAtMs?: number): void {
     const r = this.runtime.get(accountId);
     if (!r) return;
+    this.logTransition(accountId, r.status, "exhausted", quotaExpiresAtMs !== undefined ? "quota reset known" : "biz-1005");
     r.status = "exhausted";
     r.retryAtMs = undefined;
     if (quotaExpiresAtMs !== undefined) {
@@ -364,6 +379,7 @@ export class AccountPool {
   markExpired(accountId: string, halfOpenDelayMs?: number): void {
     const r = this.runtime.get(accountId);
     if (!r) return;
+    this.logTransition(accountId, r.status, "expired", "upstream 401");
     r.status = "expired";
     r.retryAtMs = this.now() + (halfOpenDelayMs ?? this.expiredHalfOpenMs);
   }
@@ -495,6 +511,7 @@ export class AccountPool {
       if (r.status === "expired" || r.status === "exhausted") {
         // Healed: a successful authenticated interaction proves the
         // credential works and quota exists.
+        this.logTransition(accountId, r.status, "healthy", "request succeeded");
         r.status = "healthy";
         r.retryAtMs = undefined;
         r.quotaExpiresAtMs = undefined;
@@ -512,10 +529,12 @@ export class AccountPool {
     const out: string[] = [];
     for (const [id, r] of this.runtime) {
       if (r.status === "cooling" && r.retryAtMs !== undefined && r.retryAtMs <= t) {
+        this.logTransition(id, "cooling", "healthy", "cooldown elapsed");
         r.status = "healthy"; // cooldown elapsed — lazily revive
         r.retryAtMs = undefined;
       }
       if (r.status === "exhausted" && r.quotaExpiresAtMs !== undefined && r.quotaExpiresAtMs <= t) {
+        this.logTransition(id, "exhausted", "healthy", "quota window elapsed");
         r.status = "healthy"; // quota window (or half-open probe) elapsed — revive
         r.quotaExpiresAtMs = undefined;
       }
@@ -527,6 +546,7 @@ export class AccountPool {
       if (r.status === "expired") {
         const halfOpenAt = r.retryAtMs ?? 0;
         if (t >= halfOpenAt && r.inFlight === 0) {
+          this.logTransition(id, "expired", "healthy", "half-open probe");
           r.status = "healthy"; // probe — noteSuccess/markExpired will settle it
           r.retryAtMs = undefined;
         } else {

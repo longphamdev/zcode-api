@@ -79,10 +79,17 @@ claim it manually on the web.
 
 ## Accepted limitations
 
+- **Campaign quota is not stable**: auto-claimed campaign quota can expire at any
+  time and the account falls back to biz-1005 → exhausted → failover. The proxy
+  handles that cycle correctly — but do not build plans on campaign quota being
+  there.
 - **Async jobs do not failover mid-job**: the job runs on a copied credential; if the
   account dies mid-job the job errors — new jobs pick a healthy account.
 - **Single-account pass-through**: 429/401/1005 on the only account reach the client
   untouched (legacy behavior).
 - **Auto-claim multi-account is out of scope** (ToS risk; deliberately excluded).
+- **Campaign quota is not stable**: auto-claimed campaign plans come and go. The proxy
+  handles their expiry (1005 → exhausted → failover), but do not plan capacity around
+  claimed quota — it can vanish and return 1005 at any time.
 - 401 handling is interactive (re-login) — there is no token refresh grant in this
   system's OAuth flows.
