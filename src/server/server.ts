@@ -92,6 +92,21 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       });
     }
 
+    // Admin dashboard: the HTML shell is unauthenticated (no data in it);
+    // its data endpoint /admin/state enforces the proxy API key itself
+    // (header OR ?key= — browsers can't set custom headers on fetch without
+    // CORS setup). Must sit BEFORE the global auth gate, which doesn't know
+    // about the ?key= flow.
+    if (method === "GET" && (path === "/admin" || path === "/admin/" || path === "/admin/state")) {
+      if (path === "/admin/state") {
+        return handleAdminState(req, { proxyApiKey: config.auth.proxyApiKey });
+      }
+      return new Response(ADMIN_DASHBOARD_HTML, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
+      });
+    }
+
     if (config.auth.proxyApiKey) {
       const authHeader = req.headers.get("authorization") ?? req.headers.get("x-api-key");
       if (!authHeader || !checkProxyKey(authHeader, config.auth.proxyApiKey)) {
@@ -113,10 +128,6 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
 
     if (path === "/quota" && method === "GET") {
       return handleQuota(config, opts.fetchImpl, undefined, opts.accountPool);
-    }
-
-    if (path === "/admin/state" && method === "GET") {
-      return handleAdminState(req, { proxyApiKey: config.auth.proxyApiKey });
     }
 
     if (path === "/admin" && method === "GET") {
