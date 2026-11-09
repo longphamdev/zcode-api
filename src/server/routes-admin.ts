@@ -10,6 +10,7 @@ import { listAccounts } from "../auth/accounts.js";
 
 export interface AdminRouteOptions {
   proxyApiKey?: string;
+  pool?: import("../auth/pool.js").AccountPool;
 }
 
 /**
@@ -89,14 +90,31 @@ export async function handleAdminState(req: Request, opts: AdminRouteOptions): P
     }
   }
   const body = metricsRegistry.snapshot();
-  // Merge labels from the account store (metrics counters don't carry them —
-  // they're keyed by accountId only).
+  // Merge the store + pool snapshot: every stored account appears (even with
+  // zero requests — counters are RAM and reset on restart, but the account
+  // roster, labels and live statuses come from the pool/store).
   const accounts = await listAccounts().catch(() => []);
   const labels = new Map(accounts.map((a) => [a.id, a.label]));
-  for (const a of body.accounts) {
-    const label = labels.get(a.id);
-    if (label) a.label = label;
+  const poolRuntimes = new Map(
+    (opts.pool?.snapshot() ?? []).map((r) => [r.id, r]),
+  );
+  const knownIds = new Set([...body.accounts.map((a) => a.id), ...accounts.map((a) => a.id)]);
+  for (const id of knownIds) {
+    const label = labels.get(id);
+    const runtime = poolRuntimes.get(id);
+    let entry = body.accounts.find((a) => a.id === id);
+    if (!entry) {
+      entry = { id, totals: { requests: 0, success: 0, quota1005: 0, rate429: 0, auth401: 0, busy: 0, tokensUsed: 0 }, models: {}, hourly: {} };
+      body.accounts.push(entry);
+    }
+    if (label) entry.label = label;
+    if (runtime) entry.status = runtime.status;
   }
+  body.accounts.sort((a, b) => {
+    const ai = accounts.findIndex((x) => x.id === a.id);
+    const bi = accounts.findIndex((x) => x.id === b.id);
+    return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
+  });
   return new Response(JSON.stringify(body, null, 1), {
     status: 200,
     headers: {

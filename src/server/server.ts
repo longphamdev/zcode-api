@@ -99,7 +99,7 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     // about the ?key= flow.
     if (method === "GET" && (path === "/admin" || path === "/admin/" || path === "/admin/state")) {
       if (path === "/admin/state") {
-        return handleAdminState(req, { proxyApiKey: config.auth.proxyApiKey });
+        return handleAdminState(req, { proxyApiKey: config.auth.proxyApiKey, pool: opts.accountPool });
       }
       return new Response(ADMIN_DASHBOARD_HTML, {
         status: 200,

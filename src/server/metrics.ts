@@ -25,6 +25,8 @@ export interface ModelCounters {
 export interface AccountMetrics {
   id: string;
   label?: string;
+  /** Live pool status (healthy/cooling/exhausted/expired) — merged at read. */
+  status?: string;
   totals: ModelCounters;
   /** Per-model counters keyed by requested model id (e.g. "glm-5.3-flash"). */
   models: Record<string, ModelCounters>;

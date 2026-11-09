@@ -81,6 +81,11 @@ async function load() {
 function fmt(n) { return n === undefined ? "—" : Number(n).toLocaleString("vi-VN"); }
 function esc(s) { const d = document.createElement("div"); d.textContent = String(s); return d.innerHTML; }
 
+function labelOf(d, id) {
+  const a = (d.accounts || []).find((x) => x.id === id);
+  return a ? (a.label || a.id.slice(0, 8)) : id.slice(0, 8);
+}
+
 function render(d) {
   // Accounts table
   let h = "<tr><th>acc</th><th>status</th><th>requests</th><th>success</th><th>1005</th><th>429</th><th>401</th><th>tokens</th><th>claim</th></tr>";
@@ -132,12 +137,12 @@ function render(d) {
     const byModel = {};
     for (const s of samples) (byModel[s.model] ??= []).push(s);
     for (const [model, list] of Object.entries(byModel)) {
-      if (list.length < 2) { h += "<tr><td>" + esc(acc.slice(0, 8)) + "</td><td>" + esc(model) + "</td><td>" + fmt(list[0].remainingUnits) + "</td><td>" + fmt(list[0].usedUnits) + "</td><td>" + list.length + "</td><td>— (cần ≥2 điểm)</td></tr>"; continue; }
+      if (list.length < 2) { h += "<tr><td>" + esc(labelOf(d, acc)) + "</td><td>" + esc(model) + "</td><td>" + fmt(list[0].remainingUnits) + "</td><td>" + fmt(list[0].usedUnits) + "</td><td>" + list.length + "</td><td>— (cần ≥2 điểm)</td></tr>"; continue; }
       const newest = list[list.length - 1], oldest = list[0];
       const dtH = (newest.at - oldest.at) / 3600000;
       const dUsed = (newest.usedUnits ?? 0) - (oldest.usedUnits ?? 0);
       const rate = dtH > 0 ? Math.round(dUsed / dtH).toLocaleString("vi-VN") + "/h" : "—";
-      h += "<tr><td>" + esc(acc.slice(0, 8)) + "</td><td>" + esc(model) + "</td><td>" + fmt(newest.remainingUnits) + "</td><td>" + fmt(newest.usedUnits) + "</td><td>" + list.length + "</td><td>" + rate + "</td></tr>";
+      h += "<tr><td>" + esc(labelOf(d, acc)) + "</td><td>" + esc(model) + "</td><td>" + fmt(newest.remainingUnits) + "</td><td>" + fmt(newest.usedUnits) + "</td><td>" + list.length + "</td><td>" + rate + "</td></tr>";
     }
   }
   document.getElementById("polls").innerHTML = h || "<tr><td>chưa có data</td></tr>";
@@ -146,7 +151,7 @@ function render(d) {
   let t = "";
   for (const tr of [...d.transitions].reverse()) {
     const cls = tr.to === "healthy" ? "ok" : tr.to === "exhausted" || tr.to === "expired" ? "bad" : "warn";
-    t += "<div><span class='meta'>" + new Date(tr.at).toLocaleTimeString() + "</span> " + esc(tr.accountId.slice(0, 8)) + " <span class='" + cls + "'>" + esc(tr.from) + " → " + esc(tr.to) + "</span> <span class='meta'>" + esc(tr.reason) + "</span></div>";
+    t += "<div><span class='meta'>" + new Date(tr.at).toLocaleTimeString() + "</span> " + esc(labelOf(d, tr.accountId)) + " <span class='" + cls + "'>" + esc(tr.from) + " → " + esc(tr.to) + "</span> <span class='meta'>" + esc(tr.reason) + "</span></div>";
   }
   document.getElementById("transitions").innerHTML = t || "<div>chưa có</div>";
 }
