@@ -8,6 +8,7 @@ import { ResponseStore } from "../responses/store.js";
 import { createAccountPool, type AccountPool } from "../auth/pool.js";
 import { createQuotaPoller, type QuotaPoller } from "../auth/quota-poller.js";
 import { listAccounts } from "../auth/accounts.js";
+import { metricsRegistry } from "./metrics.js";
 
 /** Build `startServer` options, wiring the Responses store when its config gate is on. */
 export function buildServerOptions(
@@ -31,6 +32,13 @@ export function buildServerOptions(
       reservationTimeoutMs: config.accounts?.reservationTimeoutMs,
     });
     pool.setStrategy(config.accounts?.pickStrategy ?? "round-robin");
+    // Metrics registry wiring (#8 dashboard) — global hook avoids a
+    // pool → metrics import cycle.
+    (globalThis as { __poolMetricsHooks?: { onTransition?: (id: string, f: string, t: string, r: string) => void; onPoll?: (id: string, models: Array<{ model: string; remainingUnits?: number; usedUnits?: number }>) => void } }).__poolMetricsHooks = {
+      onTransition: (id, f, t, r) => metricsRegistry.recordTransition(id, f, t, r),
+      onPoll: (id, models) => metricsRegistry.recordPoll(id, models),
+    };
+    opts.accountPool = pool;
     opts.accountPool = pool;
     void pool.syncWithStore(); // async warm-up; first request syncs again if pending
     // Per-account quota poller (#6): feeds remainingUnits/health into the pool.

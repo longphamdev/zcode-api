@@ -58,6 +58,7 @@ import { StreamMetrics } from "./stream-metrics.js";
 import { inflateWithCap } from "./inflate.js";
 import { buildAnthropicMetadataUserId } from "./trace-headers.js";
 import { AccountPool, AllAccountsCoolingError, AccountsBusyError, NoAccountAvailableError, type Reservation } from "../auth/pool.js";
+import { metricsRegistry } from "../server/metrics.js";
 
 /** Options for the proxy handler. */
 export interface ProxyHandlerOptions {
@@ -150,6 +151,7 @@ export async function proxyRequest(
     try {
       reservation = await opts.accountPool.reserve({ signal: clientReq.signal, modelHint: meta.model });
       cred = reservation.credential;
+      metricsRegistry.recordRequest(reservation.accountId, meta.model);
     } catch (err) {
       if (err instanceof AllAccountsCoolingError) {
         const retryAfterSec = Math.max(1, Math.ceil((err.retryAtMs - Date.now()) / 1000));
@@ -635,6 +637,19 @@ export async function proxyRequest(
       // A 200-with-1005 is NOT a success (it heals exhausted — the exact
       // opposite of what the classification just decided).
       pool.noteSuccess(booked.accountId);
+      // Token usage: only for non-streaming JSON responses (a clone().json()
+      // on an SSE stream would block until the stream ends).
+      if ((upstreamResp.headers.get('content-type') ?? '').includes('application/json')) {
+        const usage = (await upstreamResp.clone().json().catch(() => null) as { usage?: { total_tokens?: number } } | null)?.usage?.total_tokens;
+        metricsRegistry.recordOutcome(booked.accountId, meta.model, "success", { tokensUsed: usage });
+      } else {
+        metricsRegistry.recordOutcome(booked.accountId, meta.model, "success");
+      }
+    } else if (upstreamResp.status === 429) {
+      const raHeader = upstreamResp.headers.get("retry-after");
+      metricsRegistry.recordOutcome(booked.accountId, meta.model, "rate429", { retryAfterSec: raHeader !== null && Number.isFinite(Number(raHeader)) ? Number(raHeader) : undefined });
+    } else if (upstreamResp.status === 401) {
+      metricsRegistry.recordOutcome(booked.accountId, meta.model, "auth401");
     } else if (upstreamResp.status >= 400) {
       // Unknown error — log status + biz code + redacted headers so real
       // samples accumulate for ticket #5's matchers. Never rotate here.

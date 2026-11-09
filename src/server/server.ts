@@ -18,6 +18,7 @@ import { handleResponsesRoute } from "./routes-responses.js";
 import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute } from "./routes-async.js";
 import { handleMcpRoute, type McpRouteOptions } from "./routes-mcp.js";
 import { handleQuota } from "./routes-quota.js";
+import { handleAdminState } from "./routes-admin.js";
 import { errorResponse } from "../proxy/handler.js";
 import type { ResponseStore } from "../responses/store.js";
 
@@ -111,6 +112,10 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
 
     if (path === "/quota" && method === "GET") {
       return handleQuota(config, opts.fetchImpl, undefined, opts.accountPool);
+    }
+
+    if (path === "/admin/state" && method === "GET") {
+      return handleAdminState(req, { proxyApiKey: config.auth.proxyApiKey });
     }
 
     if (path === "/v1/messages" && method === "POST") {

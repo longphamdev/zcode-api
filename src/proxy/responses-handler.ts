@@ -77,6 +77,7 @@ import {
 import { ResponseStore, type StoredResponse } from "../responses/store.js";
 import { errorResponse, readBody, InflatedBodyTooLargeError } from "./handler.js";
 import { AllAccountsCoolingError, AccountsBusyError, NoAccountAvailableError } from "../auth/pool.js";
+import { metricsRegistry } from "../server/metrics.js";
 
 export interface ResponsesHandlerOptions {
   config: ProxyConfig;
@@ -177,6 +178,7 @@ export async function handleResponses(
     try {
       reservation = await opts.accountPool.reserve({ signal: clientReq.signal, modelHint: req.model });
       cred = reservation.credential;
+      metricsRegistry.recordRequest(reservation.accountId, req.model);
     } catch (err) {
       if (err instanceof AllAccountsCoolingError) {
         const retryAfterSec = Math.max(1, Math.ceil((err.retryAtMs - Date.now()) / 1000));

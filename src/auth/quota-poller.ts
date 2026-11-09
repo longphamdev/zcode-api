@@ -114,6 +114,8 @@ export function createQuotaPoller(
         // A successful authenticated poll proves the credential works — heal
         // expired/exhausted accounts (the poller is the primary probe).
         pool.updateQuota(accountId, result.remainingUnits, now(), result.models);
+        const hooks = (globalThis as { __poolMetricsHooks?: { onPoll?: (id: string, models: Array<{ model: string; remainingUnits?: number; usedUnits?: number }>) => void } }).__poolMetricsHooks;
+        hooks?.onPoll?.(accountId, result.models ?? []);
         if (result.quotaExpiresAtMs !== undefined) {
           pool.setQuotaExpiry(accountId, result.quotaExpiresAtMs);
         }

@@ -304,6 +304,9 @@ export class AccountPool {
   private logTransition(accountId: string, from: AccountStatus, to: AccountStatus, reason: string): void {
     if (from === to) return;
     console.log(`pool: account=${accountId} from=${from} to=${to} reason=${reason}`);
+    // Feed the metrics registry (#8 dashboard) without a hard import cycle:
+    const hooks = (globalThis as { __poolMetricsHooks?: { onTransition?: (id: string, f: string, t: string, r: string) => void } }).__poolMetricsHooks;
+    hooks?.onTransition?.(accountId, from, to, reason);
   }
 
   /**
