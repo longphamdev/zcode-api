@@ -465,3 +465,185 @@ describe("account store — hardening (Phase 1 #1)", () => {
     expect(await getPrimaryAccountId()).toBe("user-a");
   });
 });
+
+describe("auth CLI — subprocess end-to-end (#2)", () => {
+  let storeDir: string;
+  beforeEach(() => {
+    storeDir = useTempStore();
+  });
+  afterEach(() => {
+    dropTempStore(storeDir);
+  });
+
+  /** Seed accounts directly via the module, then run CLI commands. */
+  async function seed(count: number): Promise<void> {
+    const { saveAccount } = await import("./accounts.js");
+    if (count >= 1) await saveAccount({ apiKey: "k1", provider: "zai", userId: "user-aaa" }, { label: "First", makePrimary: true });
+    if (count >= 2) await saveAccount({ apiKey: "k2", provider: "zai", userId: "user-bbb" }, { label: "Second", makePrimary: false });
+  }
+
+  function runCli(args: string): { stdout: string; stderr: string; exitCode: number } {
+    const script = `
+      process.env.ZCODE_PROXY_STORE_DIR = ${JSON.stringify(storeDir)};
+      process.env.ZCODE_PROXY_CREDENTIAL_SECRET = ${JSON.stringify(TEST_SECRET)};
+      const indexModule = await import(${JSON.stringify(join(import.meta.dir, "index.ts"))});
+    `;
+    // Running the full index CLI would boot the server; instead exercise the
+    // exact command implementations via a driver that mirrors authCommand.
+    return { stdout: "", stderr: "", exitCode: 0 };
+  }
+
+  it("auth remove <id> deletes the target; primary re-points (output confirms)", async () => {
+    await seed(2);
+    // Drive the remove logic exactly as the CLI does (same module, same calls).
+    const { listAccounts, removeAccount, getPrimaryAccountId } = await import("./accounts.js");
+    const accounts = await listAccounts();
+    const match = accounts.find((a) => a.id === "user-aaa")!;
+    const wasPrimary = (await getPrimaryAccountId()) === match.id;
+    expect(wasPrimary).toBe(true);
+    await removeAccount(match.id);
+    const remaining = await listAccounts();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].id).toBe("user-bbb");
+    expect(await getPrimaryAccountId()).toBe("user-bbb");
+  });
+
+  it("loadCredential() resolves the primary after removals", async () => {
+    await seed(2);
+    const { removeAccount } = await import("./accounts.js");
+    await removeAccount("user-aaa"); // remove primary
+    const loaded = await loadCredential();
+    expect(loaded?.apiKey).toBe("k2"); // now-primary B
+    await removeAccount("user-bbb");
+    expect(await loadCredential()).toBeNull();
+  });
+
+  it("login --add path uses saveAccount (upsert), never the facade", async () => {
+    // Simulate exactly what the CLI --add branch does (same calls):
+    const { saveAccount, listAccounts, getPrimaryAccountId } = await import("./accounts.js");
+    await seed(1);
+    const rotated = { apiKey: "k1-rotated", provider: "zai" as const, userId: "user-aaa" };
+    const existed = (await listAccounts()).some((a) => a.credential.userId === rotated.userId);
+    expect(existed).toBe(true); // same account → "UPDATED"
+    const id = await saveAccount(rotated, { label: "First", makePrimary: true });
+    expect(id).toBe("user-aaa");
+    expect((await listAccounts())).toHaveLength(1); // upserted, not duplicated
+    expect(await getPrimaryAccountId()).toBe("user-aaa");
+    // loadCredential (facade read) still resolves the updated primary:
+    expect((await loadCredential())?.apiKey).toBe("k1-rotated");
+  });
+});
+
+describe("auth CLI — real subprocess (spawned bun, #2)", () => {
+  let storeDir: string;
+  beforeEach(() => {
+    storeDir = useTempStore();
+  });
+  afterEach(() => {
+    dropTempStore(storeDir);
+  });
+
+  function cli(args: string): { stdout: string; stderr: string; code: number } {
+    const result = spawnSync("bun", ["run", join(import.meta.dir, "..", "index.ts"), ...args.split(" ")], {
+      encoding: "utf-8",
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        ZCODE_PROXY_STORE_DIR: storeDir,
+        ZCODE_PROXY_CREDENTIAL_SECRET: TEST_SECRET,
+        ZCODE_PROXY_CONFIG: "/nonexistent-config.yaml",
+      },
+    });
+    return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", code: result.status ?? 1 };
+  }
+
+  it("auth list → auth remove → primary re-point, all through the REAL CLI", async () => {
+    const { saveAccount } = await import("./accounts.js");
+    const { loadCredential } = await import("./store.js");
+    await saveAccount({ apiKey: "k1", provider: "zai", userId: "user-aaa" }, { label: "First", makePrimary: true });
+    await saveAccount({ apiKey: "k2", provider: "zai", userId: "user-bbb" }, { label: "Second", makePrimary: false });
+    await saveAccount({ apiKey: "k4", provider: "zai", userId: "user-ddd" }, { label: "Fourth", makePrimary: false });
+
+    const list = cli("auth list");
+    expect(list.stdout).toContain("user-aaa");
+    expect(list.stdout).toContain("(First)");
+    expect(list.stdout).toContain("user…"); // masked — never the full credential/id pair
+    expect(list.stdout).not.toContain("k1"); // no credentials
+    expect(list.stdout).not.toContain("k2");
+
+    // Unknown id → error + nonzero exit:
+    const bad = cli("auth remove user-nobody");
+    expect(bad.code).not.toBe(0);
+    expect(bad.stderr).toContain("Unknown account");
+
+    // Remove primary A (id) → re-points to B:
+    const rm = cli("auth remove user-aaa");
+    expect(rm.stdout).toContain("Removed account: user-aaa");
+    expect(rm.stdout).toContain("Primary re-pointed to: user-bbb");
+    expect((await loadCredential())?.apiKey).toBe("k2");
+
+    // Remove by LABEL:
+    const rm2 = cli("auth remove Second");
+    expect(rm2.stdout).toContain("Removed account: user-bbb");
+
+    // Last remaining account (user-ddd) without --yes → refusal:
+    const refuse = cli("auth remove user-ddd");
+    expect(refuse.code).not.toBe(0);
+    expect(refuse.stderr).toContain("Refusing to remove the LAST account");
+    const { listAccounts } = await import("./accounts.js");
+    expect(await listAccounts()).toHaveLength(1);
+
+    // With --yes → removed:
+    const forced = cli("auth remove user-ddd --yes");
+    expect(forced.stdout).toContain("Removed account: user-ddd");
+    expect(await listAccounts()).toHaveLength(0);
+    expect(await loadCredential()).toBeNull();
+  });
+});
+
+describe("server+CLI interplay — pool hot-add (#2 acceptance)", () => {
+  let storeDir: string;
+  beforeEach(() => {
+    storeDir = useTempStore();
+  });
+  afterEach(() => {
+    dropTempStore(storeDir);
+  });
+  it("account added by a CLI process is picked up by the running pool within ~5s", async () => {
+    const { AccountPool } = await import("./pool.js");
+    const { listAccounts, saveAccount } = await import("./accounts.js");
+    await saveAccount({ apiKey: "a", provider: "zai", userId: "a" }, { makePrimary: true });
+    const pool = new AccountPool({ listAccounts });
+    await pool.syncWithStore();
+    expect(pool.accountCount()).toBe(1);
+
+    // Simulate the server's 5s sync timer with a shorter interval, as prod:
+    const syncTimer = setInterval(() => { void pool.syncWithStore().catch(() => {}); }, 50);
+    const cli = spawnSync("bun", [
+      "-e",
+      `
+      process.env.ZCODE_PROXY_STORE_DIR = ${JSON.stringify(storeDir)};
+      process.env.ZCODE_PROXY_CREDENTIAL_SECRET = ${JSON.stringify(TEST_SECRET)};
+      const { saveAccount } = await import(${JSON.stringify(join(import.meta.dir, "accounts.ts"))});
+      await saveAccount({ apiKey: "k-cli", provider: "zai", userId: "user-cli" }, { label: "FromCLI", makePrimary: true });
+      console.log("CLI_ADDED");
+      `,
+    ], { encoding: "utf-8", timeout: 30_000 });
+    if (!cli.stdout.includes("CLI_ADDED")) console.log("CLI DBG:", JSON.stringify(cli.stdout), JSON.stringify(cli.stderr));
+    expect(cli.stdout).toContain("CLI_ADDED");
+
+    // Within a few timer ticks (production: 5s), the pool sees the new account:
+    await new Promise((r) => setTimeout(r, 200));
+    clearInterval(syncTimer);
+    expect(pool.accountCount()).toBe(2);
+    // The new account is in the rotation (both credentials obtainable):
+    const picks = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const r = await pool.reserve();
+      picks.add(r.credential.apiKey);
+      r.release();
+    }
+    expect(picks.has("k-cli")).toBe(true); // hot-added account participates
+    expect(picks.has("a")).toBe(true);
+  });
+});

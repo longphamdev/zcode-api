@@ -714,9 +714,54 @@ function authCommand(args: string[]): void {
     authStatus();
   } else if (sub === "list") {
     void authList();
+  } else if (sub === "remove") {
+    void authRemove(args.slice(1));
   } else {
-    console.error("Usage: zcode-proxy auth <login|logout|status|list>");
+    console.error("Usage: zcode-proxy auth <login|logout|status|list|remove>");
     process.exit(1);
+  }
+}
+
+/**
+ * `auth remove <id|label>` (#2): remove one account by id or exact label.
+ * - Removing the primary re-points primary to the next account in store order.
+ * - Removing the LAST account requires --yes (destructive).
+ * - Unknown id → error, exit code 1.
+ */
+async function authRemove(args: string[]): Promise<void> {
+  const target = args.find((a) => !a.startsWith("--"));
+  if (!target) {
+    console.error("Usage: zcode-proxy auth remove <id|label> [--yes]");
+    process.exit(1);
+  }
+  const { listAccounts, removeAccount, getPrimaryAccountId } = await import("./auth/accounts.js");
+  const accounts = await listAccounts().catch(() => []);
+  if (accounts.length === 0) {
+    console.error("No accounts stored.");
+    process.exit(1);
+  }
+  const match = accounts.find((a) => a.id === target || (a.label && a.label === target));
+  if (!match) {
+    console.error(`Unknown account: ${target}`);
+    console.error("Known accounts:");
+    for (const a of accounts) console.error(`  ${a.id}${a.label ? ` (${a.label})` : ""}`);
+    process.exit(1);
+  }
+  const isLast = accounts.length === 1;
+  if (isLast && !args.includes("--yes")) {
+    console.error(`Refusing to remove the LAST account (${match.id}). Pass --yes to confirm.`);
+    process.exit(1);
+  }
+  const wasPrimary = (await getPrimaryAccountId()) === match.id;
+  await removeAccount(match.id);
+  console.log(`Removed account: ${match.id}${match.label ? ` (${match.label})` : ""}`);
+  if (wasPrimary) {
+    const remaining = await listAccounts();
+    if (remaining.length > 0) {
+      console.log(`Primary re-pointed to: ${remaining[0].id}${remaining[0].label ? ` (${remaining[0].label})` : ""}`);
+    } else {
+      console.log("No accounts remain. Run: zcode-proxy auth login <zai|bigmodel>");
+    }
   }
 }
 
@@ -809,6 +854,9 @@ function fmtQuotaExpiry(expiresAt: number): string {
 async function authLogin(args: string[]): Promise<void> {
   const provider = args[0] as ProviderId | undefined;
   const importMode = args.includes("--import");
+  const addMode = args.includes("--add");
+  const labelIdx = args.indexOf("--label");
+  const label = labelIdx !== -1 ? args[labelIdx + 1]?.trim() || undefined : undefined;
   // Headless paste login: --paste flag or ZCODE_OAUTH_PASTE=1 (docker-friendly).
   const pasteMode =
     args.includes("--paste") || /^(1|true|yes)$/i.test(process.env.ZCODE_OAUTH_PASTE ?? "");
@@ -840,6 +888,20 @@ async function authLogin(args: string[]): Promise<void> {
     if (jwt) cred.jwt = jwt;
   }
 
+  if (addMode || label) {
+    // Multi-account path: upsert directly through the account store (NEVER
+    // the saveCredential facade — the facade targets the primary entry).
+    const { saveAccount, listAccounts } = await import("./auth/accounts.js");
+    const existing = await listAccounts();
+    const existed = existing.some((a) => a.credential.userId && a.credential.userId === cred.userId);
+    const id = await saveAccount(cred, { label, makePrimary: true });
+    console.log(`\nLogged in as ${provider} — ${existed ? "UPDATED existing account" : "ADDED new account"}.`);
+    console.log(`  Account: ${id}${label ? ` (${label})` : ""}`);
+    console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
+    if (cred.userId) console.log(`  User ID: ${cred.userId}`);
+    console.log(`  Stored:  ${getStorePath()}`);
+    return;
+  }
   await saveCredential(cred);
   console.log(`\nLogged in as ${provider}.`);
   console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
