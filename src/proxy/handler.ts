@@ -640,8 +640,13 @@ export async function proxyRequest(
       // Token usage: only for non-streaming JSON responses (a clone().json()
       // on an SSE stream would block until the stream ends).
       if ((upstreamResp.headers.get('content-type') ?? '').includes('application/json')) {
-        const usage = (await upstreamResp.clone().json().catch(() => null) as { usage?: { total_tokens?: number } } | null)?.usage?.total_tokens;
-        metricsRegistry.recordOutcome(booked.accountId, meta.model, "success", { tokensUsed: usage });
+        const usageRaw = (await upstreamResp.clone().json().catch(() => null) as { usage?: { total_tokens?: number; input_tokens?: number; output_tokens?: number } } | null)?.usage;
+        // OpenAI shape has total_tokens; the anthropic upstream carries
+        // input_tokens + output_tokens. Sum whichever fields exist.
+        const tokensUsed = usageRaw?.total_tokens ?? (usageRaw?.input_tokens !== undefined || usageRaw?.output_tokens !== undefined
+          ? (usageRaw?.input_tokens ?? 0) + (usageRaw?.output_tokens ?? 0)
+          : undefined);
+        metricsRegistry.recordOutcome(booked.accountId, meta.model, 'success', { tokensUsed });
       } else {
         metricsRegistry.recordOutcome(booked.accountId, meta.model, "success");
       }
