@@ -8,11 +8,7 @@ services:
       ZCODE_PROXY_CONFIG: /data/config.yaml
       ZCODE_PROXY_STORE_DIR: /data/auth
       ZCODE_PROXY_API_KEY: ${ZCODE_PROXY_API_KEY:?Set ZCODE_PROXY_API_KEY in .env}
-      ZCODE_PROXY_CREDENTIAL_SECRET: ${ZCODE_PROXY_CREDENTIAL_SECRET:?Set ZCODE_PROXY_CREDENTIAL_SECRET in .env}
       ZCODE_UPDATE_CHECK: "off"
     volumes:
-      - zcode_data:/data
+      - ./data:/data
     restart: unless-stopped
-
-volumes:
-  zcode_data:
