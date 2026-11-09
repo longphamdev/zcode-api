@@ -692,3 +692,20 @@ describe("AccountPool — poll-0 flapping fix (review follow-up)", () => {
     expect(pool.runtimeFor("a")!.remainingUnreliable).toBeUndefined();
   });
 });
+
+describe("AccountPool — unreliability flag lifecycle", () => {
+  it("non-zero poll reading clears the unreliable flag (endpoint recovered)", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    // Poll 0 + recent success → flagged:
+    pool.noteSuccess("a");
+    pool.updateQuota("a", 0, clock.now());
+    expect(pool.runtimeFor("a")!.remainingUnreliable).toBe(true);
+    // Next poll returns real numbers → flag cleared:
+    pool.updateQuota("a", 7992806, clock.now() + 5 * 60_000);
+    expect(pool.runtimeFor("a")!.remainingUnits).toBe(7992806);
+    expect(pool.runtimeFor("a")!.remainingUnreliable).toBeUndefined();
+  });
+});

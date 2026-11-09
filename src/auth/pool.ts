@@ -467,12 +467,17 @@ export class AccountPool {
       // but flagged unreliable (billing balance can under-report claimed-plan
       // entitlements — live finding #7). Without the flag,
       // most-remaining-quota would penalize a working account between polls
-      // (the flapping the review called out).
-      const lastSuccess = this.lastSuccessAtMs.get(accountId);
-      r.remainingUnreliable =
-        remainingUnits === 0 && lastSuccess !== undefined && polledAtMs - lastSuccess < 30 * 60_000
-          ? true
-          : undefined;
+      // (the flapping the review called out). A NON-ZERO reading clears the
+      // flag — it proves the endpoint now reports real numbers.
+      if (remainingUnits === 0) {
+        const lastSuccess = this.lastSuccessAtMs.get(accountId);
+        r.remainingUnreliable =
+          lastSuccess !== undefined && polledAtMs - lastSuccess < 30 * 60_000
+            ? true
+            : undefined;
+      } else {
+        r.remainingUnreliable = undefined;
+      }
     }
   }
 
