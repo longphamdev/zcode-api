@@ -43,6 +43,8 @@ export interface McpRouteOptions {
   config: ProxyConfig;
   auth: AuthManager;
   fetchImpl?: typeof fetch;
+  /** Multi-account pool; when absent, credential reads fall back to AuthManager. */
+  accountPool?: import("../auth/pool.js").AccountPool;
 }
 
 type McpAuthStatus =

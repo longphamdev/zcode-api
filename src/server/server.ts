@@ -61,11 +61,13 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     auth,
     fetchImpl: opts.fetchImpl,
     debug: opts.debug === true,
+    ...(opts.accountPool ? { accountPool: opts.accountPool } : {}),
   };
   const mcpOpts: McpRouteOptions = {
     config,
     auth,
     ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+    ...(opts.accountPool ? { accountPool: opts.accountPool } : {}),
   };
 
   return async (req: Request): Promise<Response> => {

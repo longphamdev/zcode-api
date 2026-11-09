@@ -1,0 +1,5 @@
+{
+  "comment": "Real upstream sample captured 2026-11-09 from a start-plan account with empty balances. CRITICAL: arrives with HTTP 200, not 4xx/5xx. Sensitive data (api keys, user ids) never included.",
+  "httpStatus": 200,
+  "body": { "code": 1005, "msg": "exceed quota limit", "logid": "20261109054957b119e7a7a8bc0fc942ed" }
+}

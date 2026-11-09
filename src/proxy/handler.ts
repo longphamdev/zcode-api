@@ -481,6 +481,41 @@ export async function proxyRequest(
   // accumulate real error samples for that ticket's matchers.
   if (reservation) {
     const pool = opts.accountPool!;
+    // Quota-exhausted sample (real, captured 2026-11-09 — see fixture
+    // quota-exhausted-sample.json): upstream returns **HTTP 200** with
+    // `{"code":1005,"msg":"exceed quota limit"}`. Status-based classification
+    // cannot see it; the body must be scanned on 200s.
+    if (upstreamResp.status === 200 && upstreamResp.headers.get("content-type")?.includes("json")) {
+      const bodyText = await upstreamResp.clone().text().catch(() => "");
+      try {
+        const parsed = JSON.parse(bodyText) as { code?: unknown; msg?: unknown };
+        if (parsed?.code === 1005 || (typeof parsed?.msg === "string" && parsed.msg.includes("exceed quota limit"))) {
+          pool.markExhausted(reservation.accountId);
+          if (debug) debugError(reqId, "account_quota_exhausted", `${reservation.accountId} biz 1005 exceed quota limit`);
+          console.log(`${reqId} pool: account ${reservation.accountId} quota exhausted (biz 1005)`);
+          // Failover: headers not sent downstream yet, body replayable —
+          // rotate to a healthy account now rather than handing the client a
+          // disguised quota error.
+          if (attemptIndex < failoverAttempts) {
+            triedAccounts.add(reservation.accountId);
+            reservation.release();
+            reservation = null;
+            try {
+              const next = await pool.reserve({ signal: clientReq.signal, exclude: triedAccounts });
+              reservation = next;
+              cred = next.credential;
+              upstreamHeaderPairs = buildPairs();
+              upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
+              continue; // re-dispatch with the fresh account
+            } catch {
+              // no other account — fall through, client gets the 1005 body
+            }
+          }
+        }
+      } catch {
+        // non-JSON 200 body — not a quota envelope, ignore
+      }
+    }
     if (upstreamResp.status === 429) {
       // Single-account pass-through parity: a 429 on the only account must
       // NOT cool it into blocking the next request — legacy behavior passes

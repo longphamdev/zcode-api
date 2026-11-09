@@ -670,3 +670,35 @@ describe("proxyRequest — 401 failover edge cases (#5 step 1 review)", () => {
     }
   });
 });
+
+describe("proxyRequest — quota-exhausted classification (biz 1005, HTTP 200!)", () => {
+  it("HTTP 200 + {code:1005} marks the account exhausted; next request uses account B", async () => {
+    const apiKeys: string[] = [];
+    const server = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        const key = String(req.headers.authorization ?? "").replace(/^Bearer /, "");
+        apiKeys.push(key);
+        // Real captured shape (see fixtures/quota-exhausted-sample.json):
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ code: 1005, msg: "exceed quota limit", logid: "test" }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a"), stored("b")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      // Both accounts get a turn in ONE request: A 1005s → exhausted → rotate
+      // to B → B 1005s too → attempts exhausted → client receives the 1005 body.
+      expect(pool.runtimeFor("a")!.status).toBe("exhausted");
+      expect(pool.runtimeFor("b")!.status).toBe("exhausted");
+      expect(apiKeys).toEqual(["a", "b"]); // mid-request rotation happened
+      await resp.text();
+    } finally {
+      server.close();
+    }
+  });
+});

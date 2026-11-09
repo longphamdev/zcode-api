@@ -23,6 +23,7 @@ import type { AuthManager } from "../auth/manager.js";
 import type { Credential } from "../auth/types.js";
 import { credentialString } from "../auth/types.js";
 import { errorResponse } from "../proxy/handler.js";
+import { AllAccountsCoolingError, AccountsBusyError, NoAccountAvailableError } from "../auth/pool.js";
 import { transformRequestBody } from "../proxy/body-transformer.js";
 import { buildAnthropicMetadataUserId } from "../proxy/trace-headers.js";
 import { inflateWithCap } from "../proxy/inflate.js";
@@ -43,6 +44,8 @@ export interface AsyncHandlerOptions {
   config: ProxyConfig;
   auth: AuthManager;
   fetchImpl?: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+  /** Multi-account pool; when absent, credential reads fall back to AuthManager. */
+  accountPool?: import("../auth/pool.js").AccountPool;
   debug?: boolean;
 }
 
@@ -122,11 +125,39 @@ async function readBody(req: Request): Promise<{ ok: true; body: string } | { ok
 }
 
 async function resolveCredential(opts: AsyncHandlerOptions): Promise<{ ok: true; cred: Credential; credentials: OffPeakCredentials } | { ok: false; response: Response }> {
+  // Async jobs run minutes-to-hours. The reservation covers only THIS
+  // synchronous read (take a copy of the credential values); the job then
+  // runs on the copied strings without holding a pool slot — a slot held
+  // for the job's lifetime would exhaust the cap. If the account dies
+  // mid-job, the in-flight job finishes on its copied credentials (already
+  // accepted by upstream); NEW jobs pick a healthy account.
   let cred: Credential;
-  try {
-    cred = await opts.auth.getCredential();
-  } catch (err) {
-    return { ok: false, response: errorResponse(401, "authentication_error", `credential resolution failed: ${(err as Error).message}`) };
+  if (opts.accountPool) {
+    let reservation: import("../auth/pool.js").Reservation | null = null;
+    try {
+      reservation = await opts.accountPool.reserve();
+      cred = { ...reservation.credential }; // copy: independent of the slot
+    } catch (err) {
+      if (err instanceof AllAccountsCoolingError) {
+        const retryAfterSec = Math.max(1, Math.ceil((err.retryAtMs - Date.now()) / 1000));
+        return { ok: false, response: errorResponse(429, "all_accounts_cooling", `${err.message}. Retry after ${retryAfterSec}s.`, { "retry-after": String(retryAfterSec) }) };
+      }
+      if (err instanceof NoAccountAvailableError) {
+        return { ok: false, response: errorResponse(503, "no_account_available", err.message) };
+      }
+      if (err instanceof AccountsBusyError) {
+        return { ok: false, response: errorResponse(429, "accounts_busy", err.message, { "retry-after": String(err.retryAfterSec) }) };
+      }
+      throw err;
+    } finally {
+      reservation?.release();
+    }
+  } else {
+    try {
+      cred = await opts.auth.getCredential();
+    } catch (err) {
+      return { ok: false, response: errorResponse(401, "authentication_error", `credential resolution failed: ${(err as Error).message}`) };
+    }
   }
   if (!cred.jwt) {
     return {
