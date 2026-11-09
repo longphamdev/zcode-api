@@ -702,3 +702,67 @@ describe("proxyRequest — quota-exhausted classification (biz 1005, HTTP 200!)"
     }
   });
 });
+
+describe("proxyRequest — 1005 scan safety (#5 review follow-up)", () => {
+  it("model reply containing 'exceed quota limit' as prose does NOT trip the classifier", async () => {
+    let count = 0;
+    const server = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        count++;
+        res.writeHead(200, { "content-type": "application/json" });
+        // A model answer (anthropic shape) whose TEXT mentions the phrase —
+        // body top-level has no `code` field, so no trip.
+        res.end(JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: "The error 'exceed quota limit' means you hit the limit." }],
+          model: "glm-5.3-flash",
+          stop_reason: "end_turn",
+          usage: { input_tokens: 10, output_tokens: 20 },
+        }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a"), stored("b")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      expect(resp.status).toBe(200);
+      await resp.text();
+      expect(count).toBe(1); // no failover rotation (single dispatch)
+      expect(pool.runtimeFor("a")!.status).toBe("healthy"); // NOT exhausted
+      expect(pool.runtimeFor("b")!.status).toBe("healthy");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("single-account 1005: pass-through parity (not marked exhausted)", async () => {
+    const server = createServer((req, res) => {
+      req.on("data", () => {});
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ code: 1005, msg: "exceed quota limit", logid: "t" }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const addr = server.address() as { port: number };
+    try {
+      const store = new FakeStore();
+      store.accounts = [stored("a")];
+      const pool = await makePool(store);
+      const resp = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      await resp.text();
+      expect(pool.runtimeFor("a")!.status).toBe("healthy"); // NOT exhausted
+      // Next request still reaches upstream (legacy behavior).
+      const resp2 = await proxyRequest(makeReq(), "openai", { config: config(`http://127.0.0.1:${addr.port}`), auth: new AuthManager(), accountPool: pool, fetchImpl: fetch });
+      await resp2.text();
+    } finally {
+      server.close();
+    }
+  });
+});

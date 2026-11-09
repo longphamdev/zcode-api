@@ -598,3 +598,25 @@ describe("AccountPool — global-429 detector", () => {
     expect(pool.isGlobal429()).toBe(false); // old evidence pruned
   });
 });
+
+describe("AccountPool — global-401 escape hatch", () => {
+  it("guard suppresses the first burst but repeated 401s allow marking again", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock, { global401WindowMs: 30_000 });
+    // First burst: one 401 per account → guard active.
+    pool.note401("a", clock.now());
+    pool.note401("b", clock.now() + 100);
+    expect(pool.isGlobal401()).toBe(true);
+    expect(pool.shouldSuppressExpiredMarking()).toBe(true);
+    // Repeated rejections: 4 more events (same accounts re-401 on retries)
+    // → total 6 events vs 2 distinct → escape: mark normally.
+    pool.note401("a", clock.now() + 200);
+    pool.note401("b", clock.now() + 300);
+    pool.note401("a", clock.now() + 400);
+    pool.note401("b", clock.now() + 500);
+    expect(pool.isGlobal401()).toBe(true); // still looks global...
+    expect(pool.shouldSuppressExpiredMarking()).toBe(false); // ...but marking allowed
+  });
+});

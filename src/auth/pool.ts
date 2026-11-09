@@ -344,8 +344,9 @@ export class AccountPool {
     const distinct = new Set(recent.map((e) => e.id)).size;
     if (distinct < 2) return false; // not global — mark normally
     // Guard limits: suppress only the first burst (each account ~1 rejection);
-    // repeated 401s across windows mean real per-account death.
-    return recent.length <= distinct * 3;
+    // more than one rejection per account within the window means the accounts
+    // keep getting rejected across retries — real per-account death.
+    return recent.length <= distinct;
   }
 
   /**
