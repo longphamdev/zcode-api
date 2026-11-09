@@ -485,12 +485,27 @@ export async function proxyRequest(
     // quota-exhausted-sample.json): upstream returns **HTTP 200** with
     // `{"code":1005,"msg":"exceed quota limit"}`. Status-based classification
     // cannot see it; the body must be scanned on 200s.
-    if (upstreamResp.status === 200 && upstreamResp.headers.get("content-type")?.includes("json")) {
+    // Peek policy (review): scan at most the first 2KB, only when the body
+    // is NOT an SSE stream (model answers must never be scanned — a reply
+    // containing "exceed quota limit" as prose must not trip this), and only
+    // match a TOP-LEVEL `code` on a JSON object. The quota envelope is small
+    // (<200B), so 2KB is generous.
+    const contentType = upstreamResp.headers.get("content-type") ?? "";
+    const contentLength = Number(upstreamResp.headers.get("content-length") ?? "0");
+    const isScannable = upstreamResp.status === 200
+      && contentType.includes("application/json")
+      && !contentType.includes("text/event-stream")
+      && (contentLength === 0 || contentLength <= 2048);
+    if (isScannable) {
       const bodyText = await upstreamResp.clone().text().catch(() => "");
+      // Never let the peek exceed the cap (chunked responses w/o length).
+      if (bodyText.length <= 2048) {
       try {
         const parsed = JSON.parse(bodyText) as { code?: unknown; msg?: unknown };
         if (parsed?.code === 1005 || (typeof parsed?.msg === "string" && parsed.msg.includes("exceed quota limit"))) {
-          pool.markExhausted(reservation.accountId);
+          // Single-account pass-through parity: the only account is not
+          // marked exhausted (the client sees the 1005 body and decides).
+          if (pool.accountCount() > 1) pool.markExhausted(reservation.accountId);
           if (debug) debugError(reqId, "account_quota_exhausted", `${reservation.accountId} biz 1005 exceed quota limit`);
           console.log(`${reqId} pool: account ${reservation.accountId} quota exhausted (biz 1005)`);
           // Failover: headers not sent downstream yet, body replayable —
@@ -515,6 +530,7 @@ export async function proxyRequest(
       } catch {
         // non-JSON 200 body — not a quota envelope, ignore
       }
+      }
     }
     if (upstreamResp.status === 429) {
       // Single-account pass-through parity: a 429 on the only account must
@@ -525,8 +541,19 @@ export async function proxyRequest(
         const retryAtMs = ra !== null && Number.isFinite(Number(ra))
           ? Date.now() + Number(ra) * 1000
           : undefined;
-        pool.cool(reservation.accountId, retryAtMs);
-        if (debug) debugError(reqId, "account_rate_limited", `${reservation.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
+        pool.note429(reservation.accountId, Date.now());
+        // Global-429 evidence: many DISTINCT accounts 429ing in a short
+        // window means the limit is IP/service-wide — per-account cooling
+        // with 2 accounts would alternate drains. Cooldown the whole pool.
+        if (pool.isGlobal429()) {
+          const poolRetrySec = ra !== null && Number.isFinite(Number(ra)) ? Number(ra) : 30;
+          pool.coolAll(Date.now() + poolRetrySec * 1000);
+          if (debug) debugError(reqId, "global_429", `${reservation.accountId} 429 — pool-wide cooldown ${poolRetrySec}s`);
+          console.log(`${reqId} pool: suspected GLOBAL 429 (service/IP-level) — pool cooldown ${poolRetrySec}s`);
+        } else {
+          pool.cool(reservation.accountId, retryAtMs);
+          if (debug) debugError(reqId, "account_rate_limited", `${reservation.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
+        }
       }
     } else if (upstreamResp.ok) {
       pool.noteSuccess(reservation.accountId);
@@ -563,11 +590,14 @@ export async function proxyRequest(
         // per-account — don't burn the whole pool into "expired"; the client
         // gets the 401 and the incident is visible in logs.
         pool.note401(failedAccountId, Date.now());
-        if (!pool.isGlobal401()) {
+        // Suppression semantics (escape hatch): mark normally UNLESS the
+        // global guard is active (>=2 distinct accounts within the window,
+        // first burst only — repeated bursts mean real per-account death).
+        if (!pool.shouldSuppressExpiredMarking()) {
           pool.markExpired(failedAccountId);
           if (debug) debugError(reqId, "account_expired", `${failedAccountId} credential rejected upstream`);
         } else if (debug) {
-          debugError(reqId, "global_401_suspected", `${failedAccountId} 401 — many accounts rejected in a short window; not marking expired`);
+          debugError(reqId, "global_401_suspected", `${failedAccountId} 401 — many accounts rejected in a short window; not marking expired (guard active)`);
         }
       }
       if (debug) debugError(reqId, "account_401", `${failedAccountId} upstream 401`);

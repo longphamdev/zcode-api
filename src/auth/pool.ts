@@ -88,6 +88,12 @@ export interface PoolOptions {
    */
   expiredHalfOpenMs?: number;
   /**
+   * Half-open delay for exhausted accounts with an UNKNOWN quota reset time
+   * (biz-1005 mid-request). Default 30 min. Accounts with a known reset
+   * (from the poller) revive at that time instead.
+   */
+  exhaustedHalfOpenMs?: number;
+  /**
    * Window (ms) for the global-401 detector: >= 2 distinct accounts 401ing
    * within this window is treated as an upstream-wide incident. Default 30s.
    */
@@ -156,6 +162,7 @@ export class AccountPool {
   private readonly rateLimitCooldownMs: number;
   private readonly reservationTimeoutMs: number;
   private readonly expiredHalfOpenMs: number;
+  private readonly exhaustedHalfOpenMs: number;
   private readonly global401WindowMs: number;
   private readonly now: () => number;
   /** Recent 401 timestamps per account — the global-outage detector. */
@@ -178,6 +185,7 @@ export class AccountPool {
     this.rateLimitCooldownMs = opts.rateLimitCooldownMs ?? 30_000;
     this.reservationTimeoutMs = opts.reservationTimeoutMs ?? 15 * 60_000;
     this.expiredHalfOpenMs = opts.expiredHalfOpenMs ?? 10 * 60_000;
+    this.exhaustedHalfOpenMs = opts.exhaustedHalfOpenMs ?? 30 * 60_000;
     this.global401WindowMs = opts.global401WindowMs ?? 30_000;
     this.now = opts.now ?? Date.now;
   }
@@ -270,13 +278,23 @@ export class AccountPool {
     }
   }
 
-  /** Quota gone: exhausted until quotaExpiresAtMs (absolute unix ms). */
+  /**
+   * Quota gone: exhausted until `quotaExpiresAtMs` (absolute unix ms, from
+   * the poller). When the reset time is unknown (e.g. biz-1005 mid-request),
+   * arm the half-open delay instead — one probe after
+   * `exhaustedHalfOpenMs` (default 30 min), mirroring `markExpired`, so the
+   * account cannot stay stuck when no poller is running.
+   */
   markExhausted(accountId: string, quotaExpiresAtMs?: number): void {
     const r = this.runtime.get(accountId);
     if (!r) return;
     r.status = "exhausted";
     r.retryAtMs = undefined;
-    if (quotaExpiresAtMs !== undefined) r.quotaExpiresAtMs = quotaExpiresAtMs;
+    if (quotaExpiresAtMs !== undefined) {
+      r.quotaExpiresAtMs = quotaExpiresAtMs;
+    } else {
+      r.quotaExpiresAtMs = this.now() + this.exhaustedHalfOpenMs;
+    }
   }
 
   /**
@@ -309,6 +327,39 @@ export class AccountPool {
     const cutoff = this.now() - this.global401WindowMs;
     const distinct = new Set(this.recent401s.filter((e) => e.at >= cutoff).map((e) => e.id));
     return distinct.size >= 2;
+  }
+
+  /**
+   * Escape hatch for the global-401 guard: if the guard has now suppressed
+   * marking for `global401SuppressLimit` consecutive window-fills AND the
+   * same accounts keep 401ing, the outage is probably real per-account death
+   * (every credential revoked) — callers may mark expired again. Implemented
+   * as: guard applies while the evidence window keeps rolling with the SAME
+   * accounts; once total 401 events exceed distinct accounts x 3 (i.e.
+   * repeated rejections), stop suppressing.
+   */
+  shouldSuppressExpiredMarking(): boolean {
+    const cutoff = this.now() - this.global401WindowMs;
+    const recent = this.recent401s.filter((e) => e.at >= cutoff);
+    const distinct = new Set(recent.map((e) => e.id)).size;
+    if (distinct < 2) return false; // not global — mark normally
+    // Guard limits: suppress only the first burst (each account ~1 rejection);
+    // repeated 401s across windows mean real per-account death.
+    return recent.length <= distinct * 3;
+  }
+
+  /**
+   * Cool EVERY healthy/cooling account until `untilMs` — the global-429
+   * response. Requests arriving during a pool cooldown get
+   * AllAccountsCoolingError with Retry-After = time remaining.
+   */
+  coolAll(untilMs: number): void {
+    for (const r of this.runtime.values()) {
+      if (r.status === "healthy" || r.status === "cooling") {
+        r.status = "cooling";
+        r.retryAtMs = Math.max(r.retryAtMs ?? 0, untilMs);
+      }
+    }
   }
 
   /** Record a 429 for `accountId` (global-rate-limit evidence window). */
@@ -360,7 +411,7 @@ export class AccountPool {
         r.retryAtMs = undefined;
       }
       if (r.status === "exhausted" && r.quotaExpiresAtMs !== undefined && r.quotaExpiresAtMs <= t) {
-        r.status = "healthy"; // quota window over — lazily revive
+        r.status = "healthy"; // quota window (or half-open probe) elapsed — revive
         r.quotaExpiresAtMs = undefined;
       }
       // Half-open: an expired account (401-marked) gets one probe request
