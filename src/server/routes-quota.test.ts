@@ -358,8 +358,12 @@ describe("handleQuota — multi-account fixed schema (#6)", () => {
     const listAccountsImpl = async () => store.accounts;
     const pool = new AccountPool({ listAccounts: listAccountsImpl });
     await pool.syncWithStore();
-    pool.updateQuota("a", 100, Date.now());
-    pool.updateQuota("b", 250, Date.now());
+    pool.updateQuota("a", 100, Date.now(), [
+      { model: "model:glm-5.3", remainingUnits: 100, totalUnits: 3_000_000 },
+    ]);
+    pool.updateQuota("b", 250, Date.now(), [
+      { model: "model:glm-5.3-flash", remainingUnits: 250, totalUnits: 5_000_000 },
+    ]);
 
     const resp = await handleQuota(makeConfig(), fetch, async () => store.accounts[0].credential, pool, listAccountsImpl);
     const body = await resp.json();
@@ -367,8 +371,10 @@ describe("handleQuota — multi-account fixed schema (#6)", () => {
     expect(body.aggregate.accountCount).toBe(2);
     expect(body.aggregate.healthyCount).toBe(2);
     expect(body.aggregate.accountsReporting).toBe(2);
-    expect(body.aggregate.totalRemainingUnits).toBe(350); // 100 + 250
-    expect(body.aggregate.unitType).toBe("token");
+    // No cross-model totalRemainingUnits — quota is per-model (#7 review):
+    expect(body.aggregate.totalRemainingUnits).toBeUndefined();
+    // Per-model buckets surface on the account entries:
+    expect(body.accounts[0].models).toBeDefined();
     // legacy = PRIMARY account (store order first) — exact old snapshot shape
     expect(body.legacy).not.toBeNull();
     expect(body.legacy.balances).toBeDefined();

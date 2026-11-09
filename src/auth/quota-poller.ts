@@ -113,7 +113,7 @@ export function createQuotaPoller(
       if (result.ok) {
         // A successful authenticated poll proves the credential works — heal
         // expired/exhausted accounts (the poller is the primary probe).
-        pool.updateQuota(accountId, result.remainingUnits, now());
+        pool.updateQuota(accountId, result.remainingUnits, now(), result.models);
         if (result.quotaExpiresAtMs !== undefined) {
           pool.setQuotaExpiry(accountId, result.quotaExpiresAtMs);
         }

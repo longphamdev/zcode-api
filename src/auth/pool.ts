@@ -124,8 +124,10 @@ export interface AccountRuntime {
   retryAtMs?: number;
   /** Unix ms when an exhausted account's quota resets/expires. */
   quotaExpiresAtMs?: number;
-  /** From the quota poller (ticket #6); optional pick hint. */
+  /** Aggregate remaining across models — DISPLAY ONLY (buckets are per-model). */
   remainingUnits?: number;
+  /** Per-model buckets from the poller — the real quota shape (#7). */
+  models?: Array<{ model: string; remainingUnits?: number; totalUnits?: number; expiresAtMs?: number }>;
   /** True when the 0 reading conflicts with observed successful traffic
    *  (billing balance can under-report — live finding, #7). */
   remainingUnreliable?: boolean;
@@ -457,10 +459,16 @@ export class AccountPool {
   }
 
   /** Feed poller data (#6). Does not gate picking on staleness. */
-  updateQuota(accountId: string, remainingUnits: number | undefined, polledAtMs: number): void {
+  updateQuota(
+    accountId: string,
+    remainingUnits: number | undefined,
+    polledAtMs: number,
+    models?: Array<{ model: string; remainingUnits?: number; totalUnits?: number; expiresAtMs?: number }>,
+  ): void {
     const r = this.runtime.get(accountId);
     if (!r) return;
     r.lastPolledAtMs = polledAtMs;
+    if (models !== undefined) r.models = models;
     if (remainingUnits !== undefined) {
       r.remainingUnits = remainingUnits;
       // A 0 reading from an account with a recent successful request is kept

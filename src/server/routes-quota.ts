@@ -336,6 +336,9 @@ export async function handleQuota(
       // remainingUnreliable is set by the pool when a 0 reading lands shortly
       // after successful traffic (balance-endpoint blind spot, #7).
       ...(r?.remainingUnreliable ? { remainingUnreliable: true } : {}),
+      // Per-model buckets (#7): quota grants are per-model — GLM-5.3 daily
+      // and GLM-5.3-flash campaign/daily are SEPARATE. Never summed.
+      ...(r?.models !== undefined ? { models: r.models } : {}),
       ...(lastPolledAtMs !== undefined ? { lastPolledAt: Math.floor(lastPolledAtMs / 1000) } : {}),
       ...(lastPolledAtMs !== undefined && Date.now() - lastPolledAtMs > STALE_MS ? { stale: true } : {}),
       // tokenExpiresAt: credential expiry (OAuth) — JWTs here carry no exp.
@@ -345,18 +348,17 @@ export async function handleQuota(
   });
 
   const reporting = accountEntries.filter((a) => a.lastPolledAt !== undefined && a.remainingUnits !== undefined);
-  const unitTypesUnique = new Set(reporting.map(() => "token")); // this plane's unit is always tokens
   const aggregate: Record<string, unknown> = {
     accountCount: accounts.length,
     healthyCount: accountEntries.filter((a) => a.status === "healthy").length,
     accountsReporting: reporting.length,
     accountsTotal: accounts.length,
+    // NOTE: no cross-model/cross-account totalRemainingUnits — quota buckets
+    // are per-model (GLM-5.3 daily ≠ GLM-5.3-flash campaign/daily), so one
+    // summed number is misleading (#7 review). Per-model data lives in
+    // accounts[].models; per-account aggregate in accounts[].remainingUnits.
+    ...(reporting.length < accounts.length && reporting.length > 0 ? { stale: true } : {}),
   };
-  if (reporting.length > 0 && unitTypesUnique.size === 1) {
-    aggregate.totalRemainingUnits = reporting.reduce((sum, a) => sum + (a.remainingUnits ?? 0), 0);
-    aggregate.unitType = "token";
-    if (reporting.length < accounts.length) aggregate.stale = true; // partial data
-  }
 
   return new Response(JSON.stringify({ accounts: accountEntries, aggregate, legacy, ...(legacyStale ? { legacyStale } : {}) }, null, 1), {
     status: 200,
