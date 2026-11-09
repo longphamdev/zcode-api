@@ -74,7 +74,7 @@ function keyMatches(provided: string, expected: string): boolean {
   return timingSafeEqual(a, b);
 }
 
-export function handleAdminState(req: Request, opts: AdminRouteOptions): Response {
+export async function handleAdminState(req: Request, opts: AdminRouteOptions): Promise<Response> {
   // Same auth model as /v1/* — the proxy API key via Authorization or
   // x-api-key HEADER ONLY. Keys in query strings leak into browser history,
   // reverse-proxy logs, and the Referer header — never accept them here.
@@ -89,6 +89,14 @@ export function handleAdminState(req: Request, opts: AdminRouteOptions): Respons
     }
   }
   const body = metricsRegistry.snapshot();
+  // Merge labels from the account store (metrics counters don't carry them —
+  // they're keyed by accountId only).
+  const accounts = await listAccounts().catch(() => []);
+  const labels = new Map(accounts.map((a) => [a.id, a.label]));
+  for (const a of body.accounts) {
+    const label = labels.get(a.id);
+    if (label) a.label = label;
+  }
   return new Response(JSON.stringify(body, null, 1), {
     status: 200,
     headers: {
