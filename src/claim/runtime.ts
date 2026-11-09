@@ -9,8 +9,10 @@ import type { ClaimablePlan, ClaimOutcome } from "./types.js";
 import type { Credential } from "../auth/types.js";
 import { credentialString } from "../auth/types.js";
 import { createClaimClient, ClaimPreviewError } from "./client.js";
+import { listAccounts, type StoredAccount } from "../auth/accounts.js";
 import { ClaimScheduler } from "./scheduler.js";
 import { getCaptchaToken } from "../proxy/captcha.js";
+import { metricsRegistry } from "../server/metrics.js";
 import { loadCredential } from "../auth/store.js";
 import { getDefaultEndpointRouting, requiresClaimCaptcha } from "../proxy/endpoint-routing.js";
 import { createHash } from "node:crypto";
@@ -42,16 +44,41 @@ function claimCaptchaRequired(config: ProxyConfig, resolveCredential: () => Prom
 }
 
 export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimScheduler {
+  // Multi-account rotation: cycle through ALL stored accounts, one per tick.
+  // Each account claims hours apart (tick cadence × account count) — captcha
+  // solves from one IP across N accounts in a burst is the ban-risk pattern;
+  // spacing reduces correlation. Falls back to the AuthManager credential
+  // when the store is empty (Android boot flow).
+  let rotationIndex = 0;
+  const schedConfig = {
+    planId: config.claim.planId || undefined,
+    pollIntervalMs: config.claim.pollIntervalMs,
+    cooldownMs: config.claim.cooldownMs,
+  };
   const scheduler = new ClaimScheduler({
-    // AuthManager first (fresh), then the encrypted store — on Android the
-    // login can land in the store after boot while auth hasn't been reloaded.
-    getJwt: async () => {
-      try {
-        const cred = await auth.getCredential();
-        if (cred.jwt) return cred.jwt;
-      } catch { /* fall through to the store */ }
-      const stored = await loadCredential().catch(() => null);
-      return stored?.jwt;
+    nextAccount: async () => {
+      const accounts: StoredAccount[] = await listAccounts().catch(() => []);
+      // Rotation spacing: recompute the tick interval each cycle — the SAME
+      // account is attempted again after accounts.length × pollIntervalMs,
+      // which must land on spacingHours.
+      schedConfig.pollIntervalMs = Math.max(
+        config.claim.pollIntervalMs,
+        Math.round((config.claim.spacingHours * 3600_000) / Math.max(1, accounts.length)),
+      );
+      if (accounts.length === 0) {
+        // Android boot flow: credential may exist in the AuthManager before
+        // the store is populated.
+        try {
+          const cred = await auth.getCredential();
+          if (cred.jwt) return { accountId: cred.userId ?? "primary", jwt: cred.jwt };
+        } catch { /* fall through */ }
+        return null;
+      }
+      const account = accounts[rotationIndex % accounts.length];
+      rotationIndex = (rotationIndex + 1) % accounts.length;
+      // Re-read the credential to get the JWT (store entries are encrypted
+      // individually — listAccounts already decrypted them).
+      return { accountId: account.id, jwt: account.credential.jwt };
     },
     createClient: (jwt) =>
       createClaimClient({
@@ -67,19 +94,18 @@ export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimSch
       if (!token) throw new Error("captcha config flipped to disabled between gate and mint");
       return { verifyParam: token.verifyParam, region: token.region || undefined };
     },
-    captchaRequired: () =>
+    captchaRequired: (accountId?: string) =>
       claimCaptchaRequired(config, async () => {
+        const accounts: StoredAccount[] = await listAccounts().catch(() => []);
+        const match = accountId ? accounts.find((a) => a.id === accountId) : undefined;
+        if (match) return match.credential;
         try {
           return await auth.getCredential();
         } catch {
           return await loadCredential().catch(() => null);
         }
       }),
-    config: {
-      planId: config.claim.planId || undefined,
-      pollIntervalMs: config.claim.pollIntervalMs,
-      cooldownMs: config.claim.cooldownMs,
-    },
+    config: schedConfig,
     log: (message) => console.log(`[claim] ${message}`),
   });
   scheduler.start();
@@ -98,6 +124,44 @@ const FAILURE_LABELS: Record<string, string> = {
   http_error: "HTTP error",
   unknown: "unknown failure",
 };
+
+/**
+ * One-shot claim for a SPECIFIC credential (admin dashboard manual claim).
+ * Returns ok + a human detail line per account; never throws.
+ */
+export async function runOneShotClaim(
+  config: ProxyConfig,
+  cred: Credential,
+  accountId: string,
+): Promise<{ ok: boolean; detail?: string }> {
+  const jwt = cred.jwt;
+  if (!jwt) return { ok: false, detail: "no JWT (re-login required)" };
+  const client = createClaimClient({
+    origin: config.claim.origin,
+    jwt,
+    appVersion: config.identity.appVersion,
+    platform: claimPlatform(),
+    deviceMid: config.identity.deviceMid,
+    marketingDeviceMid: config.identity.deviceMid ?? stableMarketingDeviceMid(),
+  });
+  try {
+    const plans = await client.listPlans();
+    if (plans.length === 0) return { ok: false, detail: "no claimable plans" };
+    const target = plans.sort((a, b) => b.priority - a.priority)[0];
+    let captcha: { verifyParam: string; region?: string } | undefined;
+    try {
+      const token = await getCaptchaToken(config.identity.appVersion);
+      if (token) captcha = { verifyParam: token.verifyParam, region: token.region || undefined };
+    } catch { /* gate may be disabled — proceed captcha-less */ }
+    const outcome = await client.claim(target.planId, captcha);
+    metricsRegistry.recordClaim(accountId, outcome.ok ? "claimed" : "failed", outcome.ok ? target.planId : undefined);
+    return outcome.ok
+      ? { ok: true, detail: `claimed ${target.planId}` }
+      : { ok: false, detail: `claim failed: ${outcome.code} ${outcome.message}` };
+  } catch (err) {
+    return { ok: false, detail: (err as Error).message };
+  }
+}
 
 /** One-shot CLI: `list` prints previews; `now` claims the target plan. */
 export async function runClaimCli(config: ProxyConfig, mode: "list" | "now"): Promise<void> {

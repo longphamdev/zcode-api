@@ -44,7 +44,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
       controlTimeoutMs: 1000,
       defaultModel: "",
     },
-    claim: { enabled: false, auto: true, origin: "https://billing.example", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+    claim: { enabled: false, auto: true, origin: "https://billing.example", pollIntervalMs: 300000, cooldownMs: 600000, planId: "", spacingHours: 4, },
     logging: { level: "info" },
     ...overrides,
   };
@@ -340,7 +340,7 @@ describe("handleQuota — multi-account fixed schema (#6)", () => {
     highspeed: { enabled: false, origin: "", models: [] },
     mcp: { enabled: false, webSearch: false, webReader: false, zread: false, gateway: { enabled: false, upstreamOrigin: "" } },
     async: { enabled: false, origin: "", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
-    claim: { enabled: false, auto: false, origin: "", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+    claim: { enabled: false, auto: false, origin: "", pollIntervalMs: 300000, cooldownMs: 600000, planId: "", spacingHours: 4, },
     accounts: { pickStrategy: "round-robin" as const, maxInFlightPerAccount: 4, queueTimeoutMs: 5000, rateLimitCooldownMs: 30000, reservationTimeoutMs: 900000 },
     logging: { level: "info" as const },
   });

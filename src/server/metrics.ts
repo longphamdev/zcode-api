@@ -125,6 +125,16 @@ export class MetricsRegistry {
     this.busyGlobal++;
   }
 
+  /** Manual/auto claim outcomes per account. */
+  claims = new Map<string, { claimed: number; failed: number; lastPlan?: string; lastAt?: number }>();
+  recordClaim(accountId: string, result: "claimed" | "failed", planId?: string): void {
+    const c = this.claims.get(accountId) ?? { claimed: 0, failed: 0 };
+    c[result === "claimed" ? "claimed" : "failed"]++;
+    if (planId) c.lastPlan = planId;
+    c.lastAt = Date.now();
+    this.claims.set(accountId, c);
+  }
+
   /** Record a balance-poll sample (per account, per bucket). */
   recordPoll(accountId: string, samples: Array<{ model: string; remainingUnits?: number; usedUnits?: number }>, at = Date.now()): void {
     const list = this.polls.get(accountId) ?? [];
@@ -164,6 +174,7 @@ export class MetricsRegistry {
     accounts: AccountMetrics[];
     pollHistory: Record<string, PollSample[]>;
     transitions: TransitionLog[];
+    claims: Record<string, { claimed: number; failed: number; lastPlan?: string; lastAt?: number }>;
     busyGlobal: number;
     note: string;
   } {
@@ -171,6 +182,7 @@ export class MetricsRegistry {
       accounts: [...this.accounts.values()],
       pollHistory: Object.fromEntries([...this.polls.entries()]),
       transitions: [...this.transitions],
+      claims: Object.fromEntries([...this.claims.entries()]),
       busyGlobal: this.busyGlobal,
       note: "In-memory counters — reset on proxy restart. Tokens from response usage where available.",
     };

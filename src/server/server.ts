@@ -18,7 +18,7 @@ import { handleResponsesRoute } from "./routes-responses.js";
 import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute } from "./routes-async.js";
 import { handleMcpRoute, type McpRouteOptions } from "./routes-mcp.js";
 import { handleQuota } from "./routes-quota.js";
-import { handleAdminState } from "./routes-admin.js";
+import { handleAdminState, handleAdminClaim } from "./routes-admin.js";
 import { ADMIN_DASHBOARD_HTML } from "./admin-html.js";
 import { errorResponse } from "../proxy/handler.js";
 import type { ResponseStore } from "../responses/store.js";
@@ -109,6 +109,10 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
           "referrer-policy": "no-referrer",
         },
       });
+    }
+
+    if (path === "/admin/claim" && method === "POST") {
+      return handleAdminClaim(req, { proxyApiKey: config.auth.proxyApiKey });
     }
 
     if (config.auth.proxyApiKey) {

@@ -187,6 +187,9 @@ export interface ClaimConfig {
   pollIntervalMs: number;
   /** Backoff after a failed claim attempt in ms. Default `600000` (10 min). */
   cooldownMs: number;
+  /** Hours between claim attempts of the SAME account in auto-claim rotation.
+   *  Effective interval = spacingHours × 3600s ÷ accountCount. Default `4`. */
+  spacingHours: number;
   /** Optional `plan_id` to claim; empty string claims the highest-priority preview. Default `""`. */
   planId: string;
 }

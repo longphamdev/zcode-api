@@ -31,10 +31,17 @@ interface ClaimSchedulerConfig {
 }
 
 export interface ClaimSchedulerDeps {
-  getJwt(): Promise<string | undefined>;
+  /**
+   * Multi-account rotation: returns the current account id + its JWT.
+   * The scheduler rotates through accounts in order, one per cycle — the
+   * caller spaces cycles so each account claims hours apart (captcha from
+   * one IP across N accounts in a burst is the ban-risk pattern; spacing
+   * reduces correlation).
+   */
+  nextAccount(): Promise<{ accountId: string; jwt?: string } | null>;
   createClient(jwt: string): ClaimGateway;
   getCaptcha(): Promise<{ verifyParam: string; region?: string }>;
-  captchaRequired?: () => Promise<boolean> | boolean;
+  captchaRequired?: (accountId: string) => Promise<boolean> | boolean;
   config: ClaimSchedulerConfig;
   log?: (message: string) => void;
   now?: () => number;
@@ -84,16 +91,17 @@ export class ClaimScheduler {
     if (nowMs < this.holdUntil) return { action: "skipped_hold" };
 
     let jwt: string | undefined;
+    let currentAccountId = "";
     try {
-      jwt = await this.deps.getJwt();
+      const account = await this.deps.nextAccount();
+      if (!account || !account.jwt) {
+        // No accounts (or none logged in) — "login pending", not fatal.
+        return this.errorBackoff("no JWT available (oauth login pending)");
+      }
+      jwt = account.jwt;
+      currentAccountId = account.accountId;
     } catch (err) {
       return this.errorBackoff(`credential resolution failed: ${(err as Error).message}`);
-    }
-    if (!jwt) {
-      // Missing JWT is "login pending" (Android logs in after boot), not fatal:
-      // back off and retry — the login_required CLAIM FAILURE (server 401) is
-      // the terminal case handled below.
-      return this.errorBackoff("no JWT available (oauth login pending)");
     }
 
     const client = this.deps.createClient(jwt);
@@ -124,7 +132,7 @@ export class ClaimScheduler {
     let captchaRequired = true;
     if (this.deps.captchaRequired) {
       try {
-        captchaRequired = await this.deps.captchaRequired();
+        captchaRequired = await this.deps.captchaRequired(currentAccountId);
       } catch {
         captchaRequired = true;
       }
@@ -149,7 +157,7 @@ export class ClaimScheduler {
     if (outcome.ok) {
       const endsAtMs = outcome.endsAt !== undefined ? outcome.endsAt * 1000 : undefined;
       this.holdUntil = endsAtMs ?? nowMs + this.deps.config.pollIntervalMs;
-      this.log(`claim: claimed plan ${target.planId}${outcome.startsAt !== undefined ? ` (activates ${new Date(outcome.startsAt * 1000).toISOString()})` : ""}`);
+      this.log(`claim: account=${currentAccountId} claimed plan ${target.planId}${outcome.startsAt !== undefined ? ` (activates ${new Date(outcome.startsAt * 1000).toISOString()})` : ""}`);
       return { action: "claimed", planId: target.planId, startsAt: outcome.startsAt, endsAt: outcome.endsAt };
     }
 

@@ -78,6 +78,7 @@ const DEFAULTS = {
   CLAIM_ORIGIN: "https://zcode.z.ai",
   CLAIM_POLL_INTERVAL_MS: 300000,
   CLAIM_COOLDOWN_MS: 600000,
+  CLAIM_SPACING_HOURS: 4,
   CLAIM_PLAN_ID: "",
   ACCOUNTS_PICK_STRATEGY: "round-robin" as const,
   ACCOUNTS_MAX_IN_FLIGHT: 2,
@@ -443,6 +444,9 @@ function resolveClaimConfig(raw: unknown): ClaimConfig {
     origin,
     pollIntervalMs: resolvePositiveInt(pollIntervalEnv ?? obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.CLAIM_POLL_INTERVAL_MS, "claim.pollIntervalMs"),
     cooldownMs: resolvePositiveInt(obj.cooldownMs ?? obj.cooldown_ms, DEFAULTS.CLAIM_COOLDOWN_MS, "claim.cooldownMs"),
+    spacingHours: resolvePositiveInt(
+      process.env.CLAIM_SPACING_HOURS ?? obj.spacingHours,
+      DEFAULTS.CLAIM_SPACING_HOURS, "claim.spacingHours"),
     planId: typeof obj.planId === "string" ? obj.planId.trim() : DEFAULTS.CLAIM_PLAN_ID,
   };
 }

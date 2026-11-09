@@ -49,7 +49,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
       controlTimeoutMs: 1000,
       defaultModel: "",
     },
-    claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+    claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "", spacingHours: 4, },
     logging: { level: "info" },
     ...overrides,
   };

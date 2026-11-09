@@ -44,7 +44,7 @@ function makeHarness(overrides: Partial<{ planId: string; pollIntervalMs: number
   };
 
   const deps: ClaimSchedulerDeps = {
-    getJwt: () => Promise.resolve(h.jwt),
+    nextAccount: () => Promise.resolve({ accountId: "test-acc", jwt: h.jwt }),
     createClient: () => ({
       listPlans: () => (h.previewError ? Promise.reject(h.previewError) : Promise.resolve(h.plans)),
       claim: (planId, captcha) => {
@@ -227,7 +227,7 @@ describe("ClaimScheduler — 3.16.3 configs.captcha gate", () => {
       claimCalls: [] as Array<{ planId: string; captcha: { verifyParam: string; region?: string } | undefined }>,
     };
     const scheduler = new ClaimScheduler({
-      getJwt: () => Promise.resolve("jwt-1"),
+      nextAccount: () => Promise.resolve({ accountId: "test-acc", jwt: "jwt-1" }),
       createClient: () => ({
         listPlans: () => Promise.resolve(plans),
         claim: (planId, captcha) => {
@@ -272,7 +272,7 @@ describe("ClaimScheduler — 3.16.3 gate true keeps the solve (default-equivalen
     let captchaCalls = 0;
     const claimCalls: Array<{ planId: string; captcha: { verifyParam: string; region?: string } | undefined }> = [];
     const scheduler = new ClaimScheduler({
-      getJwt: () => Promise.resolve("jwt-1"),
+      nextAccount: () => Promise.resolve({ accountId: "test-acc", jwt: "jwt-1" }),
       createClient: () => ({
         listPlans: () => Promise.resolve(plans),
         claim: (planId, captcha) => {
@@ -293,5 +293,55 @@ describe("ClaimScheduler — 3.16.3 gate true keeps the solve (default-equivalen
     expect(result.action).toBe("claimed");
     expect(captchaCalls).toBe(1);
     expect(claimCalls).toEqual([{ planId: "weekend-1", captcha: { verifyParam: "cap" } }]);
+  });
+});
+
+describe("ClaimScheduler — multi-account rotation", () => {
+  it("rotates through accounts one per tick (a, b, a, b...)", async () => {
+    const accounts = [
+      { id: "acc-a", jwt: "jwt-a" },
+      { id: "acc-b", jwt: "jwt-b" },
+    ];
+    let idx = 0;
+    const claimedBy: string[] = [];
+    const deps: ClaimSchedulerDeps = {
+      nextAccount: () => {
+        const a = accounts[idx % accounts.length];
+        idx++;
+        return Promise.resolve({ accountId: a.id, jwt: a.jwt });
+      },
+      getCaptcha: () => Promise.resolve({ verifyParam: "v" }),
+      createClient: (jwt) => ({
+        listPlans: () => Promise.resolve([{ planId: "p1", name: "P", description: "", priority: 1, entitlements: [] }]),
+        claim: (_planId, _captcha) => {
+          claimedBy.push(jwt);
+          return Promise.resolve({ ok: true, planId: "p1", endsAt: 9999 } as ClaimOutcome);
+        },
+      }),
+      config: { pollIntervalMs: 0, cooldownMs: 0 },
+    };
+    const s = new ClaimScheduler(deps);
+    await s.tick(); await s.tick(); await s.tick(); await s.tick();
+    // Rotation: jwt-a, jwt-b, jwt-a, jwt-b — each acc claims in turn
+    expect(claimedBy).toEqual(["jwt-a", "jwt-b", "jwt-a", "jwt-b"]);
+    s.stop();
+  });
+
+  it("logs the account id on claim", async () => {
+    const logs: string[] = [];
+    const deps: ClaimSchedulerDeps = {
+      nextAccount: () => Promise.resolve({ accountId: "acc-xyz", jwt: "jwt-x" }),
+      getCaptcha: () => Promise.resolve({ verifyParam: "v" }),
+      createClient: () => ({
+        listPlans: () => Promise.resolve([{ planId: "p1", name: "P", description: "", priority: 1, entitlements: [] }]),
+        claim: () => Promise.resolve({ ok: true, planId: "p1", endsAt: 9999 } as ClaimOutcome),
+      }),
+      config: { pollIntervalMs: 0, cooldownMs: 0 },
+      log: (m) => logs.push(m),
+    };
+    const s = new ClaimScheduler(deps);
+    await s.tick();
+    s.stop();
+    expect(logs.some((l) => l.includes("account=acc-xyz"))).toBe(true);
   });
 });

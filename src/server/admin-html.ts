@@ -36,6 +36,7 @@ export const ADMIN_DASHBOARD_HTML = `<!DOCTYPE html>
 </div>
 
 <h2>Tài khoản — tổng theo acc</h2>
+<div class="meta">Nút "Claim" kích hoạt claim thủ công cho acc đó (ZAI chỉ có campaign thì mới claim được).</div>
 <table id="accounts"></table>
 
 <h2>Phân phối theo model (per acc)</h2>
@@ -82,12 +83,33 @@ function esc(s) { const d = document.createElement("div"); d.textContent = Strin
 
 function render(d) {
   // Accounts table
-  let h = "<tr><th>acc</th><th>status</th><th>requests</th><th>success</th><th>1005</th><th>429</th><th>401</th><th>tokens</th></tr>";
+  let h = "<tr><th>acc</th><th>status</th><th>requests</th><th>success</th><th>1005</th><th>429</th><th>401</th><th>tokens</th><th>claim</th></tr>";
   for (const a of d.accounts) {
     const t = a.totals;
     const cls = t.quota1005 > 0 ? "warn" : "ok";
-    h += "<tr><td>" + esc(a.label || a.id.slice(0, 8)) + "</td><td class='" + cls + "'>" + esc(a.status) + "</td><td>" + fmt(t.requests) + "</td><td>" + fmt(t.success) + "</td><td>" + fmt(t.quota1005) + "</td><td>" + fmt(t.rate429) + "</td><td>" + fmt(t.auth401) + "</td><td>" + fmt(t.tokensUsed) + "</td></tr>";
+    const ci = d.claims[a.id];
+    const claimInfo = ci ? ci.claimed + "✓/" + ci.failed + "✗" : "—";
+    h += "<tr><td>" + esc(a.label || a.id.slice(0, 8)) + "</td><td class='" + cls + "'>" + esc(a.status) + "</td><td>" + fmt(t.requests) + "</td><td>" + fmt(t.success) + "</td><td>" + fmt(t.quota1005) + "</td><td>" + fmt(t.rate429) + "</td><td>" + fmt(t.auth401) + "</td><td>" + fmt(t.tokensUsed) + "</td><td><button class='claimbtn' data-acc='" + esc(a.id) + "' style='background:#1f6feb;color:#fff;border:none;padding:2px 8px;cursor:pointer;font-family:inherit;'>Claim</button> <span class='meta'>" + esc(claimInfo) + "</span></td></tr>";
   }
+  document.querySelectorAll(".claimbtn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "…";
+      try {
+        const resp = await fetch("/admin/claim", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer " + (sessionStorage.getItem("zcode-admin-key") ?? "") },
+          body: JSON.stringify({ accountId: btn.dataset.acc }),
+        });
+        const j = await resp.json();
+        btn.textContent = j.results?.[0]?.result ?? resp.status;
+        setTimeout(() => { btn.textContent = "Claim"; btn.disabled = false; load(); }, 3000);
+      } catch (e) {
+        btn.textContent = "err";
+        setTimeout(() => { btn.textContent = "Claim"; btn.disabled = false; }, 3000);
+      }
+    });
+  });
   h += "<tr><td><b>busyGlobal</b></td><td colspan='7'>" + fmt(d.busyGlobal) + " (429 từ chính proxy — queue/cap)</td></tr>";
   document.getElementById("accounts").innerHTML = h;
 
