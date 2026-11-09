@@ -27,12 +27,15 @@ export async function fetchBalanceForCredential(
     authorization: `Bearer ${cred.jwt}`,
     Accept: "application/json",
   };
-  const platform = `${normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM) ?? process.platform}-${normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH) ?? os.arch()}`;
-  if (config.identity.deviceMid) headers["x-device-mid"] = config.identity.deviceMid;
-  headers["x-platform"] = platform;
-
   const origin = config.claim.origin || "https://zcode.z.ai";
-  const resp = await fetchImpl(`${origin}/api/v1/zcode-plan/billing/balance`, { headers, signal });
+  // Mirror routes-quota's query params — the endpoint 400s without them.
+  // `platform` is a QUERY param here (not a header — header form 400s).
+  const appVersion = config.identity.appVersion;
+  const platform = `${normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM) ?? process.platform}-${normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH) ?? os.arch()}`;
+  const resp = await fetchImpl(
+    `${origin}/api/v1/zcode-plan/billing/balance?app_version=${encodeURIComponent(appVersion)}&platform=${encodeURIComponent(platform)}`,
+    { headers, signal },
+  );
   if (!resp.ok) {
     // 401 here is a strong credential-death signal (authenticated plane).
     if (resp.status === 401) return { ok: false, error: "balance: 401 (credential rejected)" };
