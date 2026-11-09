@@ -103,7 +103,11 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       }
       return new Response(ADMIN_DASHBOARD_HTML, {
         status: 200,
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+        },
       });
     }
 

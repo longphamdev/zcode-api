@@ -32,6 +32,7 @@ export const ADMIN_DASHBOARD_HTML = `<!DOCTYPE html>
     <option value="0">off</option>
   </select>
   <span id="updated"></span>
+  <button id="clearkey" style="margin-left:12px;background:#161b22;color:#e6edf3;border:1px solid #30363d;padding:2px 8px;font-family:inherit;cursor:pointer;">Xoá key</button>
 </div>
 
 <h2>Tài khoản — tổng theo acc</h2>
@@ -48,6 +49,12 @@ export const ADMIN_DASHBOARD_HTML = `<!DOCTYPE html>
 
 <script>
 let timer = null;
+document.addEventListener("DOMContentLoaded", () => {
+  document.getElementById("clearkey")?.addEventListener("click", () => {
+    sessionStorage.removeItem("zcode-admin-key");
+    location.reload();
+  });
+});
 function setInterval_() {
   const v = Number(document.getElementById("interval").value);
   if (timer) clearInterval(timer);
@@ -55,8 +62,14 @@ function setInterval_() {
 }
 async function load() {
   try {
-    const resp = await fetch("/admin/state" + (urlKey ? "?key=" + encodeURIComponent(urlKey) : ""));
-    if (resp.status === 401) { document.body.innerHTML = "<h1>401 — cần proxy API key</h1><div>Cấu hình auth trong browser không hỗ trợ header tùy chỉnh — dùng curl hoặc thêm ?key=</div>"; return; }
+    const key = sessionStorage.getItem("zcode-admin-key");
+    const resp = await fetch("/admin/state", { headers: key ? { authorization: "Bearer " + key } : {} });
+    if (resp.status === 401) {
+      const k = prompt("Proxy API key (lưu trong sessionStorage — đóng tab là mất):");
+      if (!k) { document.getElementById("updated").textContent = " · 401 — chưa nhập key"; return; }
+      sessionStorage.setItem("zcode-admin-key", k);
+      return load(); // retry once with the new key
+    }
     const d = await resp.json();
     render(d);
     document.getElementById("updated").textContent = " · cập nhật " + new Date().toLocaleTimeString();
@@ -116,8 +129,8 @@ function render(d) {
   document.getElementById("transitions").innerHTML = t || "<div>chưa có</div>";
 }
 
-// Optional key via query param (?key=...) for browser access without header support:
-const urlKey = new URLSearchParams(location.search).get("key");
+// API key lives in sessionStorage (cleared when the tab closes — never in the
+// URL, never persisted to disk). A "Xoá key" action is available in the UI.
 setInterval_();
 load();
 </script>
