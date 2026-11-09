@@ -452,12 +452,17 @@ export async function proxyRequest(
   if (reservation) {
     const pool = opts.accountPool!;
     if (upstreamResp.status === 429) {
-      const ra = upstreamResp.headers.get("retry-after");
-      const retryAtMs = ra !== null && Number.isFinite(Number(ra))
-        ? Date.now() + Number(ra) * 1000
-        : undefined;
-      pool.cool(reservation.accountId, retryAtMs);
-      if (debug) debugError(reqId, "account_rate_limited", `${reservation.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
+      // Single-account pass-through parity: a 429 on the only account must
+      // NOT cool it into blocking the next request — legacy behavior passes
+      // the 429 through and lets the client decide.
+      if (pool.accountCount() > 1) {
+        const ra = upstreamResp.headers.get("retry-after");
+        const retryAtMs = ra !== null && Number.isFinite(Number(ra))
+          ? Date.now() + Number(ra) * 1000
+          : undefined;
+        pool.cool(reservation.accountId, retryAtMs);
+        if (debug) debugError(reqId, "account_rate_limited", `${reservation.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
+      }
     } else if (upstreamResp.ok) {
       pool.noteSuccess(reservation.accountId);
     } else if (upstreamResp.status >= 400) {

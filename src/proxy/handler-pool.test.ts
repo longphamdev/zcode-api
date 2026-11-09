@@ -84,7 +84,7 @@ function config(upstreamUrl: string): ProxyConfig {
     mcp: { enabled: false, webSearch: false, webReader: false, zread: false, gateway: { enabled: false, upstreamOrigin: "" } },
     async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
     claim: { enabled: false, auto: false, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
-    accounts: { maxInFlightPerAccount: 4, queueTimeoutMs: 100, rateLimitCooldownMs: 30000 },
+    accounts: { maxInFlightPerAccount: 4, queueTimeoutMs: 100, rateLimitCooldownMs: 30000, reservationTimeoutMs: 900000 },
     logging: { level: "info" },
   };
 }

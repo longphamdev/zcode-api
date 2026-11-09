@@ -82,6 +82,14 @@ export interface PoolOptions {
    */
   rateLimitCooldownMs?: number;
   /**
+   * Reservation watchdog: a reservation held longer than this is force-
+   * released with a warning (protects the cap against leaked slots — e.g.
+   * a runtime that never delivers body-stream completion events, or a
+   * hung upstream). Default 15 minutes. `0` disables.
+   * Config: `accounts.reservationTimeoutMs`.
+   */
+  reservationTimeoutMs?: number;
+  /**
    * Injectable clock (Date.now-compatible). Tests freeze/advance time here.
    */
   now?: () => number;
@@ -127,6 +135,7 @@ export class AccountPool {
   private readonly maxInFlight: number;
   private readonly queueTimeoutMs: number;
   private readonly rateLimitCooldownMs: number;
+  private readonly reservationTimeoutMs: number;
   private readonly now: () => number;
 
   private accounts = new Map<string, StoredAccount>();
@@ -139,6 +148,7 @@ export class AccountPool {
     this.maxInFlight = opts.maxInFlightPerAccount ?? 4;
     this.queueTimeoutMs = opts.queueTimeoutMs ?? 5_000;
     this.rateLimitCooldownMs = opts.rateLimitCooldownMs ?? 30_000;
+    this.reservationTimeoutMs = opts.reservationTimeoutMs ?? 15 * 60_000;
     this.now = opts.now ?? Date.now;
   }
 
@@ -340,12 +350,25 @@ export class AccountPool {
     const r = this.runtime.get(accountId)!;
     r.inFlight++;
     let released = false;
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
     const doRelease = () => {
       if (released) return; // idempotent
       released = true;
+      if (watchdog) clearTimeout(watchdog);
       r.inFlight = Math.max(0, r.inFlight - 1);
       this.wakeNext();
     };
+    if (this.reservationTimeoutMs > 0) {
+      // Watchdog: a reservation that outlives the cap is force-released with
+      // a warning. Real timer (operational lifetime, not injectable-clock
+      // territory): tests use short timeouts.
+      watchdog = setTimeout(() => {
+        if (released) return;
+        console.warn(`pool: reservation watchdog force-released account=${accountId} after ${Math.round(this.reservationTimeoutMs / 1000)}s (leaked slot suspected — hung stream or missing release path)`);
+        doRelease();
+      }, this.reservationTimeoutMs);
+      watchdog.unref?.();
+    }
     return {
       accountId,
       credential: this.accounts.get(accountId)!.credential,

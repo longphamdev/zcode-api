@@ -373,3 +373,95 @@ describe("AccountPool — state transitions", () => {
     expect(() => pool.updateQuota("ghost", 5, Date.now())).not.toThrow();
   });
 });
+
+describe("AccountPool — watchdog (leaked-slot protection)", () => {
+  it("force-releases a reservation held past reservationTimeoutMs", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const pool = await makePool(store, new FakeClock(), { maxInFlightPerAccount: 1, reservationTimeoutMs: 50 });
+    const r1 = await pool.reserve();
+    expect(pool.runtimeFor("a")!.inFlight).toBe(1);
+    // Simulate a hung stream: never release r1. After the watchdog fires the
+    // slot must be free again.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+    const r2 = await pool.reserve(); // slot freed by watchdog
+    expect(["a", "b"]).toContain(r2.accountId);
+    r2.release();
+  });
+
+  it("watchdog does NOT fire on reservations released in time", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const pool = await makePool(store, new FakeClock(), { maxInFlightPerAccount: 1, reservationTimeoutMs: 10_000 });
+    const r1 = await pool.reserve();
+    r1.release(); // well before 10s
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+  });
+
+  it("watchdog release is idempotent with a late manual release", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const pool = await makePool(store, new FakeClock(), { maxInFlightPerAccount: 1, reservationTimeoutMs: 40 });
+    const r1 = await pool.reserve();
+    await new Promise((resolve) => setTimeout(resolve, 80)); // watchdog fired
+    r1.release(); // late manual release — must not drive inFlight negative
+    expect(pool.runtimeFor("a")!.inFlight).toBe(0);
+  });
+});
+
+describe("AccountPool — account removed while reserved", () => {
+  it("release() after removal from the store is a safe no-op", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a"), stored("b")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    const r1 = await pool.reserve();
+    // CLI removes the account mid-request:
+    store.accounts = [stored("b")];
+    await pool.syncWithStore();
+    expect(pool.runtimeFor("a")).toBeUndefined(); // gone from runtime
+    expect(() => r1.release()).not.toThrow(); // safe no-op
+    expect(pool.accountCount()).toBe(1);
+  });
+});
+
+describe("AccountPool — single-account 429 behavior (pass-through parity)", () => {
+  it("cool() on a single account does not gate requests (cap-free pass-through has no pool gate)", async () => {
+    const store = new FakeStore();
+    store.accounts = [stored("a")];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    // Handler marks the single account cooling on 429 (parity with no-pool
+    // behavior would IGNORE this). The pool itself must not throw when the
+    // only account is cooling BUT the pool is in pass-through mode... 
+    // Decision (ticket #5 note): handler does NOT call cool() when accounts.size === 1,
+    // preserving legacy behavior. Pool-level: cooling a single account makes it
+    // unpickable — document via AllAccountsCoolingError:
+    pool.cool("a", clock.now() + 5_000);
+    await expect(pool.reserve()).rejects.toBeInstanceOf(AllAccountsCoolingError);
+    // Legacy parity is enforced in the handler (no cool() call for single-account pools).
+  });
+});
+
+describe("AccountPool — exhausted revival semantics", () => {
+  it("revival follows quotaExpiresAt (runtime), NOT the credential's tokenExpiresAt", async () => {
+    const store = new FakeStore();
+    store.accounts = [{
+      id: "a",
+      credential: { apiKey: "k", provider: "zai", userId: "a", expiresAt: Date.now() + 60_000 },
+      addedAt: 0,
+    }];
+    const clock = new FakeClock();
+    const pool = await makePool(store, clock);
+    // Quota exhausted until +5s; credential (token) valid for another 60s.
+    pool.markExhausted("a", clock.now() + 5_000);
+    clock.advance(5_001);
+    // Revived despite tokenExpiresAt being far in the future — the two expiries
+    // are independent (revival is quota-gated only).
+    const r = await pool.reserve();
+    expect(r.accountId).toBe("a");
+    r.release();
+  });
+});

@@ -81,6 +81,7 @@ const DEFAULTS = {
   ACCOUNTS_MAX_IN_FLIGHT: 4,
   ACCOUNTS_QUEUE_TIMEOUT_MS: 5000,
   ACCOUNTS_RATE_LIMIT_COOLDOWN_MS: 30000,
+  ACCOUNTS_RESERVATION_TIMEOUT_MS: 900000,
   ENDPOINT_ROUTING_ENABLED: true,
   ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
   CLIENT_SIGNING_ENABLED: true,
@@ -408,6 +409,9 @@ function resolveAccountsConfig(raw: unknown): AccountsConfig {
     rateLimitCooldownMs: resolveNonNegativeInt(
       process.env.ACCOUNTS_RATE_LIMIT_COOLDOWN_MS ?? obj.rateLimitCooldownMs,
       DEFAULTS.ACCOUNTS_RATE_LIMIT_COOLDOWN_MS, "accounts.rateLimitCooldownMs"),
+    reservationTimeoutMs: resolveNonNegativeInt(
+      process.env.ACCOUNTS_RESERVATION_TIMEOUT_MS ?? obj.reservationTimeoutMs,
+      DEFAULTS.ACCOUNTS_RESERVATION_TIMEOUT_MS, "accounts.reservationTimeoutMs"),
   };
 }
 

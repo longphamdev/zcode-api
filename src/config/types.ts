@@ -170,6 +170,8 @@ export interface AccountsConfig {
   queueTimeoutMs: number;
   /** Fallback cooling for a 429 without Retry-After (ms). Default `30000`. */
   rateLimitCooldownMs: number;
+  /** Reservation watchdog: force-release slots held longer than this (ms). Default `900000` (15 min). `0` disables. */
+  reservationTimeoutMs: number;
 }
 
 export interface ClaimConfig {
