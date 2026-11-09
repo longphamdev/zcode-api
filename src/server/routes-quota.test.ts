@@ -408,7 +408,7 @@ describe("handleQuota — multi-account fixed schema (#6)", () => {
     const resp = await handleQuota(
       makeConfig(),
       // fetch that always throws → collectQuotaSnapshot fails
-      (async () => { throw new Error("network down"); }) as typeof fetch,
+      (async () => { throw new Error("network down"); }) as unknown as typeof fetch,
       async () => store.accounts[0].credential,
       pool,
       listAccountsImpl,

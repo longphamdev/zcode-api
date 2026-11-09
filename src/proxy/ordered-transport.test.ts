@@ -54,14 +54,6 @@ async function startSilentServer(): Promise<SilentServer> {
   };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, 20));
-  }
-  return predicate();
-}
 
 describe("sendOrderedUpstreamRequest — abort propagation", () => {
   it("aborts mid-request: promise rejects and the server-side socket closes", async () => {
@@ -277,6 +269,7 @@ describe("proxyRequest — ordered transport + brotli SSE (ultra gateway regress
         mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
         async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
         claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
+        accounts: { maxInFlightPerAccount: 4, queueTimeoutMs: 5000, rateLimitCooldownMs: 30000, reservationTimeoutMs: 900000 },
         logging: { level: "info" },
       };
       const auth = new AuthManager();

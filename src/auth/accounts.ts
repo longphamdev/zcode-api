@@ -19,11 +19,11 @@
  * Persisted per account: identity fingerprint fields only — never runtime
  * health state (that lives in the AccountPool, Phase 2).
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, renameSync, statSync, openSync, closeSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, statSync, openSync, closeSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { encryptWith, decryptWith, atomicWriteStore, storeFile, storeDir, getEncryptionKey, getLegacyEncryptionKey } from "./store-internals.js";
+import { encryptWith, decryptWith, atomicWriteStore, storeFile, getEncryptionKey, getLegacyEncryptionKey } from "./store-internals.js";
 import type { Credential } from "./types.js";
 
 /** Stored per-account record — persistent data only (no runtime health). */

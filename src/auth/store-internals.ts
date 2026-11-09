@@ -3,7 +3,7 @@
  * `store.ts` and the multi-account v2 in `accounts.ts`): paths, AES-GCM
  * encryption, key derivation, and the atomic file write. Not a public API.
  */
-import { existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";

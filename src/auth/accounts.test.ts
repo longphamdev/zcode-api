@@ -21,7 +21,7 @@ import {
   _testing,
 } from "./accounts.js";
 import { saveCredential, loadCredential, clearCredential, getStorePath } from "./store.js";
-import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync, copyFileSync, statSync, chmodSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync, copyFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -147,7 +147,7 @@ describe("account store — CRUD", () => {
 
   it("store file has 0o600 permissions", async () => {
     await saveAccount(credA);
-    const mode = readFileSync(getStorePath()).stat?.mode ?? (await import("node:fs")).statSync(getStorePath()).mode;
+    const mode = statSync(getStorePath()).mode;
     expect(mode & 0o777).toBe(0o600);
   });
 
@@ -480,17 +480,6 @@ describe("auth CLI — subprocess end-to-end (#2)", () => {
     const { saveAccount } = await import("./accounts.js");
     if (count >= 1) await saveAccount({ apiKey: "k1", provider: "zai", userId: "user-aaa" }, { label: "First", makePrimary: true });
     if (count >= 2) await saveAccount({ apiKey: "k2", provider: "zai", userId: "user-bbb" }, { label: "Second", makePrimary: false });
-  }
-
-  function runCli(args: string): { stdout: string; stderr: string; exitCode: number } {
-    const script = `
-      process.env.ZCODE_PROXY_STORE_DIR = ${JSON.stringify(storeDir)};
-      process.env.ZCODE_PROXY_CREDENTIAL_SECRET = ${JSON.stringify(TEST_SECRET)};
-      const indexModule = await import(${JSON.stringify(join(import.meta.dir, "index.ts"))});
-    `;
-    // Running the full index CLI would boot the server; instead exercise the
-    // exact command implementations via a driver that mirrors authCommand.
-    return { stdout: "", stderr: "", exitCode: 0 };
   }
 
   it("auth remove <id> deletes the target; primary re-points (output confirms)", async () => {

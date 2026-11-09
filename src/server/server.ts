@@ -32,6 +32,8 @@ interface ServerOptions {
   responseStore?: ResponseStore;
   /** Multi-account pool. When absent, the proxy falls back to the single-credential path. */
   accountPool?: import("../auth/pool.js").AccountPool;
+  /** Per-account quota poller. Wired by buildServerOptions when the pool exists. */
+  quotaPoller?: import("../auth/quota-poller.js").QuotaPoller;
 }
 
 /** Minimal server handle: what the caller needs to print URLs and shut down. */

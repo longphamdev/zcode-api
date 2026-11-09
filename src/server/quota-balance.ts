@@ -23,12 +23,12 @@ export async function fetchBalanceForCredential(
   const idHeaders = buildIdentityHeaders(config.identity);
   delete idHeaders["X-ZCode-Agent"];
   const headers: Record<string, string> = {
-    ...idHeaders,
+    ...Object.fromEntries(Object.entries(idHeaders).filter(([, v]) => typeof v === "string")),
     authorization: `Bearer ${cred.jwt}`,
     Accept: "application/json",
   };
   const platform = `${normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM) ?? process.platform}-${normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH) ?? os.arch()}`;
-  headers["x-device-mid"] = config.identity.deviceMid;
+  if (config.identity.deviceMid) headers["x-device-mid"] = config.identity.deviceMid;
   headers["x-platform"] = platform;
 
   const origin = config.claim.origin || "https://zcode.z.ai";

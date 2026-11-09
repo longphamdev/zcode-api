@@ -75,6 +75,7 @@ import {
 } from "../translator/responses-types.js";
 import { ResponseStore, type StoredResponse } from "../responses/store.js";
 import { errorResponse, readBody, InflatedBodyTooLargeError } from "./handler.js";
+import { AllAccountsCoolingError, AccountsBusyError, NoAccountAvailableError } from "../auth/pool.js";
 
 export interface ResponsesHandlerOptions {
   config: ProxyConfig;

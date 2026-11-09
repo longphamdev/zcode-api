@@ -101,7 +101,6 @@ describe("QuotaPoller — lifecycle", () => {
     expect(pool.runtimeFor("b")!.lastPolledAtMs).toBeDefined();
 
     store.accounts = [stored("b")]; // A removed
-    const aLast = pool.runtimeFor("a")!.lastPolledAtMs;
     await pool.syncWithStore(); // pool drops A
     expect(pool.runtimeFor("a")).toBeUndefined(); // gone from the pool
     await wait(120); // poller follower must not resurrect it
@@ -168,7 +167,7 @@ describe("QuotaPoller — lifecycle", () => {
     const poller = createQuotaPoller(
       pool,
       store,
-      async (cred, signal) => {
+      async (_cred, signal) => {
         // Hang until aborted.
         await new Promise<never>((_, reject) => {
           signal.addEventListener("abort", () => {

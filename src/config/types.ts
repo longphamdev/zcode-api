@@ -277,8 +277,12 @@ export interface ProxyConfig {
   async: AsyncConfig;
   /** Manual claim ("weekend plan") configuration. */
   claim: ClaimConfig;
-  /** Multi-account pool tuning. Defaults serve a single account with pool semantics disabled. */
-  accounts: AccountsConfig;
+  /**
+   * Multi-account pool tuning. Defaults serve a single account with pool
+   * semantics disabled. Optional in the type: hand-built test fixtures may
+   * omit it (loadConfig always populates it; consumers default when absent).
+   */
+  accounts?: AccountsConfig;
   logging: {
     level: "debug" | "info" | "warn" | "error";
   };

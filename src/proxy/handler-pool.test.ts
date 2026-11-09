@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { proxyRequest } from "./handler.js";
-import { AccountPool, type AccountRuntime } from "../auth/pool.js";
+import { AccountPool } from "../auth/pool.js";
 import type { StoredAccount } from "../auth/accounts.js";
 import type { Credential } from "../auth/types.js";
 import type { ProxyConfig } from "../config/types.js";
@@ -43,7 +43,6 @@ async function startAuthRecordingServer(status = 200, body = '{"id":"msg_1","typ
   let seenResolve!: () => void;
   const requestSeen = new Promise<void>((r) => (seenResolve = r));
   const server = createServer((req, res) => {
-    let data = "";
     req.on("data", () => {});
     req.on("end", () => {
       apiKeys.push(String(req.headers.authorization ?? "").replace(/^Bearer /, ""));
@@ -72,7 +71,6 @@ function config(upstreamUrl: string): ProxyConfig {
     identity: {
       appVersion: "test-1.0.0",
       sourceTitle: "test",
-      userAgent: "test-agent",
       refererOrigin: "https://test.local",
       deviceMid: "test-mid",
     },
@@ -229,7 +227,7 @@ describe("proxyRequest — AccountPool integration", () => {
   it("inflight returns to 0 after stream completion and after upstream error", async () => {
     upstream.close();
     // SSE-holding server then error server:
-    const server = createServer((req, res) => {
+    const server = createServer((_req, res) => {
       res.writeHead(500, { "content-type": "application/json" });
       res.end('{"error":"boom"}');
     });

@@ -3,7 +3,8 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
-import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig, HighspeedConfig, ClaimConfig } from "./types.js";
+import type { ClientIdentityConfig, ProxyConfig,
+  AccountsConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig, HighspeedConfig, ClaimConfig } from "./types.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {

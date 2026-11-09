@@ -25,10 +25,10 @@ export function buildServerOptions(
   // the legacy `auth.getCredential()` path when no pool is provided.
   try {
     const pool = createAccountPool({
-      maxInFlightPerAccount: config.accounts.maxInFlightPerAccount,
-      queueTimeoutMs: config.accounts.queueTimeoutMs,
-      rateLimitCooldownMs: config.accounts.rateLimitCooldownMs,
-      reservationTimeoutMs: config.accounts.reservationTimeoutMs,
+      maxInFlightPerAccount: config.accounts?.maxInFlightPerAccount,
+      queueTimeoutMs: config.accounts?.queueTimeoutMs,
+      rateLimitCooldownMs: config.accounts?.rateLimitCooldownMs,
+      reservationTimeoutMs: config.accounts?.reservationTimeoutMs,
     });
     opts.accountPool = pool;
     void pool.syncWithStore(); // async warm-up; first request syncs again if pending

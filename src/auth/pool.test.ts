@@ -1,7 +1,7 @@
 /**
  * Tests for AccountPool — pure module, injectable clock, no handler imports.
  */
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import {
   AccountPool,
   AllAccountsCoolingError,
@@ -308,7 +308,7 @@ describe("AccountPool — queue (woken by release, no polling)", () => {
     const pool = await makePool(store, new FakeClock(), { maxInFlightPerAccount: 1, queueTimeoutMs: 30 });
     const r1 = await pool.reserve();
     const r2 = await pool.reserve(); // fill both slots
-    const doomed = pool.reserve().catch((e) => e);
+    void pool.reserve().catch(() => null); // waiter that times out, leaves queue
     await new Promise((r) => setTimeout(r, 60)); // doomed times out, leaves queue
     // New waiter joins and gets woken by an original reservation's release.
     const late = pool.reserve().then((r) => r.accountId);
@@ -380,8 +380,9 @@ describe("AccountPool — watchdog (leaked-slot protection)", () => {
     store.accounts = [stored("a"), stored("b")];
     const pool = await makePool(store, new FakeClock(), { maxInFlightPerAccount: 1, reservationTimeoutMs: 50 });
     const r1 = await pool.reserve();
+    void r1; // deliberately leaked — the watchdog reclaims it
     expect(pool.runtimeFor("a")!.inFlight).toBe(1);
-    // Simulate a hung stream: never release r1. After the watchdog fires the
+    // Simulate a hung stream: r1 is never released. After the watchdog fires
     // slot must be free again.
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(pool.runtimeFor("a")!.inFlight).toBe(0);

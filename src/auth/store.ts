@@ -8,16 +8,8 @@
  * callers operate on the same on-disk store. A bare v1 file on disk migrates
  * to v2 on first load (with a one-time `.bak` backup).
  */
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import {
-  encryptWith,
-  decryptWith,
-  atomicWriteStore,
-  storeFile,
-  storeDir,
-  getEncryptionKey,
-  getLegacyEncryptionKey,
-} from "./store-internals.js";
+import { existsSync, unlinkSync } from "node:fs";
+import { storeFile } from "./store-internals.js";
 import {
   getPrimaryAccount,
   mutateAccountStore,

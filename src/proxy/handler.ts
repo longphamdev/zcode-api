@@ -29,7 +29,7 @@ import {
   type HighspeedCard,
   type HighspeedManager,
 } from "../highspeed/manager.js";
-import { credentialString } from "../auth/types.js";
+import { credentialString, type Credential } from "../auth/types.js";
 import { sendOrderedUpstreamRequest, orderedAdvertisedCodings } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
 import { isCaptchaChallenged, retryOnCaptchaChallenge, resolveCaptchaAcquireBudgetMs, acquireCaptchaWithRetry, type CaptchaModuleLike } from "./captcha-retry.js";
@@ -141,7 +141,7 @@ export async function proxyRequest(
     openaiBaseURL: config.providers[config.provider].openaiBase,
   };
 
-  let cred;
+  let cred: Credential;
   let reservation: Reservation | null = null;
   if (opts.accountPool) {
     // Multi-account path: pick an account via the pool. Single-account pools
@@ -417,6 +417,59 @@ export async function proxyRequest(
   const triedAccounts = new Set<string>(reservation ? [reservation.accountId] : []);
   while (true) {
     attemptIndex += 1;
+  // Pool release on EVERY exit path: attach to the response body (stream end,
+  // client abort → stream cancel, upstream error) — release() is idempotent,
+  // so double-wiring is safe. `finishWith` is identity in no-pool mode.
+  const finishWith = (respOrPromise: Response | Promise<Response>): Response | Promise<Response> => {
+    if (respOrPromise instanceof Promise) {
+      return respOrPromise.then((r) => finishWith(r));
+    }
+    const resp = respOrPromise;
+    if (!reservation) return resp;
+    // Debug-only account attribution — never leaks account ids to clients
+    // unless the operator explicitly runs `serve debug`.
+    if (debug && !resp.headers.has("x-zcode-account")) {
+      resp.headers.set("x-zcode-account", reservation.accountId);
+    }
+    if (resp.body) {
+      // Wrap (not tee) the body so EVERY consumer path releases the pool
+      // slot: full read (pull exhaustion), client cancel (cancel() hook —
+      // Bun 1.4 semantics: a tee branch's cancel waits for the other branch,
+      // which deadlocks the release when the other consumer is a blackhole
+      // pipeTo on a never-ending stream), and error (pull rethrow + release).
+      const source = resp.body.getReader();
+      let released = false;
+      const releaseOnce = () => {
+        if (released) return;
+        released = true;
+        reservation!.release();
+      };
+      const wrapped = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const { done, value } = await source.read();
+            if (done) {
+              releaseOnce();
+              controller.close();
+            } else {
+              controller.enqueue(value);
+            }
+          } catch (err) {
+            releaseOnce();
+            controller.error(err);
+          }
+        },
+        cancel(reason) {
+          releaseOnce();
+          try { void source.cancel(reason); } catch {}
+        },
+      });
+      return new Response(wrapped, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+    }
+    reservation.release();
+    return resp;
+  };
+
     try {
     // Transient connect failures (DNS blip, TLS reset, Bun "Unable to
     // connect") happen a few times a day against the gateway. Retry the
@@ -481,6 +534,7 @@ export async function proxyRequest(
   // accumulate real error samples for that ticket's matchers.
   if (reservation) {
     const pool = opts.accountPool!;
+    const booked = reservation; // non-null alias (TS loses narrowing across awaits)
     // Quota-exhausted sample (real, captured 2026-11-09 — see fixture
     // quota-exhausted-sample.json): upstream returns **HTTP 200** with
     // `{"code":1005,"msg":"exceed quota limit"}`. Status-based classification
@@ -507,14 +561,14 @@ export async function proxyRequest(
           // Single-account pass-through parity: the only account is not
           // marked exhausted (the client sees the 1005 body and decides).
           classifiedQuotaExhausted = true;
-          if (pool.accountCount() > 1) pool.markExhausted(reservation.accountId);
-          if (debug) debugError(reqId, "account_quota_exhausted", `${reservation.accountId} biz 1005 exceed quota limit`);
-          console.log(`${reqId} pool: account ${reservation.accountId} quota exhausted (biz 1005)`);
+          if (pool.accountCount() > 1) pool.markExhausted(booked.accountId);
+          if (debug) debugError(reqId, "account_quota_exhausted", `${booked.accountId} biz 1005 exceed quota limit`);
+          console.log(`${reqId} pool: account ${booked.accountId} quota exhausted (biz 1005)`);
           // Failover: headers not sent downstream yet, body replayable —
           // rotate to a healthy account now rather than handing the client a
           // disguised quota error.
-          if (attemptIndex < failoverAttempts) {
-            triedAccounts.add(reservation.accountId);
+          if (attemptIndex < failoverAttempts && reservation) {
+            triedAccounts.add(booked.accountId);
             reservation.release();
             reservation = null;
             try {
@@ -543,34 +597,34 @@ export async function proxyRequest(
         const retryAtMs = ra !== null && Number.isFinite(Number(ra))
           ? Date.now() + Number(ra) * 1000
           : undefined;
-        pool.note429(reservation.accountId, Date.now());
+        pool.note429(booked.accountId, Date.now());
         // Global-429 evidence: many DISTINCT accounts 429ing in a short
         // window means the limit is IP/service-wide — per-account cooling
         // with 2 accounts would alternate drains. Cooldown the whole pool.
         if (pool.isGlobal429()) {
           const poolRetrySec = ra !== null && Number.isFinite(Number(ra)) ? Number(ra) : 30;
           pool.coolAll(Date.now() + poolRetrySec * 1000);
-          if (debug) debugError(reqId, "global_429", `${reservation.accountId} 429 — pool-wide cooldown ${poolRetrySec}s`);
+          if (debug) debugError(reqId, "global_429", `${booked.accountId} 429 — pool-wide cooldown ${poolRetrySec}s`);
           console.log(`${reqId} pool: suspected GLOBAL 429 (service/IP-level) — pool cooldown ${poolRetrySec}s`);
         } else {
-          pool.cool(reservation.accountId, retryAtMs);
-          if (debug) debugError(reqId, "account_rate_limited", `${reservation.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
+          pool.cool(booked.accountId, retryAtMs);
+          if (debug) debugError(reqId, "account_rate_limited", `${booked.accountId} cooling${ra !== null ? ` ${ra}s` : ""}`);
         }
       }
     } else if (upstreamResp.ok && !classifiedQuotaExhausted) {
       // A 200-with-1005 is NOT a success (it heals exhausted — the exact
       // opposite of what the classification just decided).
-      pool.noteSuccess(reservation.accountId);
+      pool.noteSuccess(booked.accountId);
     } else if (upstreamResp.status >= 400) {
       // Unknown error — log status + biz code + redacted headers so real
       // samples accumulate for ticket #5's matchers. Never rotate here.
-      pool.noteFailure(reservation.accountId);
+      pool.noteFailure(booked.accountId);
       const redacted = new Headers(upstreamResp.headers);
       for (const h of [...redacted.keys()]) {
         if (/authorization|x-api-key|cookie|set-cookie|x-client-sig/i.test(h)) redacted.set(h, "[redacted]");
       }
       const bodyPreview = await upstreamResp.clone().text().then((t) => t.slice(0, 400)).catch(() => "<unreadable>");
-      console.log(`${reqId} pool: unknown upstream error status=${upstreamResp.status} account=${reservation.accountId} headers=${JSON.stringify([...redacted])} body=${bodyPreview}`);
+      console.log(`${reqId} pool: unknown upstream error status=${upstreamResp.status} account=${booked.accountId} headers=${JSON.stringify([...redacted])} body=${bodyPreview}`);
     }
   }
 
@@ -696,54 +750,7 @@ export async function proxyRequest(
 
   const isSSE = upstreamResp.headers.get("content-type")?.includes("text/event-stream") ?? false;
 
-  // Pool release on EVERY exit path: attach to the response body (stream end,
-  // client abort → stream cancel, upstream error) — release() is idempotent,
-  // so double-wiring is safe. `finishWith` is identity in no-pool mode.
-  const finishWith = (resp: Response): Response => {
-    if (!reservation) return resp;
-    // Debug-only account attribution — never leaks account ids to clients
-    // unless the operator explicitly runs `serve debug`.
-    if (debug && !resp.headers.has("x-zcode-account")) {
-      resp.headers.set("x-zcode-account", reservation.accountId);
-    }
-    if (resp.body) {
-      // Wrap (not tee) the body so EVERY consumer path releases the pool
-      // slot: full read (pull exhaustion), client cancel (cancel() hook —
-      // Bun 1.4 semantics: a tee branch's cancel waits for the other branch,
-      // which deadlocks the release when the other consumer is a blackhole
-      // pipeTo on a never-ending stream), and error (pull rethrow + release).
-      const source = resp.body.getReader();
-      let released = false;
-      const releaseOnce = () => {
-        if (released) return;
-        released = true;
-        reservation!.release();
-      };
-      const wrapped = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          try {
-            const { done, value } = await source.read();
-            if (done) {
-              releaseOnce();
-              controller.close();
-            } else {
-              controller.enqueue(value);
-            }
-          } catch (err) {
-            releaseOnce();
-            controller.error(err);
-          }
-        },
-        cancel(reason) {
-          releaseOnce();
-          try { void source.cancel(reason); } catch {}
-        },
-      });
-      return new Response(wrapped, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
-    }
-    reservation.release();
-    return resp;
-  };
+
 
   if (translateOpenAIToAnthropic) {
     if (!upstreamResp.ok) {
@@ -785,6 +792,8 @@ export async function proxyRequest(
   noteInFlightEnded();
   return finishWith(passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq)));
   } // while (true) — account failover loop
+  // Unreachable: every loop path returns. Satisfies the Response return type.
+  throw new Error("unreachable: failover loop exited without a response");
 }
 
 export function shouldUseOrderedTransport(clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {
