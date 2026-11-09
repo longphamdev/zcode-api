@@ -71,11 +71,24 @@ export class MetricsRegistry {
     return m;
   }
 
+  /** Bounded model-key set — model comes from requests (external input);
+   *  a hostile client could invent thousands of distinct model strings. */
+  private static MAX_MODEL_KEYS = 50;
+
   /** Record one proxied request for (account, requested model). */
   recordRequest(accountId: string, model: string, label?: string): void {
     const m = this.account(accountId, label);
     m.totals.requests++;
     const key = model || "unknown";
+    if (!m.models[key] && Object.keys(m.models).length >= MetricsRegistry.MAX_MODEL_KEYS) {
+      // Over cap: attribute to "unknown" instead of growing unbounded.
+      m.models.unknown ??= emptyCounters();
+      m.models.unknown.requests++;
+      const hour = new Date().toISOString().slice(0, 13);
+      m.hourly[hour] = (m.hourly[hour] ?? 0) + 1;
+      this.pruneHourly(m);
+      return;
+    }
     m.models[key] ??= emptyCounters();
     m.models[key].requests++;
     const hour = new Date().toISOString().slice(0, 13);

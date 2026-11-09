@@ -19,6 +19,7 @@ import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute 
 import { handleMcpRoute, type McpRouteOptions } from "./routes-mcp.js";
 import { handleQuota } from "./routes-quota.js";
 import { handleAdminState } from "./routes-admin.js";
+import { ADMIN_DASHBOARD_HTML } from "./admin-html.js";
 import { errorResponse } from "../proxy/handler.js";
 import type { ResponseStore } from "../responses/store.js";
 
@@ -116,6 +117,15 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
 
     if (path === "/admin/state" && method === "GET") {
       return handleAdminState(req, { proxyApiKey: config.auth.proxyApiKey });
+    }
+
+    if (path === "/admin" && method === "GET") {
+      // HTML dashboard. Read-only; the fetch inside passes ?key= as x-api-key
+      // when the browser cannot set headers. Binds loopback by default.
+      return new Response(ADMIN_DASHBOARD_HTML, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
     }
 
     if (path === "/v1/messages" && method === "POST") {
